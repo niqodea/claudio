@@ -18,25 +18,19 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::cursor::{self, Hide, MoveTo, SetCursorStyle, Show};
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEvent, KeyEventKind,
 };
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
-use edtui::actions::{DeleteWordBackward, InsertChar, LineBreak, RemoveChar, ReplaceChar};
-use edtui::events::{KeyEventHandler, KeyEventRegister, KeyInput};
-use edtui::{EditorEventHandler, EditorMode, EditorState, EditorTheme, EditorView, Index2, Lines};
-use ratatui_core::buffer::Buffer;
-use ratatui_core::layout::Rect;
-use ratatui_core::style::{Color, Modifier, Style};
-use ratatui_core::widgets::Widget;
 use unicode_width::UnicodeWidthStr;
 
 use crate::context::COLD_COLOR;
 use crate::keys::{self, Action, Phase};
 use crate::limits::{Level, limit_level};
-use crate::render::{BAR_COLOR, Output, STATUS_COLOR, Status, answer_label, marks, start_bar_row};
+use crate::render::{Output, STATUS_COLOR, Status, answer_label, marks, start_bar_row};
 use crate::status;
 use crate::terminal::{Settings, run_in_terminal};
+use crate::vi::{Editor, Effect, Mode};
+use crate::wrap;
 use crate::{Shared, lock};
 
 const RESET: &str = "\x1b[0m";
@@ -90,13 +84,7 @@ pub struct InputLine {
     /// The terminal's settings from before the client changed them, for the programs the
     /// client runs in it.
     original_settings: Settings,
-    state: EditorState,
-    keys: EditorEventHandler,
-    /// Whether the last key edtui read takes a character next, like `f`, which then goes to
-    /// edtui whatever it is.
-    takes_character: bool,
-    /// Whether `r` waits for the character that replaces the one under the cursor.
-    is_replacing: bool,
+    editor: Editor,
     layout: Layout,
     /// The first row of the text the box shows.
     scroll: u16,
@@ -137,10 +125,7 @@ impl InputLine {
             editor_command,
             full_view,
             original_settings,
-            state: insert_at_end(""),
-            keys: vi_keys(),
-            takes_character: false,
-            is_replacing: false,
+            editor: Editor::new(""),
             layout,
             scroll: 0,
             end: End::Before(row.min(lowest)),
@@ -154,8 +139,10 @@ impl InputLine {
     /// Reads the input line, starting from `draft`, while the conversation goes on above it.
     pub fn read(&mut self, phase: Phase, draft: &str) -> Result<Outcome, String> {
         lock(&self.shared).phase = phase;
+        // A command typed for another line has nothing left to act on
+        self.editor.cancel();
         if self.text() != draft {
-            self.state = insert_at_end(draft);
+            self.editor.replace(draft);
         }
         self.draw()?;
         loop {
@@ -210,7 +197,7 @@ impl InputLine {
     }
 
     fn text(&self) -> String {
-        self.state.lines.to_string()
+        self.editor.text()
     }
 
     /// The row of the label: right below the conversation's end, down to the lowest row the
@@ -227,16 +214,23 @@ impl InputLine {
     /// Acts on a key, with an outcome for one that ends the reading.
     fn key(&mut self, key: KeyEvent) -> Result<Option<Outcome>, String> {
         let phase = lock(&self.shared).phase.clone();
-        let action = keys::action(&phase, &key, self.text().is_empty());
-        // A key the session acts on ends what the vi keys were in the middle of
+        let action = keys::action(
+            &phase,
+            &key,
+            self.editor.is_empty(),
+            self.editor.awaits_character(),
+        );
+        // A key the session acts on ends the command the vi keys were in the middle of
         if action != Action::Edit {
-            self.is_replacing = false;
-            self.takes_character = false;
-            self.keys = vi_keys();
+            self.editor.cancel();
         }
         match action {
-            Action::Edit => self.edit(key)?,
-            Action::Clear => self.state = insert_at_end(""),
+            Action::Edit => {
+                if self.editor.press(&key) == Effect::OpenEditor {
+                    self.edit_in_editor()?;
+                }
+            }
+            Action::Clear => self.editor.replace(""),
             Action::Send => return Ok(Some(Outcome::Send(self.text()))),
             Action::Stop => return Ok(Some(Outcome::Stop)),
             Action::End => return Ok(Some(Outcome::End)),
@@ -247,62 +241,8 @@ impl InputLine {
         Ok(None)
     }
 
-    /// Edits the text with the vi keys, and the client's own: `:` opens the editor, and `r`
-    /// replaces the character under the cursor with the next one, or with a line break.
-    fn edit(&mut self, key: KeyEvent) -> Result<(), String> {
-        let control = key.modifiers.contains(KeyModifiers::CONTROL);
-        if self.is_replacing {
-            self.is_replacing = false;
-            match key.code {
-                KeyCode::Char(character) if !control => self.state.execute(ReplaceChar(character)),
-                KeyCode::Enter => self.break_line_at_cursor(),
-                _ => {}
-            }
-            return Ok(());
-        }
-        let is_normal = self.state.mode == EditorMode::Normal && !self.takes_character;
-        match key.code {
-            KeyCode::Char(':') if is_normal => self.edit_in_editor()?,
-            KeyCode::Char('r') if is_normal && !control => self.is_replacing = true,
-            _ => {
-                let mode = self.state.mode;
-                self.takes_character = !self.takes_character
-                    && matches!(mode, EditorMode::Normal | EditorMode::Visual)
-                    && matches!(key.code, KeyCode::Char('f' | 't' | 'F' | 'T'));
-                self.keys.on_key_event(key, &mut self.state);
-                return Ok(());
-            }
-        }
-        // A key the client acts on itself ends any sequence edtui was in the middle of
-        self.keys = vi_keys();
-        self.takes_character = false;
-        Ok(())
-    }
-
-    /// Replaces the character under the cursor with a line break, as `r` and Enter do in vim.
-    fn break_line_at_cursor(&mut self) {
-        let row = self.state.cursor.row;
-        let length = self.state.lines.len_col(row).unwrap_or(0);
-        if length == 0 {
-            return;
-        }
-        let is_last = self.state.cursor.col + 1 >= length;
-        self.state.execute(RemoveChar(1));
-        if is_last {
-            self.state.cursor = Index2::new(row, length - 1);
-        }
-        self.state.execute(LineBreak(1));
-    }
-
-    /// Inserts pasted text at the cursor, as typed, in normal mode too.
     fn paste(&mut self, text: &str) {
-        let text = text.replace("\r\n", "\n").replace('\r', "\n");
-        if self.state.mode != EditorMode::Insert {
-            self.state.mode = EditorMode::Insert;
-        }
-        for character in text.chars() {
-            self.state.execute(InsertChar(character));
-        }
+        self.editor.paste(text);
     }
 
     /// Opens the text in the user's editor, and takes back what it saved, to add to or send.
@@ -320,7 +260,7 @@ impl InputLine {
         if status.success() {
             // Editors end a file with a line break, which the message does not have
             let text = text.strip_suffix('\n').unwrap_or(&text);
-            self.state = insert_at_end(text);
+            self.editor.replace(text);
         }
         Ok(())
     }
@@ -469,35 +409,23 @@ impl InputLine {
             out.extend(format!("{}{}{RESET}", start_bar_row(), self.label).as_bytes());
             widths.push(visible_width(&self.label));
         }
-        // edtui scrolls by whole lines, which a line taller than the box defeats, so it draws the
-        // whole text, and the box shows the rows around the cursor
-        let area = Rect::new(0, 0, layout.width, text_rows(&self.text(), layout.width));
-        let mut buffer = Buffer::empty(area);
-        let base = Style::default().bg(Color::Indexed(BAR_COLOR));
-        self.state.set_viewport_offset(0, 0);
-        EditorView::new(&mut self.state)
-            .theme(
-                EditorTheme::default()
-                    .base(base)
-                    .selection_style(base.add_modifier(Modifier::REVERSED))
-                    .hide_cursor()
-                    .hide_status_line(),
-            )
-            .wrap(true)
-            .render(area, &mut buffer);
-        let cursor = self.state.cursor_screen_position().unwrap_or_default();
-        let used_rows = (0..area.height)
-            .rev()
-            .find(|&y| row_text(&buffer, y, layout.width).1 > 0)
-            .map_or(0, |last| last + 1);
+        let wrapped = wrap::wrap(
+            &self.text(),
+            self.editor.cursor(),
+            self.editor.selection(),
+            usize::from(layout.width),
+        );
+        let to_row = |index: usize| u16::try_from(index).unwrap_or(u16::MAX);
+        let (cursor_x, cursor_y) = (to_row(wrapped.cursor_column), to_row(wrapped.cursor_row));
+        let used_rows = to_row(wrapped.rows.len());
         // The box scrolls as little as keeps the cursor in it, and shows no empty rows below the
         // text that the text above could fill
         let rows = layout.input_rows;
         self.scroll = self
             .scroll
-            .min(used_rows.max(cursor.y + 1).saturating_sub(rows))
-            .min(cursor.y)
-            .max((cursor.y + 1).saturating_sub(rows));
+            .min(used_rows.max(cursor_y + 1).saturating_sub(rows))
+            .min(cursor_y)
+            .max((cursor_y + 1).saturating_sub(rows));
         let mut row_widths = Vec::new();
         for y in 0..rows {
             let row = label_row + layout.label_rows + y;
@@ -505,27 +433,26 @@ impl InputLine {
                 break;
             }
             put!(out, MoveTo(0, row));
-            let (text, width) = if self.scroll + y < area.height {
-                row_text(&buffer, self.scroll + y, layout.width)
-            } else {
-                (String::new(), 0)
-            };
+            let (text, width) = wrapped
+                .rows
+                .get(usize::from(self.scroll + y))
+                .map_or(("", 0), |row| (row.text.as_str(), row.width));
             out.extend(format!("{}{text}{RESET}", start_bar_row()).as_bytes());
             row_widths.push(width);
         }
-        let cursor_in_box = cursor.y - self.scroll;
+        let cursor_in_box = cursor_y - self.scroll;
         let cursor_row =
             (label_row + layout.label_rows + cursor_in_box).min(layout.height.saturating_sub(1));
         widths.extend(row_widths.iter().take(usize::from(cursor_in_box)));
         self.drawn = Drawn {
             widths_above_cursor: widths,
-            cursor_column: cursor.x,
+            cursor_column: cursor_x,
         };
-        let shape = match self.state.mode {
-            EditorMode::Insert => SetCursorStyle::SteadyBar,
-            _ => SetCursorStyle::SteadyBlock,
+        let shape = match self.editor.mode() {
+            Mode::Insert => SetCursorStyle::SteadyBar,
+            Mode::Normal | Mode::Visual | Mode::VisualLine => SetCursorStyle::SteadyBlock,
         };
-        put!(out, MoveTo(cursor.x, cursor_row), shape, Show);
+        put!(out, MoveTo(cursor_x, cursor_row), shape, Show);
         out.extend(END_FRAME.as_bytes());
         write_out(&out)
     }
@@ -704,102 +631,6 @@ struct Drawn {
     /// a narrower screen splits into the rows that text then takes.
     widths_above_cursor: Vec<usize>,
     cursor_column: u16,
-}
-
-/// edtui's vi keys, with Ctrl-W in insert mode deleting the word before the cursor, as in vim.
-fn vi_keys() -> EditorEventHandler {
-    let mut keys = KeyEventHandler::vim_mode();
-    keys.insert(
-        KeyEventRegister::i(vec![KeyInput::ctrl('w')]),
-        DeleteWordBackward(1),
-    );
-    EditorEventHandler::new(keys)
-}
-
-/// A state holding `text`, in insert mode with the cursor at its end, where typing goes on.
-fn insert_at_end(text: &str) -> EditorState {
-    let mut state = EditorState::new(Lines::from(text));
-    let row = state.lines.len().saturating_sub(1);
-    let column = state.lines.len_col(row).unwrap_or(0);
-    state.cursor = Index2::new(row, column);
-    state.mode = EditorMode::Insert;
-    state
-}
-
-/// The rows `text` takes at `width`, at most: a row loses a column at most to a double-width
-/// character that does not fit at its end, and the cursor can rest past a full last row.
-fn text_rows(text: &str, width: u16) -> u16 {
-    let columns = usize::from(width.saturating_sub(1).max(1));
-    let rows: usize = text
-        .split('\n')
-        .map(|line| line.width().div_ceil(columns).max(1))
-        .sum();
-    u16::try_from(rows + 1).unwrap_or(u16::MAX)
-}
-
-/// The row `y` of `buffer` as text with its styles, without the empty cells at its end, and
-/// the width of that text.
-fn row_text(buffer: &Buffer, y: u16, width: u16) -> (String, usize) {
-    let cells: Vec<_> = (0..width).map(|x| &buffer[(x, y)]).collect();
-    let used = cells
-        .iter()
-        .rposition(|cell| cell.symbol() != " " || cell.modifier.contains(Modifier::REVERSED))
-        .map_or(0, |last| last + 1);
-    let mut text = String::new();
-    let mut style = None;
-    for cell in &cells[..used] {
-        let cell_style = (cell.fg, cell.modifier);
-        if style != Some(cell_style) {
-            text.push_str(&sgr(cell.fg, cell.modifier));
-            style = Some(cell_style);
-        }
-        text.push_str(cell.symbol());
-    }
-    (text, used)
-}
-
-/// The escape sequence for a cell's foreground and modifiers, on the bar.
-fn sgr(foreground: Color, modifier: Modifier) -> String {
-    let mut codes = vec!["0".to_string(), format!("48;5;{BAR_COLOR}")];
-    match foreground {
-        Color::Reset => {}
-        Color::Indexed(index) => codes.push(format!("38;5;{index}")),
-        Color::Rgb(red, green, blue) => codes.push(format!("38;2;{red};{green};{blue}")),
-        named => codes.push(named_foreground(named).to_string()),
-    }
-    for (flag, code) in [
-        (Modifier::BOLD, "1"),
-        (Modifier::DIM, "2"),
-        (Modifier::ITALIC, "3"),
-        (Modifier::UNDERLINED, "4"),
-        (Modifier::REVERSED, "7"),
-    ] {
-        if modifier.contains(flag) {
-            codes.push(code.to_string());
-        }
-    }
-    format!("\x1b[{}m", codes.join(";"))
-}
-
-fn named_foreground(color: Color) -> u8 {
-    match color {
-        Color::Black => 30,
-        Color::Red => 31,
-        Color::Green => 32,
-        Color::Yellow => 33,
-        Color::Blue => 34,
-        Color::Magenta => 35,
-        Color::Cyan => 36,
-        Color::Gray => 37,
-        Color::DarkGray => 90,
-        Color::LightRed => 91,
-        Color::LightGreen => 92,
-        Color::LightYellow => 93,
-        Color::LightBlue => 94,
-        Color::LightMagenta => 95,
-        Color::LightCyan => 96,
-        _ => 97,
-    }
 }
 
 /// The columns `text` takes on screen, without its escape sequences.

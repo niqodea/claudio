@@ -20,6 +20,8 @@ mod session;
 mod status;
 mod table;
 mod terminal;
+mod vi;
+mod wrap;
 
 use std::env;
 use std::io::{BufRead, BufReader};

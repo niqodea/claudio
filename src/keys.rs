@@ -32,16 +32,18 @@ pub enum Action {
     Ignore,
 }
 
-/// What `key` does in `phase`, with `is_empty` telling whether the input line has no text.
-/// Ctrl-C empties a line with text before it stops anything, and Ctrl-D ends only on an empty
-/// line, as in a shell.
+/// What `key` does in `phase`, with `is_empty` telling whether the input line has no text, and
+/// `awaits_character` whether the vi keys take the next key as a character, like after `r`,
+/// which then takes a plain character or Enter. Ctrl-C empties a line with text before it stops
+/// anything, and Ctrl-D ends only on an empty line, as in a shell.
 /// Ref: <https://www.gnu.org/software/bash/manual/html_node/Commands-For-Text.html>, on Ctrl-D
 /// as the end of input only on an empty line
-pub fn action(phase: &Phase, key: &KeyEvent, is_empty: bool) -> Action {
+pub fn action(phase: &Phase, key: &KeyEvent, is_empty: bool, awaits_character: bool) -> Action {
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
     match (phase, key.code) {
         (Phase::Ending, KeyCode::Char('c')) if control => Action::Stop,
         (Phase::Ending, _) => Action::Ignore,
+        (_, KeyCode::Char(_) | KeyCode::Enter) if awaits_character && !control => Action::Edit,
         (_, KeyCode::Char('c')) if control && !is_empty => Action::Clear,
         (_, KeyCode::Char('c')) if control => Action::Stop,
         (_, KeyCode::Char('d')) if control && is_empty => Action::End,
@@ -81,14 +83,17 @@ mod tests {
                 (plain(KeyCode::Esc), false, Action::Edit),
             ];
             for (key, is_empty, expected) in cases {
-                assert_eq!(action(&phase, &key, is_empty), expected);
+                assert_eq!(action(&phase, &key, is_empty, false), expected);
             }
         }
     }
 
     #[test]
     fn the_ending_takes_only_ctrl_c_which_stops() {
-        assert_eq!(action(&Phase::Ending, &control('c'), true), Action::Stop);
+        assert_eq!(
+            action(&Phase::Ending, &control('c'), true, false),
+            Action::Stop
+        );
         for key in [
             control('d'),
             control('o'),
@@ -96,7 +101,21 @@ mod tests {
             plain(KeyCode::Enter),
             plain(KeyCode::Char('a')),
         ] {
-            assert_eq!(action(&Phase::Ending, &key, true), Action::Ignore);
+            assert_eq!(action(&Phase::Ending, &key, true, false), Action::Ignore);
         }
+    }
+
+    #[test]
+    fn a_character_the_vi_keys_await_goes_to_them_and_the_session_keys_still_act() {
+        let phase = Phase::Writing;
+        assert_eq!(
+            action(&phase, &plain(KeyCode::Enter), false, true),
+            Action::Edit
+        );
+        assert_eq!(
+            action(&phase, &plain(KeyCode::Char('x')), false, true),
+            Action::Edit
+        );
+        assert_eq!(action(&phase, &control('c'), false, true), Action::Clear);
     }
 }

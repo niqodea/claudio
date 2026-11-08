@@ -8,6 +8,28 @@ Claude Code without the TUI: just input and output.
 cargo install --path .
 ```
 
+## Claude Code
+
+claudio drives `claude -p`, and passes its arguments on to `claude`.
+
+claudio assumes a session keeps one permission mode, so it has no key to switch modes and shows none on the label row.
+Set the mode you always use in `~/.claude/settings.json`:
+
+```json
+{ "permissions": { "defaultMode": "<mode>" } }
+```
+
+When the shell has `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` set, Claude Code pays with them instead of your subscription.
+The interactive Claude asks first, `claude -p` does not, so claudio warns in orange as it starts.
+To always use the subscription, add this to `~/.claude/settings.json`, which empties both for every Claude Code session:
+
+```json
+{ "env": { "ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "" } }
+```
+
+Claude Code's [headless docs](https://code.claude.com/docs/en/headless#start-faster-with-bare-mode) say `--bare` will become the default for `-p` in a future release.
+Bare mode ignores the subscription login, as well as CLAUDE.md files, hooks, plugins and auto-memory, so from that release claudio needs whatever turns it back off.
+
 ## Keys
 
 Keys come in two kinds.

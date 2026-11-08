@@ -336,11 +336,7 @@ impl Output {
         }
         self.begin(Section::Tools);
         // The outcome is all the line adds to the call's line, so the rest stays in the back
-        let outcome = if result.is_error {
-            format!("{RED}✗")
-        } else {
-            format!("{GREEN}✓")
-        };
+        let outcome = if result.is_error { "✗" } else { "✓" };
         let text = result.text.as_deref().map_or("(no text)", str::trim);
         let mut lines = text.lines();
         let first = lines.next().unwrap_or("(no output)");
@@ -352,7 +348,7 @@ impl Output {
         let label = call.map_or_else(String::new, |call| {
             format!("#{:02x} {}: ", call.tag, call.name)
         });
-        self.push(format!("{outcome}{RESET} {DIM}{label}{first}{more}{RESET}"));
+        self.push(format!("{outcome} {DIM}{label}{first}{more}{RESET}"));
     }
 
     pub fn show_ask(&mut self, ask: &Ask) {
@@ -732,7 +728,7 @@ mod tests {
             lines[2],
             format!("{BOLD}○{RESET} {DIM}#01{RESET}{BOLD} Read{RESET} b.txt")
         );
-        assert_eq!(lines[3], format!("{GREEN}✓{RESET} {DIM}#01 Read: b{RESET}"));
+        assert_eq!(lines[3], format!("✓ {DIM}#01 Read: b{RESET}"));
     }
 
     fn tool_use(name: &str, input: Value) -> ToolUse {

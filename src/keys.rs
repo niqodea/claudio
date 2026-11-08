@@ -1,5 +1,6 @@
-//! What each key does in each phase of the session, in one place. The keys that act on the
-//! session come first in every phase, so the vi keys of the input box only ever get the rest.
+//! What each key does, in two layers. The session keys, Ctrl with a letter, act on the session
+//! the same in every vi mode, so they are known from the key alone. Every other key belongs to
+//! the text: Enter sends it, and the rest edit it with the vi keys of the input box.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -21,44 +22,60 @@ impl Phase {
     }
 }
 
+/// What a session key does. None of them changes the text.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum SessionKey {
+    /// Ctrl-C: stops Claude's turn, refusing the tool that asks.
+    Stop,
+    /// Ctrl-D: ends the session, refusing the tool that asks.
+    End,
+    /// Ctrl-O: shows the whole conversation.
+    ShowFullView,
+    /// Ctrl-S: shows the status.
+    ShowStatus,
+}
+
+impl SessionKey {
+    /// The session key that `key` is, from the key alone.
+    fn of(key: &KeyEvent) -> Option<SessionKey> {
+        if !key.modifiers.contains(KeyModifiers::CONTROL) {
+            return None;
+        }
+        match key.code {
+            KeyCode::Char('c') => Some(SessionKey::Stop),
+            KeyCode::Char('d') => Some(SessionKey::End),
+            KeyCode::Char('o') => Some(SessionKey::ShowFullView),
+            KeyCode::Char('s') => Some(SessionKey::ShowStatus),
+            _ => None,
+        }
+    }
+}
+
 /// What a key does.
 #[derive(Debug, PartialEq)]
 pub enum Action {
-    /// Edits the text, with the input box's vi keys.
-    Edit,
-    /// Empties the input line.
-    Clear,
+    Session(SessionKey),
     /// Sends the text, as a message or an answer.
     Send,
-    /// Stops Claude's turn, refusing the tool that asks.
-    Stop,
-    /// Ends the session, refusing the tool that asks.
-    End,
-    ShowFullView,
-    ShowStatus,
+    /// Edits the text, with the input box's vi keys.
+    Edit,
     Ignore,
 }
 
-/// What `key` does in `phase`, with `is_empty` telling whether the input line has no text, and
+/// What `key` does in `phase`, with `is_empty` telling whether the input has no text, and
 /// `awaits_character` whether the vi keys take the next key as a character, like after `r`,
-/// which then takes a plain character or Enter. Ctrl-C empties a line with text before it stops
-/// anything, and Ctrl-D ends only on an empty line, as in a shell.
+/// which then takes Enter too. Ctrl-D ends only an empty input, as in a shell, so a draft is
+/// never lost to it.
 /// Ref: <https://www.gnu.org/software/bash/manual/html_node/Commands-For-Text.html>, on Ctrl-D
 /// as the end of input only on an empty line
 pub fn action(phase: &Phase, key: &KeyEvent, is_empty: bool, awaits_character: bool) -> Action {
-    let control = key.modifiers.contains(KeyModifiers::CONTROL);
-    match (phase, key.code) {
-        (Phase::Ending, KeyCode::Char('c')) if control => Action::Stop,
-        _ if !phase.takes_text() => Action::Ignore,
-        (_, KeyCode::Char(_) | KeyCode::Enter) if awaits_character && !control => Action::Edit,
-        (_, KeyCode::Char('c')) if control && !is_empty => Action::Clear,
-        (_, KeyCode::Char('c')) if control => Action::Stop,
-        (_, KeyCode::Char('d')) if control && is_empty => Action::End,
-        (_, KeyCode::Char('d')) if control => Action::Ignore,
-        (_, KeyCode::Char('o')) if control => Action::ShowFullView,
-        (_, KeyCode::Char('s')) if control => Action::ShowStatus,
-        (_, KeyCode::Enter) => Action::Send,
-        _ => Action::Edit,
+    match (phase, SessionKey::of(key)) {
+        (Phase::Ending, Some(SessionKey::Stop)) => Action::Session(SessionKey::Stop),
+        (Phase::Ending, _) => Action::Ignore,
+        (_, Some(SessionKey::End)) if !is_empty => Action::Ignore,
+        (_, Some(session_key)) => Action::Session(session_key),
+        (_, None) if key.code == KeyCode::Enter && !awaits_character => Action::Send,
+        (_, None) => Action::Edit,
     }
 }
 
@@ -79,12 +96,17 @@ mod tests {
         let question = Phase::Answering("allow Bash? y/N".to_string());
         for phase in [Phase::Writing, question] {
             let cases = [
-                (control('c'), false, Action::Clear),
-                (control('c'), true, Action::Stop),
+                (control('c'), false, Action::Session(SessionKey::Stop)),
+                (control('c'), true, Action::Session(SessionKey::Stop)),
                 (control('d'), false, Action::Ignore),
-                (control('d'), true, Action::End),
-                (control('o'), true, Action::ShowFullView),
-                (control('s'), true, Action::ShowStatus),
+                (control('d'), true, Action::Session(SessionKey::End)),
+                (
+                    control('o'),
+                    false,
+                    Action::Session(SessionKey::ShowFullView),
+                ),
+                (control('s'), false, Action::Session(SessionKey::ShowStatus)),
+                (control('w'), false, Action::Edit),
                 (plain(KeyCode::Enter), false, Action::Send),
                 (plain(KeyCode::Char('r')), false, Action::Edit),
                 (plain(KeyCode::Esc), false, Action::Edit),
@@ -99,7 +121,7 @@ mod tests {
     fn the_ending_takes_only_ctrl_c_which_stops() {
         assert_eq!(
             action(&Phase::Ending, &control('c'), true, false),
-            Action::Stop
+            Action::Session(SessionKey::Stop)
         );
         for key in [
             control('d'),
@@ -123,6 +145,9 @@ mod tests {
             action(&phase, &plain(KeyCode::Char('x')), false, true),
             Action::Edit
         );
-        assert_eq!(action(&phase, &control('c'), false, true), Action::Clear);
+        assert_eq!(
+            action(&phase, &control('c'), false, true),
+            Action::Session(SessionKey::Stop)
+        );
     }
 }

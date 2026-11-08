@@ -24,7 +24,7 @@ use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlt
 use unicode_width::UnicodeWidthStr;
 
 use crate::context::COLD_COLOR;
-use crate::keys::{self, Action, Phase};
+use crate::keys::{self, Action, Phase, SessionKey};
 use crate::limits::{Level, limit_level};
 use crate::render::{Output, STATUS_COLOR, Status, answer_label, marks, start_bar_row};
 use crate::status;
@@ -65,8 +65,8 @@ macro_rules! put {
 pub enum Outcome {
     /// The user sends the text on the line.
     Send(String),
-    /// The user stops Claude's turn.
-    Stop,
+    /// The user stops Claude's turn, with the text on the line, which stays.
+    Stop(String),
     /// The user ends the session.
     End,
     /// Claude Code asked something, which the main thread acts on first, with the text on the
@@ -222,17 +222,16 @@ impl InputLine {
             self.editor.cancel();
         }
         match action {
+            Action::Session(SessionKey::Stop) => return Ok(Some(Outcome::Stop(self.text()))),
+            Action::Session(SessionKey::End) => return Ok(Some(Outcome::End)),
+            Action::Session(SessionKey::ShowFullView) => self.show_full_view()?,
+            Action::Session(SessionKey::ShowStatus) => self.show_status()?,
+            Action::Send => return Ok(Some(Outcome::Send(self.text()))),
             Action::Edit => {
                 if self.editor.press(&key) == Effect::OpenEditor {
                     self.edit_in_editor()?;
                 }
             }
-            Action::Clear => self.editor.replace(""),
-            Action::Send => return Ok(Some(Outcome::Send(self.text()))),
-            Action::Stop => return Ok(Some(Outcome::Stop)),
-            Action::End => return Ok(Some(Outcome::End)),
-            Action::ShowFullView => self.show_full_view()?,
-            Action::ShowStatus => self.show_status()?,
             Action::Ignore => {}
         }
         Ok(None)

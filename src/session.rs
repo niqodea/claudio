@@ -110,12 +110,12 @@ impl<'a> Conversation<'a> {
                         String::new()
                     }
                 }
-                Outcome::Stop => {
+                Outcome::Stop(text) => {
                     let is_working = lock(&self.session.shared).output.status() != Status::Idle;
                     if is_working {
                         self.interrupt(Interruption::Stop)?;
                     }
-                    String::new()
+                    text
                 }
                 // Claude Code asked something, which the next round of the loop answers
                 Outcome::Break(text) => text,
@@ -249,7 +249,8 @@ impl<'a> Conversation<'a> {
                 }
                 // Claude Code asked something more, which waits for this answer
                 Outcome::Break(text) => draft = text,
-                Outcome::Stop => return Ok(Err(Leave::Stop)),
+                // The answer goes with the question it answers
+                Outcome::Stop(_) => return Ok(Err(Leave::Stop)),
                 Outcome::End => return Ok(Err(Leave::End)),
             }
         }
@@ -335,7 +336,7 @@ impl Ending<'_> {
                 Some(Input::Ask(_) | Input::Unsupported { .. }) | None => {}
             }
             match self.session.input.read(Phase::Ending, "")? {
-                Outcome::Stop => self.interrupt()?,
+                Outcome::Stop(_) => self.interrupt()?,
                 // Claude Code fails what it asks once its input closed, and the ending takes no
                 // other key
                 Outcome::Break(_) | Outcome::Send(_) | Outcome::End => {}

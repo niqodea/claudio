@@ -86,8 +86,7 @@ fn run() -> Result<ExitCode, String> {
         .env("CLAUDE_CODE_SDK_READS_SESSION_STATE", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        // Its error output reaches the terminal through the output, above the input line that
-        // reedline redraws
+        // Its error output reaches the terminal through the output, above the input line
         .stderr(Stdio::piped())
         // Keys reach only this process, which turns Ctrl-C into an interrupt of the turn
         .process_group(0)

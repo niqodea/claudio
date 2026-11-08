@@ -55,8 +55,8 @@ const SUMMARY_FIELDS: [(&str, &str); 10] = [
     ("Write", "file_path"),
 ];
 
-/// The conversation's lines that wait for reedline to print them above the input line, and
-/// what Claude does meanwhile.
+/// The conversation's lines that wait to be printed above the input line, and what Claude does
+/// meanwhile.
 pub struct Output {
     lines: Vec<String>,
     /// The file of the full view: the lines the screen shows, each followed by what it leaves

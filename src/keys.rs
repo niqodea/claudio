@@ -14,6 +14,13 @@ pub enum Phase {
     Ending,
 }
 
+impl Phase {
+    /// Whether the input line takes text, typed or pasted.
+    pub fn takes_text(&self) -> bool {
+        !matches!(self, Phase::Ending)
+    }
+}
+
 /// What a key does.
 #[derive(Debug, PartialEq)]
 pub enum Action {
@@ -42,7 +49,7 @@ pub fn action(phase: &Phase, key: &KeyEvent, is_empty: bool, awaits_character: b
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
     match (phase, key.code) {
         (Phase::Ending, KeyCode::Char('c')) if control => Action::Stop,
-        (Phase::Ending, _) => Action::Ignore,
+        _ if !phase.takes_text() => Action::Ignore,
         (_, KeyCode::Char(_) | KeyCode::Enter) if awaits_character && !control => Action::Edit,
         (_, KeyCode::Char('c')) if control && !is_empty => Action::Clear,
         (_, KeyCode::Char('c')) if control => Action::Stop,

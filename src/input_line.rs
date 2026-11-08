@@ -63,11 +63,11 @@ macro_rules! put {
 
 /// How reading the input line ended.
 pub enum Outcome {
-    /// Enter, with the text on the line.
+    /// The user sends the text on the line.
     Send(String),
-    /// Ctrl-C on an empty line.
+    /// The user stops Claude's turn.
     Stop,
-    /// Ctrl-D on an empty line.
+    /// The user ends the session.
     End,
     /// Claude Code asked something, which the main thread acts on first, with the text on the
     /// line.
@@ -146,7 +146,8 @@ impl InputLine {
         }
         self.draw()?;
         loop {
-            if self.break_signal.load(Ordering::Relaxed) {
+            // Taking the signal lets a line opened again for the same question wait for keys
+            if self.break_signal.swap(false, Ordering::Relaxed) {
                 return Ok(Outcome::Break(self.text()));
             }
             self.print_output()?;
@@ -162,7 +163,7 @@ impl InputLine {
                         return Ok(outcome);
                     }
                 }
-                Event::Paste(text) if self.takes_text() => self.paste(&text),
+                Event::Paste(text) if lock(&self.shared).phase.takes_text() => self.paste(&text),
                 Event::Resize(width, height) => self.resize(width, height)?,
                 _ => continue,
             }
@@ -207,10 +208,6 @@ impl InputLine {
     }
 
     /// Whether the input line takes what the user types, which the ending has no one to read.
-    fn takes_text(&self) -> bool {
-        !matches!(lock(&self.shared).phase, Phase::Ending)
-    }
-
     /// Acts on a key, with an outcome for one that ends the reading.
     fn key(&mut self, key: KeyEvent) -> Result<Option<Outcome>, String> {
         let phase = lock(&self.shared).phase.clone();
@@ -266,9 +263,10 @@ impl InputLine {
     }
 
     /// Shows the status of the session as it stands, at the bottom of the terminal's alternate
-    /// screen, until the next key, which only closes it. The conversation stays as it was on the
-    /// main screen, and its new lines wait for the status to close. A resize meanwhile moves the
-    /// status to the new bottom and reaches the input box once the status closes.
+    /// screen, until the next key, which only closes it, or until Claude Code asks something.
+    /// The conversation stays as it was on the main screen, and its new lines wait for the
+    /// status to close. A resize meanwhile moves the status to the new bottom and reaches the
+    /// input box once the status closes. The main screen comes back whatever ends the status.
     fn show_status(&mut self) -> Result<(), String> {
         let lines = {
             let shared = lock(&self.shared);
@@ -284,30 +282,45 @@ impl InputLine {
         let mut out = Vec::new();
         put!(out, EnterAlternateScreen, Hide);
         write_out(&out)?;
+        let shown = self.show_status_until_closed(&lines);
+        let mut out = Vec::new();
+        put!(out, LeaveAlternateScreen);
+        let left = write_out(&out);
+        match shown? {
+            Some((width, height)) => left.and_then(|()| self.resize(width, height)),
+            None => left,
+        }
+    }
+
+    /// Draws the status's `lines` on the alternate screen until a key or a question from Claude
+    /// Code closes it. Returns the size of the last resize meanwhile, if any.
+    fn show_status_until_closed(&self, lines: &[String]) -> Result<Option<(u16, u16)>, String> {
         let mut height = self.layout.height;
         let mut resized = None;
-        loop {
-            let top = height.saturating_sub(u16::try_from(lines.len()).unwrap_or(u16::MAX));
-            let mut out = Vec::new();
-            put!(out, Clear(ClearType::All), MoveTo(0, top));
-            out.extend(lines.join("\r\n").as_bytes());
-            write_out(&out)?;
+        let mut is_drawn = false;
+        while !self.break_signal.load(Ordering::Relaxed) {
+            if !is_drawn {
+                let top = height.saturating_sub(u16::try_from(lines.len()).unwrap_or(u16::MAX));
+                let mut out = Vec::new();
+                put!(out, Clear(ClearType::All), MoveTo(0, top));
+                out.extend(lines.join("\r\n").as_bytes());
+                write_out(&out)?;
+                is_drawn = true;
+            }
+            if !event::poll(TICK).map_err(|error| cannot_read_terminal(&error))? {
+                continue;
+            }
             match event::read().map_err(|error| cannot_read_terminal(&error))? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => break,
                 Event::Resize(new_width, new_height) => {
                     height = new_height;
                     resized = Some((new_width, new_height));
+                    is_drawn = false;
                 }
                 _ => {}
             }
         }
-        let mut out = Vec::new();
-        put!(out, LeaveAlternateScreen);
-        write_out(&out)?;
-        match resized {
-            Some((width, height)) => self.resize(width, height),
-            None => Ok(()),
-        }
+        Ok(resized)
     }
 
     /// Shows the full view in less, from its end, where `F` follows the lines that keep coming

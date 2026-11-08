@@ -412,9 +412,9 @@ fn choose(question: &Question, text: &str) -> String {
 enum Leave {
     /// By answering it.
     Answered,
-    /// With Ctrl-C, which stops Claude's turn.
+    /// By stopping Claude's turn.
     Stop,
-    /// With Ctrl-D, which also ends the session.
+    /// By ending the session, which stops Claude's turn too.
     End,
 }
 

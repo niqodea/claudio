@@ -54,11 +54,11 @@ for line in sys.stdin:
                         "rate_limits": {
                             "five_hour": {
                                 "utilization": 62,
-                                "resets_at": f"{time.strftime('%Y-%m-%dT%H:%M:%S+00:00', time.gmtime(now + 2 * 3600))}",
+                                "resets_at": time.strftime('%Y-%m-%dT%H:%M:%S+00:00', time.gmtime(now + 2 * 3600)),
                             },
                             "seven_day": {
                                 "utilization": 81,
-                                "resets_at": f"{time.strftime('%Y-%m-%dT%H:%M:%S+00:00', time.gmtime(now + 4 * 86400))}",
+                                "resets_at": time.strftime('%Y-%m-%dT%H:%M:%S+00:00', time.gmtime(now + 4 * 86400)),
                             },
                         }
                     },

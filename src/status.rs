@@ -190,8 +190,8 @@ fn grouped(number: u64) -> String {
 }
 
 /// The local time of `at`, to the minute it falls in, followed by its day when that is not the
-/// day of `wall_now`. The status stays in the scrollback, where a clock time stays true while a
-/// countdown goes wrong.
+/// day of `wall_now`. The status is a snapshot, which stays on screen while time passes, where a
+/// clock time stays true and a countdown goes wrong.
 /// Ref: <https://design.gitlab.com/content/date-and-time>, on absolute times for what users act on
 fn clock(at: SystemTime, wall_now: SystemTime) -> String {
     let (at, now) = (to_local_time(at), to_local_time(wall_now));

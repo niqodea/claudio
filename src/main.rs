@@ -11,6 +11,7 @@
 mod code;
 mod context;
 mod input_line;
+mod keys;
 mod limits;
 mod markdown;
 mod protocol;
@@ -31,7 +32,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use context::Context;
-use input_line::{InputLine, Line, final_line};
+use input_line::{InputLine, final_line};
+use keys::Phase;
 use limits::Limits;
 use protocol::{Event, read_events, repeats_a_message};
 use render::Output;
@@ -40,8 +42,8 @@ use terminal::QuietTerminal;
 
 /// What the threads share, behind one lock, so that no lock waits on another.
 struct Shared {
-    /// What the input line is for, which the prompt reads.
-    line: Line,
+    /// What the user does on the input line, which its label shows.
+    phase: Phase,
     output: Output,
     context: Context,
     limits: Limits,
@@ -100,7 +102,7 @@ fn run() -> Result<ExitCode, String> {
         .tempfile()
         .map_err(|error| format!("Cannot create the file of the full view: {error}"))?;
     let shared = Arc::new(Mutex::new(Shared {
-        line: Line::Message,
+        phase: Phase::Writing,
         output: Output::new(
             full_view
                 .reopen()

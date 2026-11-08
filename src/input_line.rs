@@ -32,6 +32,7 @@ use ratatui_core::widgets::Widget;
 use unicode_width::UnicodeWidthStr;
 
 use crate::context::COLD_COLOR;
+use crate::keys::{self, Action, Phase};
 use crate::limits::{Level, limit_level};
 use crate::render::{BAR_COLOR, Output, STATUS_COLOR, Status, answer_label, marks, start_bar_row};
 use crate::status;
@@ -66,25 +67,16 @@ macro_rules! put {
     };
 }
 
-/// What the input line is for.
-#[derive(Clone)]
-pub enum Line {
-    Message,
-    /// The answer to what a tool asks, with the question.
-    Answer(String),
-    /// None, since the user has nothing more to say, while Claude finishes its work.
-    Ending,
-}
-
-/// How reading the input line ended, with the text on it.
+/// How reading the input line ended.
 pub enum Outcome {
-    /// Enter.
+    /// Enter, with the text on the line.
     Send(String),
-    /// Ctrl-C.
-    Interrupt(String),
-    /// Ctrl-D.
-    End(String),
-    /// Claude Code asked something, which the main thread acts on first.
+    /// Ctrl-C on an empty line.
+    Stop,
+    /// Ctrl-D on an empty line.
+    End,
+    /// Claude Code asked something, which the main thread acts on first, with the text on the
+    /// line.
     Break(String),
 }
 
@@ -160,8 +152,8 @@ impl InputLine {
     }
 
     /// Reads the input line, starting from `draft`, while the conversation goes on above it.
-    pub fn read(&mut self, line: Line, draft: &str) -> Result<Outcome, String> {
-        lock(&self.shared).line = line;
+    pub fn read(&mut self, phase: Phase, draft: &str) -> Result<Outcome, String> {
+        lock(&self.shared).phase = phase;
         if self.text() != draft {
             self.state = insert_at_end(draft);
         }
@@ -229,11 +221,35 @@ impl InputLine {
 
     /// Whether the input line takes what the user types, which the ending has no one to read.
     fn takes_text(&self) -> bool {
-        !matches!(lock(&self.shared).line, Line::Ending)
+        !matches!(lock(&self.shared).phase, Phase::Ending)
     }
 
     /// Acts on a key, with an outcome for one that ends the reading.
     fn key(&mut self, key: KeyEvent) -> Result<Option<Outcome>, String> {
+        let phase = lock(&self.shared).phase.clone();
+        let action = keys::action(&phase, &key, self.text().is_empty());
+        // A key the session acts on ends what the vi keys were in the middle of
+        if action != Action::Edit {
+            self.is_replacing = false;
+            self.takes_character = false;
+            self.keys = vi_keys();
+        }
+        match action {
+            Action::Edit => self.edit(key)?,
+            Action::Clear => self.state = insert_at_end(""),
+            Action::Send => return Ok(Some(Outcome::Send(self.text()))),
+            Action::Stop => return Ok(Some(Outcome::Stop)),
+            Action::End => return Ok(Some(Outcome::End)),
+            Action::ShowFullView => self.show_full_view()?,
+            Action::ShowStatus => self.show_status()?,
+            Action::Ignore => {}
+        }
+        Ok(None)
+    }
+
+    /// Edits the text with the vi keys, and the client's own: `:` opens the editor, and `r`
+    /// replaces the character under the cursor with the next one, or with a line break.
+    fn edit(&mut self, key: KeyEvent) -> Result<(), String> {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         if self.is_replacing {
             self.is_replacing = false;
@@ -242,24 +258,7 @@ impl InputLine {
                 KeyCode::Enter => self.break_line_at_cursor(),
                 _ => {}
             }
-            return Ok(None);
-        }
-        match key.code {
-            KeyCode::Char('c') if control => return Ok(Some(Outcome::Interrupt(self.text()))),
-            KeyCode::Char('d') if control => return Ok(Some(Outcome::End(self.text()))),
-            KeyCode::Char('o') if control => {
-                self.show_full_view()?;
-                return Ok(None);
-            }
-            KeyCode::Char('s') if control => {
-                self.show_status()?;
-                return Ok(None);
-            }
-            KeyCode::Enter => return Ok(Some(Outcome::Send(self.text()))),
-            _ => {}
-        }
-        if !self.takes_text() {
-            return Ok(None);
+            return Ok(());
         }
         let is_normal = self.state.mode == EditorMode::Normal && !self.takes_character;
         match key.code {
@@ -271,13 +270,13 @@ impl InputLine {
                     && matches!(mode, EditorMode::Normal | EditorMode::Visual)
                     && matches!(key.code, KeyCode::Char('f' | 't' | 'F' | 'T'));
                 self.keys.on_key_event(key, &mut self.state);
-                return Ok(None);
+                return Ok(());
             }
         }
         // A key the client acts on itself ends any sequence edtui was in the middle of
         self.keys = vi_keys();
         self.takes_character = false;
-        Ok(None)
+        Ok(())
     }
 
     /// Replaces the character under the cursor with a line break, as `r` and Enter do in vim.
@@ -575,8 +574,8 @@ impl InputLine {
     /// answer, the question; at the end, the work Claude still does.
     fn make_label(&self) -> String {
         let shared = lock(&self.shared);
-        match &shared.line {
-            Line::Message => {
+        match &shared.phase {
+            Phase::Writing => {
                 let now = Instant::now();
                 let level = shared.context.level();
                 let is_cold = shared.context.is_cold(now);
@@ -603,8 +602,8 @@ impl InputLine {
                     state.map_or_else(String::new, |state| format!(" {STATUS_COLOR}│ {state}"));
                 format!("{indicators}{state}")
             }
-            Line::Answer(question) => answer_label(question),
-            Line::Ending => {
+            Phase::Answering(question) => answer_label(question),
+            Phase::Ending => {
                 let output = &shared.output;
                 let tasks = output.background_tasks();
                 let background =

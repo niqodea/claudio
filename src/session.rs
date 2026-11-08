@@ -11,7 +11,8 @@ use std::time::Instant;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use crate::input_line::{InputLine, Line, Outcome};
+use crate::input_line::{InputLine, Outcome};
+use crate::keys::Phase;
 use crate::protocol::{Answer, Ask, AskKind, Command, Question};
 use crate::render::{Interruption, Status};
 use crate::{Shared, lock};
@@ -75,7 +76,9 @@ impl<'a> Conversation<'a> {
         loop {
             match self.session.next_input() {
                 Some(Input::Ask(ask)) => {
-                    self.answer(&ask)?;
+                    if self.answer(&ask)? == Leave::End {
+                        return Ok(Some(self.end_input()));
+                    }
                     continue;
                 }
                 Some(Input::Unsupported {
@@ -91,7 +94,7 @@ impl<'a> Conversation<'a> {
                 }
                 None => {}
             }
-            draft = match self.session.read_line(&Line::Message, &draft)? {
+            draft = match self.session.input.read(Phase::Writing, &draft)? {
                 // A message on a cold cache stays on the input line the first time, and the
                 // label says the next Enter sends it
                 Outcome::Send(text) => {
@@ -107,17 +110,16 @@ impl<'a> Conversation<'a> {
                         String::new()
                     }
                 }
-                // Ctrl-C on an empty line stops Claude, and on a line with text clears it
-                Outcome::Interrupt(text) => {
+                Outcome::Stop => {
                     let is_working = lock(&self.session.shared).output.status() != Status::Idle;
-                    if text.is_empty() && is_working {
+                    if is_working {
                         self.interrupt(Interruption::Stop)?;
                     }
                     String::new()
                 }
                 // Claude Code asked something, which the next round of the loop answers
                 Outcome::Break(text) => text,
-                Outcome::End(_) => return Ok(Some(self.end_input())),
+                Outcome::End => return Ok(Some(self.end_input())),
             };
         }
     }
@@ -135,18 +137,24 @@ impl<'a> Conversation<'a> {
         Ending { session, claude }
     }
 
-    /// Asks the user about the tool, and tells Claude Code the answer.
-    fn answer(&mut self, ask: &Ask) -> Result<(), String> {
+    /// Asks the user about the tool, and tells Claude Code the answer, a refusal that stops
+    /// Claude's turn when the user leaves the question. Returns how the user left the question.
+    fn answer(&mut self, ask: &Ask) -> Result<Leave, String> {
         lock(&self.session.shared).output.show_ask(ask);
-        let answer = match &ask.kind {
+        let reply = match &ask.kind {
             AskKind::Permission { rules, .. } => {
                 let always = if rules.is_empty() { "" } else { "/a" };
-                let question = format!("allow {}? y/n{always}", ask.tool_name);
+                // Enter on an empty line refuses, which the capital N says
+                let question = format!("allow {}? y/N{always}", ask.tool_name);
                 self.read_permission(ask, &question, rules)?
             }
             // Leaving plan mode, Claude Code returns to the mode the session had before it
-            AskKind::Plan(_) => self.read_permission(ask, "approve the plan? y/n", &[])?,
+            AskKind::Plan(_) => self.read_permission(ask, "approve the plan? y/N", &[])?,
             AskKind::Questions(questions) => self.read_questions(ask, questions)?,
+        };
+        let (answer, leave) = match reply {
+            Ok(answer) => (answer, Leave::Answered),
+            Err(leave) => (refuse_and_stop(), leave),
         };
         if let Answer::Deny { interrupt, .. } = &answer {
             let output = &mut lock(&self.session.shared).output;
@@ -155,7 +163,8 @@ impl<'a> Conversation<'a> {
                 output.note_interrupt(Interruption::Stop);
             }
         }
-        self.send(&Command::Answer(ask, answer))
+        self.send(&Command::Answer(ask, answer))?;
+        Ok(leave)
     }
 
     /// Reads whether the tool may run: once, for good with `rules` when there are any, or not,
@@ -165,12 +174,13 @@ impl<'a> Conversation<'a> {
         ask: &Ask,
         question: &str,
         rules: &[Value],
-    ) -> Result<Answer, String> {
+    ) -> Result<Result<Answer, Leave>, String> {
         loop {
-            let Some(text) = self.read_answer(question)? else {
-                return Ok(refuse_and_stop());
+            let text = match self.read_answer(question)? {
+                Ok(text) => text,
+                Err(leave) => return Ok(Err(leave)),
             };
-            return Ok(match text.trim() {
+            return Ok(Ok(match text.trim() {
                 "y" => Answer::Allow {
                     input: ask.input.clone(),
                     rules: vec![],
@@ -186,11 +196,15 @@ impl<'a> Conversation<'a> {
                     message: format!("{REFUSAL} The user said: {reason}"),
                     interrupt: false,
                 },
-            });
+            }));
         }
     }
 
-    fn read_questions(&mut self, ask: &Ask, questions: &[Question]) -> Result<Answer, String> {
+    fn read_questions(
+        &mut self,
+        ask: &Ask,
+        questions: &[Question],
+    ) -> Result<Result<Answer, Leave>, String> {
         let mut answers = Map::new();
         for question in questions {
             let several = if question.is_multi_select {
@@ -200,8 +214,9 @@ impl<'a> Conversation<'a> {
             };
             let label = format!("{} 1-{}{several}", question.header, question.options.len());
             let choice = loop {
-                let Some(text) = self.read_answer(&label)? else {
-                    return Ok(refuse_and_stop());
+                let text = match self.read_answer(&label)? {
+                    Ok(text) => text,
+                    Err(leave) => return Ok(Err(leave)),
                 };
                 if !text.trim().is_empty() {
                     break choose(question, text.trim());
@@ -211,29 +226,31 @@ impl<'a> Conversation<'a> {
         }
         let mut input = ask.input.clone();
         input.insert("answers".to_string(), Value::Object(answers));
-        Ok(Answer::Allow {
+        Ok(Ok(Answer::Allow {
             input,
             rules: vec![],
-        })
+        }))
     }
 
-    /// Reads one answer to `question`, none when the user gives up on it with Ctrl-C or Ctrl-D.
-    fn read_answer(&mut self, question: &str) -> Result<Option<String>, String> {
+    /// Reads one answer to `question`, or how the user left it.
+    fn read_answer(&mut self, question: &str) -> Result<Result<String, Leave>, String> {
         let mut draft = String::new();
         loop {
             match self
                 .session
-                .read_line(&Line::Answer(question.to_string()), &draft)?
+                .input
+                .read(Phase::Answering(question.to_string()), &draft)?
             {
                 Outcome::Send(text) => {
                     lock(&self.session.shared)
                         .output
                         .show_answer(question, &text);
-                    return Ok(Some(text));
+                    return Ok(Ok(text));
                 }
                 // Claude Code asked something more, which waits for this answer
                 Outcome::Break(text) => draft = text,
-                Outcome::Interrupt(_) | Outcome::End(_) => return Ok(None),
+                Outcome::Stop => return Ok(Err(Leave::Stop)),
+                Outcome::End => return Ok(Err(Leave::End)),
             }
         }
     }
@@ -317,10 +334,11 @@ impl Ending<'_> {
                 // fails each permission request, with "Stream closed" as the tool's result
                 Some(Input::Ask(_) | Input::Unsupported { .. }) | None => {}
             }
-            match self.session.read_line(&Line::Ending, "")? {
-                Outcome::Interrupt(_) => self.interrupt()?,
-                // What the user types has no one left to read it
-                Outcome::Send(_) | Outcome::End(_) | Outcome::Break(_) => {}
+            match self.session.input.read(Phase::Ending, "")? {
+                Outcome::Stop => self.interrupt()?,
+                // Claude Code fails what it asks once its input closed, and the ending takes no
+                // other key
+                Outcome::Break(_) | Outcome::Send(_) | Outcome::End => {}
             }
         }
     }
@@ -365,18 +383,6 @@ impl Session {
         }
     }
 
-    /// Reads the input line, starting from `draft`. Ctrl-D ends the input only on an empty line,
-    /// as in a shell, so on a line with text the line stays open as it was.
-    fn read_line(&mut self, line: &Line, draft: &str) -> Result<Outcome, String> {
-        let mut draft = draft.to_string();
-        loop {
-            match self.input.read(line.clone(), &draft)? {
-                Outcome::End(text) if !text.is_empty() => draft = text,
-                outcome => return Ok(outcome),
-            }
-        }
-    }
-
     /// Closes the input line once Claude Code ended, so the end of the output takes its place.
     fn close_line(&mut self) -> Result<(), String> {
         self.input.close()
@@ -399,6 +405,17 @@ fn choose(question: &Question, text: &str) -> String {
         Some(labels) if labels.len() == 1 || question.is_multi_select => labels.join(", "),
         _ => text.to_string(),
     }
+}
+
+/// How the user leaves a question.
+#[derive(Clone, Copy, PartialEq)]
+enum Leave {
+    /// By answering it.
+    Answered,
+    /// With Ctrl-C, which stops Claude's turn.
+    Stop,
+    /// With Ctrl-D, which also ends the session.
+    End,
 }
 
 /// Refuses the tool and ends the turn, so Claude waits for the user's next message.

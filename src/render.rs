@@ -62,7 +62,7 @@ pub struct Output {
     /// nothing the user sends in between can land between the two.
     pending_break: Option<Break>,
     /// Whether the last of Claude's text blocks ended, so that a text block right after it
-    /// starts a new paragraph.
+    /// starts with the mark of its own.
     text_ended: bool,
     status: Status,
     /// The tool uses whose result repeats what the screen already shows.
@@ -129,7 +129,8 @@ enum Position {
 enum Break {
     /// The mark that starts Claude's reply to the user's messages.
     Reply,
-    /// A blank line, then the mark, which starts Claude's text after other lines of its reply.
+    /// A blank line, then the mark, which starts Claude's text after other lines of its reply,
+    /// or a text block after another.
     Prose,
     Blank,
 }
@@ -191,6 +192,8 @@ impl Output {
         }
         // A message follows the line before it, and starts what the reply mark then introduces
         self.pending_break = None;
+        // Each message starts with marks of its own, as Claude Code keeps each message apart, also
+        // those it delivers together in one turn
         self.lines
             .push(format!("{}{}{FILL_ROW}{RESET}", start_bar_row(), marks()));
         for line in text.split('\n') {
@@ -492,9 +495,10 @@ impl Output {
             {
                 Some(Break::Prose)
             }
-            // Text blocks in a row are one stretch of Claude's text, in paragraphs
+            // A text block after another starts with the mark of its own, as Claude Code gives
+            // each its own dot
             (_, Position::In(Section::Text)) if section == Section::Text && text_ended => {
-                Some(Break::Blank)
+                Some(Break::Prose)
             }
             (_, Position::TurnEnd) => Some(Break::Blank),
             (_, Position::In(current)) if current != section => Some(Break::Blank),
@@ -668,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn text_blocks_in_a_row_are_paragraphs_under_one_mark() {
+    fn each_text_block_in_a_row_starts_with_the_mark() {
         let mut output = output_after_message();
         output.show_text("One.");
         output.show_text_end();
@@ -680,6 +684,7 @@ mod tests {
                 reply_mark(),
                 "One.".to_string(),
                 String::new(),
+                reply_mark(),
                 "Two.".to_string()
             ]
         );

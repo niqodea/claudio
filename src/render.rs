@@ -61,6 +61,9 @@ pub struct Output {
     /// What sets the next line apart from the last one. It is written with that line, so
     /// nothing the user sends in between can land between the two.
     pending_break: Option<Break>,
+    /// Whether the last of Claude's text blocks ended, so that a text block right after it
+    /// starts a new paragraph.
+    text_ended: bool,
     status: Status,
     /// The tool uses whose result repeats what the screen already shows.
     hidden_results: HashSet<String>,
@@ -126,6 +129,8 @@ enum Position {
 enum Break {
     /// The mark that starts Claude's reply to the user's messages.
     Reply,
+    /// A blank line, then the mark, which starts Claude's text after other lines of its reply.
+    Prose,
     Blank,
 }
 
@@ -145,6 +150,7 @@ impl Output {
             partial: String::new(),
             position: Position::Start,
             pending_break: None,
+            text_ended: false,
             status: Status::Idle,
             hidden_results: HashSet::new(),
             pending_calls: HashMap::new(),
@@ -235,6 +241,7 @@ impl Output {
 
     pub fn show_text_end(&mut self) {
         self.end_text();
+        self.text_ended = true;
         self.set_status(Status::Working);
     }
 
@@ -472,11 +479,23 @@ impl Output {
 
     /// Starts a section, set apart by the next line written: Claude's reply from the user's
     /// messages with a mark, which tells them apart in copied text too, where colors are gone,
-    /// and another section, or what follows the end of a turn, with a blank line.
+    /// Claude's text with the mark too, so it stands out among the lines of tool calls and
+    /// notices, and another section, or what follows the end of a turn, with a blank line.
     fn begin(&mut self, section: Section) {
+        let text_ended = std::mem::take(&mut self.text_ended);
         let pending_break = match (self.pending_break, self.position) {
             // A reply that printed nothing yet still starts with its mark
             (Some(Break::Reply), _) | (_, Position::In(Section::Message)) => Some(Break::Reply),
+            (_, Position::Start) if section == Section::Text => Some(Break::Reply),
+            (_, Position::TurnEnd | Position::In(Section::Tools | Section::Notice))
+                if section == Section::Text =>
+            {
+                Some(Break::Prose)
+            }
+            // Text blocks in a row are one stretch of Claude's text, in paragraphs
+            (_, Position::In(Section::Text)) if section == Section::Text && text_ended => {
+                Some(Break::Blank)
+            }
             (_, Position::TurnEnd) => Some(Break::Blank),
             (_, Position::In(current)) if current != section => Some(Break::Blank),
             (pending_break, Position::Start | Position::In(_)) => pending_break,
@@ -488,7 +507,11 @@ impl Output {
     /// Adds a line, after the break that sets it apart, if one waits.
     fn push(&mut self, line: String) {
         match self.pending_break.take() {
-            Some(Break::Reply) => self.lines.push(format!("{DIM}‹‹{RESET}")),
+            Some(Break::Reply) => self.lines.push(reply_mark()),
+            Some(Break::Prose) => {
+                self.lines.push(String::new());
+                self.lines.push(reply_mark());
+            }
             Some(Break::Blank) => self.lines.push(String::new()),
             None => {}
         }
@@ -510,6 +533,12 @@ pub fn start_bar_row() -> String {
 /// The marks in front of a message, on a row of their own.
 pub fn marks() -> String {
     format!("{LIGHT_CYAN}››")
+}
+
+/// The marks in front of what Claude writes, on a row of their own, in the color of the user's
+/// marks, since both say who starts.
+fn reply_mark() -> String {
+    format!("{LIGHT_CYAN}‹‹{RESET}")
 }
 
 /// The question in front of an answer, on the bar.
@@ -539,10 +568,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-
-    fn reply_mark() -> String {
-        format!("{DIM}‹‹{RESET}")
-    }
 
     fn output_after_message() -> Output {
         let mut output = Output::new();
@@ -624,7 +649,38 @@ mod tests {
                 reply_mark(),
                 "Hi.".to_string(),
                 String::new(),
+                reply_mark(),
                 "Done.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn text_after_a_tool_starts_with_the_mark() {
+        let mut output = output_after_message();
+        output.show_tool_use(&read_call("1", "a.txt"));
+        output.show_text("Read it.\n");
+        let lines = output.take_lines();
+        assert_eq!(
+            lines[2..],
+            [String::new(), reply_mark(), "Read it.".to_string()]
+        );
+    }
+
+    #[test]
+    fn text_blocks_in_a_row_are_paragraphs_under_one_mark() {
+        let mut output = output_after_message();
+        output.show_text("One.");
+        output.show_text_end();
+        output.show_text("Two.");
+        output.show_text_end();
+        assert_eq!(
+            output.take_lines(),
+            [
+                reply_mark(),
+                "One.".to_string(),
+                String::new(),
+                "Two.".to_string()
             ]
         );
     }

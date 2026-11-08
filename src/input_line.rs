@@ -11,7 +11,7 @@ use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::process;
+use std::process::{self, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -311,20 +311,13 @@ impl InputLine {
         let path = env::temp_dir().join(format!("claudio-{}.md", process::id()));
         fs::write(&path, self.text())
             .map_err(|error| format!("Cannot write {}: {error}", path.display()))?;
-        let mut out = Vec::new();
-        put!(out, DisableBracketedPaste, SetCursorStyle::DefaultUserShape);
-        write_out(&out)?;
-        let status = process::Command::new(&self.editor_command)
-            .arg(&path)
-            .status()
+        let status = self
+            .run_program(process::Command::new(&self.editor_command).arg(&path))?
             .map_err(|error| format!("Cannot run {}: {error}", self.editor_command))?;
         let text = fs::read_to_string(&path)
             .map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
         // The file goes with the draft, which the input line now holds
         let _ = fs::remove_file(&path);
-        let mut out = Vec::new();
-        put!(out, EnableBracketedPaste);
-        write_out(&out)?;
         if status.success() {
             // Editors end a file with a line break, which the message does not have
             let text = text.strip_suffix('\n').unwrap_or(&text);
@@ -385,25 +378,35 @@ impl InputLine {
     /// locale. Each of these takes a flag of less's own, which another pager has no use for, so
     /// the view runs less whatever `PAGER` says.
     fn show_full_view(&mut self) -> Result<(), String> {
-        let mut out = Vec::new();
-        put!(out, DisableBracketedPaste, SetCursorStyle::DefaultUserShape);
-        write_out(&out)?;
-        let status = run_in_terminal(
-            self.original_settings,
+        let status = self.run_program(
             process::Command::new("less")
                 .args(["-R", "-+X", "-+F", "+G"])
                 .env("LESSCHARSET", "utf-8")
                 .arg(&self.full_view),
-        );
-        let mut out = Vec::new();
-        put!(out, EnableBracketedPaste);
-        write_out(&out)?;
+        )?;
         if let Err(error) = status {
             lock(&self.shared)
                 .output
                 .show_error(&format!("Cannot show the full view: {error}"));
         }
         Ok(())
+    }
+
+    /// Runs `command` in the terminal, handed over with paste mode off and the cursor in the
+    /// user's own shape. Paste mode comes back on once the command ends. Writing to the terminal
+    /// fails the outer result, and running the command the inner one.
+    fn run_program(
+        &self,
+        command: &mut process::Command,
+    ) -> Result<io::Result<ExitStatus>, String> {
+        let mut out = Vec::new();
+        put!(out, DisableBracketedPaste, SetCursorStyle::DefaultUserShape);
+        write_out(&out)?;
+        let status = run_in_terminal(self.original_settings, command);
+        let mut out = Vec::new();
+        put!(out, EnableBracketedPaste);
+        write_out(&out)?;
+        Ok(status)
     }
 
     /// Prints the conversation's new lines above the label row, in a scroll region over the

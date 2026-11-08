@@ -3,6 +3,10 @@
 //! one.
 //!
 //! Arguments are passed on to `claude`, like `--resume <session>`.
+//!
+//! The `claude -p` the client starts is all it knows of Claude Code: what it writes, its error
+//! output and its exit. The client reads nothing else of Claude Code's, like its transcript
+//! files, which keeps the client small and its assumptions on how Claude Code works few.
 
 mod code;
 mod context;
@@ -86,9 +90,19 @@ fn run() -> Result<ExitCode, String> {
     let from_claude = claude.stdout.take().expect("stdout is piped");
     let errors_from_claude = claude.stderr.take().expect("stderr is piped");
 
+    // Removed when the client ends. A signal that ends the client, like SIGHUP when its terminal
+    // closes, leaves it in the temporary directory
+    let full_view = tempfile::Builder::new()
+        .prefix("claudio-")
+        .tempfile()
+        .map_err(|error| format!("Cannot create the file of the full view: {error}"))?;
     let shared = Arc::new(Mutex::new(Shared {
         line: Line::Message,
-        output: Output::new(),
+        output: Output::new(
+            full_view
+                .reopen()
+                .map_err(|error| format!("Cannot open the file of the full view: {error}"))?,
+        ),
         context: Context::new(),
         limits: Limits::new(),
         session_id: None,
@@ -110,9 +124,11 @@ fn run() -> Result<ExitCode, String> {
         read_claude_errors(errors_from_claude, &errors_shared);
     });
 
-    let _quiet_terminal = QuietTerminal::new()?;
+    let quiet_terminal = QuietTerminal::new()?;
     let input = InputLine::new(
         editor_command,
+        full_view.path().to_path_buf(),
+        quiet_terminal.original(),
         Arc::clone(&break_signal),
         Arc::clone(&shared),
     )?;

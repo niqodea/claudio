@@ -10,6 +10,7 @@
 use std::env;
 use std::fs;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -32,6 +33,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::limits::{Level, NEAR_BOUNDS_PASSED};
 use crate::render::{BAR_COLOR, Output, Status, answer_label, marks, start_bar_row};
+use crate::terminal::{Settings, run_in_terminal};
 use crate::{Shared, lock};
 
 // What Claude does stays in the background
@@ -96,6 +98,11 @@ pub struct InputLine {
     shared: Arc<Mutex<Shared>>,
     break_signal: Arc<AtomicBool>,
     editor_command: String,
+    /// The file of the full view, which the output writes to.
+    full_view: PathBuf,
+    /// The terminal's settings from before the client changed them, for the programs the
+    /// client runs in it.
+    original_settings: Settings,
     state: EditorState,
     keys: EditorEventHandler,
     /// Whether the last key edtui read takes a character next, like `f`, which then goes to
@@ -122,6 +129,8 @@ impl InputLine {
     /// A screen with too few rows below the cursor scrolls up to make them.
     pub fn new(
         editor_command: String,
+        full_view: PathBuf,
+        original_settings: Settings,
         break_signal: Arc<AtomicBool>,
         shared: Arc<Mutex<Shared>>,
     ) -> Result<Self, String> {
@@ -139,6 +148,8 @@ impl InputLine {
             shared,
             break_signal,
             editor_command,
+            full_view,
+            original_settings,
             state: insert_at_end(""),
             keys: vi_keys(),
             takes_character: false,
@@ -241,6 +252,10 @@ impl InputLine {
         match key.code {
             KeyCode::Char('c') if control => return Ok(Some(Outcome::Interrupt(self.text()))),
             KeyCode::Char('d') if control => return Ok(Some(Outcome::End(self.text()))),
+            KeyCode::Char('o') if control => {
+                self.show_full_view()?;
+                return Ok(None);
+            }
             KeyCode::Enter => return Ok(Some(Outcome::Send(self.text()))),
             _ => {}
         }
@@ -315,6 +330,34 @@ impl InputLine {
             // Editors end a file with a line break, which the message does not have
             let text = text.strip_suffix('\n').unwrap_or(&text);
             self.state = insert_at_end(text);
+        }
+        Ok(())
+    }
+
+    /// Shows the full view in less, from its end, where `F` follows the lines that keep coming
+    /// until Ctrl-C. less keeps the colors, draws on a screen of its own, which leaves the
+    /// conversation's rows as they were, and stays open on a view shorter than a screen,
+    /// whatever `LESS` says. It reads the file as the UTF-8 the output writes, whatever the
+    /// locale. Each of these takes a flag of less's own, which another pager has no use for, so
+    /// the view runs less whatever `PAGER` says.
+    fn show_full_view(&mut self) -> Result<(), String> {
+        let mut out = Vec::new();
+        put!(out, DisableBracketedPaste, SetCursorStyle::DefaultUserShape);
+        write_out(&out)?;
+        let status = run_in_terminal(
+            self.original_settings,
+            process::Command::new("less")
+                .args(["-R", "-+X", "-+F", "+G"])
+                .env("LESSCHARSET", "utf-8")
+                .arg(&self.full_view),
+        );
+        let mut out = Vec::new();
+        put!(out, EnableBracketedPaste);
+        write_out(&out)?;
+        if let Err(error) = status {
+            lock(&self.shared)
+                .output
+                .show_error(&format!("Cannot show the full view: {error}"));
         }
         Ok(())
     }

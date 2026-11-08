@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""A stand-in for `claude` that answers each message with two text blocks in a row, as Claude
-Code's stream-json output carries them. Run claudio with this directory first in PATH."""
+"""A stand-in for `claude` that answers each message with a tool call of several lines and its
+result, then two text blocks in a row, as Claude Code's stream-json output carries them. Run
+claudio with this directory first in PATH. FAKE_DELAY is how many seconds each answer waits
+before it starts, 0 when unset."""
 
 import json
+import os
 import sys
+import time
 
 BLOCKS = ["The first block of text.", "The second block, right after the first."]
 
@@ -36,10 +40,43 @@ for line in sys.stdin:
     if message.get("type") != "user":
         continue
     state("running")
+    time.sleep(float(os.environ.get("FAKE_DELAY", "0")))
     send(
         {
             "type": "stream_event",
             "event": {"type": "message_start", "message": {"usage": {"input_tokens": 1}}},
+            "parent_tool_use_id": None,
+        }
+    )
+    send(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "fake-call",
+                        "name": "Bash",
+                        "input": {"command": "cd a\nmake", "description": "Build a"},
+                    }
+                ]
+            },
+            "parent_tool_use_id": None,
+        }
+    )
+    send(
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "fake-call",
+                        "content": "compiled a.c\nlinked a",
+                        "is_error": False,
+                    }
+                ]
+            },
             "parent_tool_use_id": None,
         }
     )

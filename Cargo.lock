@@ -75,6 +75,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
+name = "claudio"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "edtui",
+ "libc",
+ "ratatui-core",
+ "serde",
+ "serde_json",
+ "syntect",
+ "tempfile",
+ "unicode-width",
+ "uuid",
+]
+
+[[package]]
 name = "compact_str"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -262,6 +278,12 @@ dependencies = [
  "regex-automata",
  "regex-syntax",
 ]
+
+[[package]]
+name = "fastrand"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "flate2"
@@ -515,21 +537,6 @@ name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
-
-[[package]]
-name = "claudio"
-version = "0.1.0"
-dependencies = [
- "crossterm",
- "edtui",
- "libc",
- "ratatui-core",
- "serde",
- "serde_json",
- "syntect",
- "unicode-width",
- "uuid",
-]
 
 [[package]]
 name = "proc-macro2"
@@ -836,6 +843,19 @@ dependencies = [
  "serde_derive",
  "thiserror",
  "walkdir",
+]
+
+[[package]]
+name = "tempfile"
+version = "3.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+dependencies = [
+ "fastrand",
+ "getrandom",
+ "once_cell",
+ "rustix",
+ "windows-sys",
 ]
 
 [[package]]

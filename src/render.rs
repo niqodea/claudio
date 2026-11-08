@@ -8,6 +8,8 @@
 //! a paragraph at a time, and the input line's label says what Claude does meanwhile.
 
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::Write;
 
 use serde_json::{Map, Value};
 
@@ -55,6 +57,11 @@ const SUMMARY_FIELDS: [(&str, &str); 10] = [
 /// what Claude does meanwhile.
 pub struct Output {
     lines: Vec<String>,
+    /// The file of the full view: the lines the screen shows, each followed by what it leaves
+    /// out, like a tool's whole input under its call. It holds the conversation in place of the
+    /// client, which writes each line to it as it adds the line to the screen's. It holds only
+    /// what this client showed, so a resumed session starts it empty.
+    full_view: File,
     /// The start of a line of Claude's reply, which waits for its end.
     partial: String,
     position: Position,
@@ -145,9 +152,10 @@ enum Section {
 }
 
 impl Output {
-    pub fn new() -> Self {
+    pub fn new(full_view: File) -> Self {
         Output {
             lines: Vec::new(),
+            full_view,
             partial: String::new(),
             position: Position::Start,
             pending_break: None,
@@ -194,11 +202,9 @@ impl Output {
         self.pending_break = None;
         // Each message starts with marks of its own, as Claude Code keeps each message apart, also
         // those it delivers together in one turn
-        self.lines
-            .push(format!("{}{}{FILL_ROW}{RESET}", start_bar_row(), marks()));
+        self.emit(format!("{}{}{FILL_ROW}{RESET}", start_bar_row(), marks()));
         for line in text.split('\n') {
-            self.lines
-                .push(format!("{}{line}{FILL_ROW}{RESET}", start_bar_row()));
+            self.emit(format!("{}{line}{FILL_ROW}{RESET}", start_bar_row()));
         }
         self.position = Position::In(Section::Message);
         self.set_status(Status::Working);
@@ -319,6 +325,18 @@ impl Output {
             "{mark} {}{RESET} {first}{more}{changes}",
             tool_use.name
         ));
+        let indent = if tool_use.is_subagent { "    " } else { "  " };
+        for (field, value) in &tool_use.input {
+            match value {
+                Value::String(text) => {
+                    self.write_full_view(&format!("{indent}{DIM}{field}:{RESET}"));
+                    for line in text.lines() {
+                        self.write_full_view(&format!("{indent}  {line}"));
+                    }
+                }
+                _ => self.write_full_view(&format!("{indent}{DIM}{field}:{RESET} {value}")),
+            }
+        }
     }
 
     pub fn show_tool_result(&mut self, result: &ToolResult) {
@@ -340,7 +358,8 @@ impl Output {
         let text = result.text.as_deref().map_or("(no text)", str::trim);
         let mut lines = text.lines();
         let first = lines.next().unwrap_or("(no output)");
-        let more = match lines.count() {
+        let rest = lines.count();
+        let more = match rest {
             0 => String::new(),
             count => format!(" (+{count} lines)"),
         };
@@ -349,6 +368,9 @@ impl Output {
             format!("#{:02x} {}: ", call.tag, call.name)
         });
         self.push(format!("{outcome} {DIM}{label}{first}{more}{RESET}"));
+        for line in text.lines().skip(1) {
+            self.write_full_view(&format!("  {line}"));
+        }
     }
 
     pub fn show_ask(&mut self, ask: &Ask) {
@@ -507,15 +529,29 @@ impl Output {
     /// Adds a line, after the break that sets it apart, if one waits.
     fn push(&mut self, line: String) {
         match self.pending_break.take() {
-            Some(Break::Reply) => self.lines.push(reply_mark()),
+            Some(Break::Reply) => self.emit(reply_mark()),
             Some(Break::Prose) => {
-                self.lines.push(String::new());
-                self.lines.push(reply_mark());
+                self.emit(String::new());
+                self.emit(reply_mark());
             }
-            Some(Break::Blank) => self.lines.push(String::new()),
+            Some(Break::Blank) => self.emit(String::new()),
             None => {}
         }
+        self.emit(line);
+    }
+
+    /// Adds a line to the screen and to the full view.
+    fn emit(&mut self, line: String) {
+        self.write_full_view(&line);
         self.lines.push(line);
+    }
+
+    /// Adds a line to the full view, without the codes that fill a row with the bar, since a
+    /// pager shows only the codes of colors. A write that fails, like on a full disk, leaves the
+    /// line out of the full view only.
+    fn write_full_view(&mut self, line: &str) {
+        let line = format!("{}\n", line.replace(FILL_ROW, ""));
+        let _ = self.full_view.write_all(line.as_bytes());
     }
 
     fn push_all(&mut self, lines: Vec<String>) {
@@ -569,8 +605,12 @@ mod tests {
 
     use super::*;
 
+    fn new_output() -> Output {
+        Output::new(tempfile::tempfile().expect("the temporary directory takes a file"))
+    }
+
     fn output_after_message() -> Output {
-        let mut output = Output::new();
+        let mut output = new_output();
         output.show_message("Hi");
         output.take_lines();
         output
@@ -695,6 +735,67 @@ mod tests {
         output.show_turn_end(Some("error_during_execution"));
         output.show_text("Stopped.\n");
         assert_eq!(output.take_lines(), [reply_mark(), "Stopped.".to_string()]);
+    }
+
+    /// Reads back what the output wrote to the full view, after the user's first message.
+    fn full_view_after(show: impl FnOnce(&mut Output)) -> Vec<String> {
+        let file = tempfile::NamedTempFile::new().expect("the temporary directory takes a file");
+        let mut output = Output::new(file.reopen().expect("the file opens again"));
+        output.show_message("Hi");
+        show(&mut output);
+        let text = std::fs::read_to_string(file.path()).expect("the full view reads back");
+        text.lines().skip(2).map(str::to_string).collect()
+    }
+
+    #[test]
+    fn the_full_view_shows_each_field_of_a_call_under_it() {
+        let lines = full_view_after(|output| {
+            output.show_tool_use(&ToolUse {
+                id: "1".to_string(),
+                name: "Bash".to_string(),
+                input: json!({"command": "cd a\nmake", "timeout": 5})
+                    .as_object()
+                    .expect("an object")
+                    .clone(),
+                is_subagent: false,
+            });
+        });
+        assert_eq!(
+            lines[2..],
+            [
+                format!("  {DIM}command:{RESET}"),
+                "    cd a".to_string(),
+                "    make".to_string(),
+                format!("  {DIM}timeout:{RESET} 5"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_full_view_shows_the_rest_of_a_result_of_several_lines_under_it() {
+        let lines = full_view_after(|output| {
+            output.show_tool_use(&read_call("1", "a.txt"));
+            output.show_tool_result(&result("1", "one\ntwo"));
+            output.show_tool_use(&read_call("2", "b.txt"));
+            output.show_tool_result(&result("2", "three"));
+        });
+        assert_eq!(
+            lines[4..],
+            [
+                format!("✓ {DIM}#00 Read: one (+1 lines){RESET}"),
+                "  two".to_string(),
+                format!("{BOLD}○{RESET} {DIM}#01{RESET}{BOLD} Read{RESET} b.txt"),
+                format!("  {DIM}file_path:{RESET}"),
+                "    b.txt".to_string(),
+                format!("✓ {DIM}#01 Read: three{RESET}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_full_view_leaves_out_the_codes_that_fill_a_row() {
+        let lines = full_view_after(|_| {});
+        assert!(!lines.join("").contains(FILL_ROW));
     }
 
     fn read_call(id: &str, path: &str) -> ToolUse {

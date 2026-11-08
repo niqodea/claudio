@@ -1,6 +1,6 @@
-//! What each key does, in two layers. The session keys, Ctrl with a letter, act on the session
-//! the same in every vi mode, so they are known from the key alone. Every other key belongs to
-//! the text: Enter sends it, and the rest edit it with the vi keys of the input box.
+//! What each key does. Keys come in two kinds. The session keys, Ctrl with a letter, act on the
+//! session the same in every vi mode, so the key alone decides which one it is. Every other key
+//! works on the text: Enter sends it, and the rest edit it with the vi keys of the input box.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -62,19 +62,18 @@ pub enum Action {
     Ignore,
 }
 
-/// What `key` does in `phase`, with `is_empty` telling whether the input has no text, and
-/// `awaits_character` whether the vi keys take the next key as a character, like after `r`,
-/// which then takes Enter too. Ctrl-D ends only an empty input, as in a shell, so a draft is
-/// never lost to it.
+/// What `key` does in `phase`, with `is_empty` telling whether the input has no text. Enter and
+/// the session keys do their job even while a vi command is half typed, since they are not vi
+/// keys. Ctrl-D ends only an empty input, as in a shell, so a draft is never lost to it.
 /// Ref: <https://www.gnu.org/software/bash/manual/html_node/Commands-For-Text.html>, on Ctrl-D
 /// as the end of input only on an empty line
-pub fn action(phase: &Phase, key: &KeyEvent, is_empty: bool, awaits_character: bool) -> Action {
+pub fn action(phase: &Phase, key: &KeyEvent, is_empty: bool) -> Action {
     match (phase, SessionKey::of(key)) {
         (Phase::Ending, Some(SessionKey::Stop)) => Action::Session(SessionKey::Stop),
         (Phase::Ending, _) => Action::Ignore,
         (_, Some(SessionKey::End)) if !is_empty => Action::Ignore,
         (_, Some(session_key)) => Action::Session(session_key),
-        (_, None) if key.code == KeyCode::Enter && !awaits_character => Action::Send,
+        (_, None) if key.code == KeyCode::Enter => Action::Send,
         (_, None) => Action::Edit,
     }
 }
@@ -112,7 +111,7 @@ mod tests {
                 (plain(KeyCode::Esc), false, Action::Edit),
             ];
             for (key, is_empty, expected) in cases {
-                assert_eq!(action(&phase, &key, is_empty, false), expected);
+                assert_eq!(action(&phase, &key, is_empty), expected);
             }
         }
     }
@@ -120,7 +119,7 @@ mod tests {
     #[test]
     fn the_ending_takes_only_ctrl_c_which_stops() {
         assert_eq!(
-            action(&Phase::Ending, &control('c'), true, false),
+            action(&Phase::Ending, &control('c'), true),
             Action::Session(SessionKey::Stop)
         );
         for key in [
@@ -130,24 +129,7 @@ mod tests {
             plain(KeyCode::Enter),
             plain(KeyCode::Char('a')),
         ] {
-            assert_eq!(action(&Phase::Ending, &key, true, false), Action::Ignore);
+            assert_eq!(action(&Phase::Ending, &key, true), Action::Ignore);
         }
-    }
-
-    #[test]
-    fn a_character_the_vi_keys_await_goes_to_them_and_the_session_keys_still_act() {
-        let phase = Phase::Writing;
-        assert_eq!(
-            action(&phase, &plain(KeyCode::Enter), false, true),
-            Action::Edit
-        );
-        assert_eq!(
-            action(&phase, &plain(KeyCode::Char('x')), false, true),
-            Action::Edit
-        );
-        assert_eq!(
-            action(&phase, &control('c'), false, true),
-            Action::Session(SessionKey::Stop)
-        );
     }
 }

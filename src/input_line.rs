@@ -65,7 +65,7 @@ macro_rules! put {
 pub enum Outcome {
     /// The user sends the text on the line.
     Send(String),
-    /// The user stops Claude's turn, with the text on the line, which stays.
+    /// The user stops Claude's turn, with the text on the line, which stays the draft.
     Stop(String),
     /// The user ends the session.
     End,
@@ -207,17 +207,11 @@ impl InputLine {
         self.end.next_row().min(self.layout.lowest_label_row())
     }
 
-    /// Whether the input line takes what the user types, which the ending has no one to read.
     /// Acts on a key, with an outcome for one that ends the reading.
     fn key(&mut self, key: KeyEvent) -> Result<Option<Outcome>, String> {
         let phase = lock(&self.shared).phase.clone();
-        let action = keys::action(
-            &phase,
-            &key,
-            self.editor.is_empty(),
-            self.editor.awaits_character(),
-        );
-        // A key the session acts on ends the command the vi keys were in the middle of
+        let action = keys::action(&phase, &key, self.editor.is_empty());
+        // Any key other than an edit cancels the half-typed vi command
         if action != Action::Edit {
             self.editor.cancel();
         }
@@ -419,7 +413,22 @@ impl InputLine {
         if layout.label_rows > 0 {
             put!(out, MoveTo(0, label_row));
             out.extend(format!("{}{}{RESET}", start_bar_row(), self.label).as_bytes());
-            widths.push(visible_width(&self.label));
+            // The label row shows the keys of a half-typed vi command at its right edge, where
+            // vim's `showcmd` shows them, so nothing else on the row moves when they appear or
+            // go. Keys wider than the screen wrap onto the box's first row
+            let pending = self.editor.pending();
+            if pending.is_empty() {
+                widths.push(visible_width(&self.label));
+            } else {
+                let column = layout
+                    .width
+                    .saturating_sub(u16::try_from(pending.width()).unwrap_or(u16::MAX));
+                put!(out, MoveTo(column, label_row));
+                out.extend(format!("{}{STATUS_COLOR}{pending}{RESET}", start_bar_row()).as_bytes());
+                // The row's text now reaches the right edge, so a narrower screen splits the
+                // whole row, not only the label
+                widths.push(usize::from(layout.width));
+            }
         }
         let wrapped = wrap::wrap(
             &self.text(),

@@ -1,9 +1,8 @@
 //! The input box's vi: the text, the cursor, the mode, and the keys of the command being typed,
 //! which are all a command's pending state. Each key parses those keys again from the start, so
-//! whether the editor waits for a character follows from the keys typed, as does every other
-//! step of a command. An operator acts on the range a motion or a text object gives, so every
-//! operator works with every motion and object, and the shortcuts like `x` and `D` are an
-//! operator with a motion.
+//! every step of a command follows from the keys typed. An operator acts on the range a motion
+//! or a text object gives, so every operator works with every motion and object, and the
+//! shortcuts like `x` and `D` are an operator with a motion.
 //! Ref: <https://github.com/nushell/reedline/blob/main/src/edit_mode/vi/parser.rs>, on parsing
 //! the keys typed so far at each key
 //! Ref: <https://vimhelp.org/motion.txt.html>, on the motions and their special cases
@@ -60,7 +59,6 @@ enum Key {
     Char(char),
     Control(char),
     Escape,
-    Enter,
     Backspace,
     Delete,
     Left,
@@ -206,7 +204,6 @@ struct Range {
 #[derive(Debug, PartialEq)]
 enum Parse {
     Incomplete,
-    AwaitsCharacter,
     Invalid,
     Command(Command),
 }
@@ -257,9 +254,17 @@ impl Editor {
         Some((range.start, range.end))
     }
 
-    /// Whether the command being typed takes the next key as a character, like `r` or `f`.
-    pub fn awaits_character(&self) -> bool {
-        parse(&self.keys, self.is_visual()) == Parse::AwaitsCharacter
+    /// The keys of the command being typed, as vim's `showcmd` shows them, empty when none is.
+    /// A command is half typed only after plain characters, like a count, an operator, `g` or
+    /// `f`, since any other key completes or cancels it, so its keys are all plain characters.
+    pub fn pending(&self) -> String {
+        self.keys
+            .iter()
+            .filter_map(|key| match key {
+                Key::Char(character) => Some(*character),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Drops the command being typed, which leaves the text and the mode as they are.
@@ -304,7 +309,7 @@ impl Editor {
         }
         self.keys.push(key);
         match parse(&self.keys, self.is_visual()) {
-            Parse::Incomplete | Parse::AwaitsCharacter => Effect::None,
+            Parse::Incomplete => Effect::None,
             Parse::Invalid => {
                 self.keys.clear();
                 Effect::None
@@ -435,7 +440,6 @@ impl Editor {
         }
         match key {
             Key::Char(character) => self.insert_text(&[character]),
-            Key::Enter => self.insert_text(&['\n']),
             Key::Backspace | Key::Control('h') => {
                 if self.cursor > 0 {
                     self.delete(self.cursor - 1, self.cursor);
@@ -950,15 +954,10 @@ impl Editor {
             return;
         }
         self.begin_change();
-        if character == '\n' {
-            self.text.splice(self.cursor..end, ['\n']);
-            self.cursor += 1;
-        } else {
-            for index in self.cursor..end {
-                self.text[index] = character;
-            }
-            self.cursor = end - 1;
+        for index in self.cursor..end {
+            self.text[index] = character;
         }
+        self.cursor = end - 1;
     }
 
     fn toggle_case(&mut self, start: usize, end: usize) {
@@ -1246,7 +1245,6 @@ fn key_of(event: &KeyEvent) -> Option<Key> {
         KeyCode::Char(character) if is_control => Key::Control(character),
         KeyCode::Char(character) => Key::Char(character),
         KeyCode::Esc => Key::Escape,
-        KeyCode::Enter => Key::Enter,
         KeyCode::Backspace => Key::Backspace,
         KeyCode::Delete => Key::Delete,
         KeyCode::Left => Key::Left,
@@ -1284,9 +1282,8 @@ fn parse(keys: &[Key], is_visual: bool) -> Parse {
         (Key::Char('C'), []) => operate(Operator::Change, Target::Motion(Motion::LineEnd)),
         (Key::Char('s'), []) => operate(Operator::Change, Target::Motion(Motion::Right)),
         (Key::Char('S'), []) => operate(Operator::Change, Target::Lines),
-        (Key::Char('r'), []) => return Parse::AwaitsCharacter,
+        (Key::Char('r'), []) => return Parse::Incomplete,
         (Key::Char('r'), [Key::Char(character)]) => Command::Replace(*character, count),
-        (Key::Char('r'), [Key::Enter]) => Command::Replace('\n', count),
         (Key::Char('~'), []) => Command::ToggleCase(count),
         (Key::Char('J'), []) => Command::Join(count),
         (Key::Char('p'), []) => Command::Put {
@@ -1379,7 +1376,7 @@ fn parse_visual(first: Key, rest: &[Key], keys: &[Key], count: Option<usize>) ->
 
 fn parse_motion(keys: &[Key]) -> Result<Motion, Parse> {
     Ok(match keys {
-        [] | [Key::Char('g')] => return Err(Parse::Incomplete),
+        [] | [Key::Char('g' | 'f' | 't' | 'F' | 'T')] => return Err(Parse::Incomplete),
         [Key::Char('h') | Key::Left | Key::Backspace] => Motion::Left,
         [Key::Char('l' | ' ') | Key::Right] => Motion::Right,
         [Key::Char('j') | Key::Down] => Motion::Down,
@@ -1397,7 +1394,6 @@ fn parse_motion(keys: &[Key]) -> Result<Motion, Parse> {
         [Key::Char('G')] => Motion::LastLine,
         [Key::Char(';')] => Motion::RepeatFind(false),
         [Key::Char(',')] => Motion::RepeatFind(true),
-        [Key::Char('f' | 't' | 'F' | 'T')] => return Err(Parse::AwaitsCharacter),
         [Key::Char(find), Key::Char(character)] => {
             let find = match find {
                 'f' => Find::Forward,
@@ -1456,7 +1452,7 @@ fn split_count(keys: &[Key]) -> (Option<usize>, &[Key]) {
 mod tests {
     use super::*;
 
-    /// The keys in `keys`, where `<Esc>`, `<CR>`, `<BS>` and `<C-x>` name the keys without a
+    /// The keys in `keys`, where `<Esc>`, `<BS>` and `<C-x>` name the keys without a
     /// character of their own.
     pub(super) fn events(keys: &str) -> Vec<KeyEvent> {
         let mut events = Vec::new();
@@ -1469,7 +1465,6 @@ mod tests {
                 let name = &rest[1..end];
                 let event = match name {
                     "Esc" => Some(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-                    "CR" => Some(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
                     "BS" => Some(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
                     _ => name.strip_prefix("C-").and_then(|key| {
                         let key = key.chars().next()?;
@@ -1587,16 +1582,21 @@ mod tests {
         assert_eq!(shown(&after("abc", "rx")), "|xbc");
         assert_eq!(shown(&after("abc", "2rx")), "x|xc");
         assert_eq!(shown(&after("abc", "5rx")), "|abc");
-        assert_eq!(shown(&after("abc", "lr<CR>")), "a\n|c");
     }
 
     #[test]
-    fn the_editor_says_when_it_awaits_a_character() {
-        for keys in ["r", "f", "dt", "2F", "c2T"] {
-            assert!(after("abc", keys).awaits_character(), "{keys}");
+    fn the_editor_shows_the_keys_of_the_command_being_typed() {
+        for (keys, pending) in [
+            ("", ""),
+            ("2d", "2d"),
+            ("c2T", "c2T"),
+            ("di", "di"),
+            ("r", "r"),
+        ] {
+            assert_eq!(after("abc", keys).pending(), pending, "{keys}");
         }
-        for keys in ["", "d", "di", "g"] {
-            assert!(!after("abc", keys).awaits_character(), "{keys}");
+        for keys in ["dw", "rx", "x", "ifoo"] {
+            assert_eq!(after("abc", keys).pending(), "", "{keys}");
         }
     }
 
@@ -1717,7 +1717,6 @@ mod tests {
         ("abc", "rx"),
         ("abc", "2rx"),
         ("abc", "5rx"),
-        ("abc", "lr\r"),
         ("abc", "~~"),
         ("abc", "3~"),
         ("a\n   b\n\nc", "J"),
@@ -1764,7 +1763,6 @@ mod tests {
             .chars()
             .map(|key| match key {
                 '\x1b' => "\\<Esc>".to_string(),
-                '\r' => "\\<CR>".to_string(),
                 '\x08' => "\\<BS>".to_string(),
                 '\x12' => "\\<C-r>".to_string(),
                 '\x17' => "\\<C-w>".to_string(),
@@ -1800,7 +1798,6 @@ mod tests {
         for key in keys.chars() {
             let event = match key {
                 '\x1b' => KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-                '\r' => KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
                 '\x08' => KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
                 '\x12' => KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
                 '\x17' => KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),

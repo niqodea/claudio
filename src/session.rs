@@ -249,7 +249,7 @@ impl<'a> Conversation<'a> {
                 }
                 // Claude Code asked something more, which waits for this answer
                 Outcome::Break(text) => draft = text,
-                // The answer goes with the question it answers
+                // Refusing the question drops the answer typed to it
                 Outcome::Stop(_) => return Ok(Err(Leave::Stop)),
                 Outcome::End => return Ok(Err(Leave::End)),
             }

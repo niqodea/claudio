@@ -65,6 +65,12 @@ impl<'a> Conversation<'a> {
         self.send(&Command::Initialize)?;
         self.send(&Command::GetSettings)?;
         self.send(&Command::GetContext)?;
+        // Claude Code reads the plan's usage from the claude.ai usage endpoint, apart from the API
+        // that Claude answers through. The endpoint can fail while the API works, so the
+        // conversation starts before the answer arrives
+        // Ref: <https://github.com/jarrodwatts/claude-hud/issues/173>, on the usage endpoint
+        // answering a status line with HTTP 429
+        self.send(&Command::GetUsage)?;
         let mut draft = String::new();
         loop {
             match self.session.next_input() {

@@ -6,7 +6,10 @@
 
 use std::time::{Duration, Instant};
 
-use crate::protocol::Usage;
+use crate::protocol::{Ceiling, Usage};
+
+/// The color of a cold cache.
+pub const COLD_COLOR: &str = "\x1b[31m";
 
 /// The upper bounds of the levels T0 to T2, above which the context is at T3. A new session
 /// starts at about 25k tokens, its system prompt, tools and memory, so T0 is a context that
@@ -25,6 +28,9 @@ pub struct Context {
     /// Whether the user sent the message on the input line once on the cold cache, so it goes
     /// the next time.
     is_cold_confirmed: bool,
+    /// What the context can grow to, as Claude Code told it when the session started. It holds
+    /// until the model or the settings change during the session, which leaves it out of date.
+    ceiling: Option<Ceiling>,
 }
 
 enum Cache {
@@ -45,6 +51,37 @@ impl Context {
             cache: Cache::Starting,
             ttl: SHORTEST_TTL,
             is_cold_confirmed: false,
+            ceiling: None,
+        }
+    }
+
+    pub fn note_ceiling(&mut self, ceiling: Ceiling) {
+        self.ceiling = Some(ceiling);
+    }
+
+    /// The tokens of the context, none before a call tells them.
+    pub fn tokens(&self) -> Option<u64> {
+        match self.cache {
+            Cache::Starting | Cache::Empty => None,
+            Cache::WarmUntil(_) | Cache::Unknown => Some(self.tokens),
+        }
+    }
+
+    /// Whether the session is new and has had no call yet.
+    pub fn is_new(&self) -> bool {
+        matches!(self.cache, Cache::Empty)
+    }
+
+    /// What the context can grow to, none before Claude Code tells it.
+    pub fn ceiling(&self) -> Option<Ceiling> {
+        self.ceiling
+    }
+
+    /// When the cache turns cold, none when it holds nothing yet or is already cold.
+    pub fn warm_until(&self, now: Instant) -> Option<Instant> {
+        match self.cache {
+            Cache::WarmUntil(cold_at) if now < cold_at => Some(cold_at),
+            _ => None,
         }
     }
 
@@ -214,6 +251,15 @@ mod tests {
         assert_eq!(context.level(), Some(2));
         assert!(context.is_cold(now));
         assert!(context.holds_message(now));
+    }
+
+    #[test]
+    fn the_cache_is_warm_until_its_ttl_passes() {
+        let mut context = Context::new();
+        let now = Instant::now();
+        let cold_at = context.note_call(&usage(40_000, Some(HOUR)), now);
+        assert_eq!(context.warm_until(now), Some(cold_at));
+        assert_eq!(context.warm_until(cold_at), None);
     }
 
     #[test]

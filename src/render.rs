@@ -30,6 +30,8 @@ const BOLD: &str = "\x1b[1m";
 const RESET: &str = "\x1b[0m";
 /// The background of the user's lines, which sets them apart from Claude's.
 pub const BAR_COLOR: u8 = 236;
+/// The color of text that stays in the background.
+pub const STATUS_COLOR: &str = "\x1b[38;5;244m";
 // Erases to the end of the row in the background color that is set, which fills the row's
 // rest with the bar without writing spaces into the text. Written after the text too, it fills
 // the rest of the last row the terminal wraps the text onto

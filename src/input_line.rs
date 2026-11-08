@@ -14,14 +14,14 @@ use std::path::PathBuf;
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::cursor::{self, Hide, MoveTo, SetCursorStyle, Show};
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
     KeyModifiers,
 };
-use crossterm::terminal::{self, Clear, ClearType};
+use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use edtui::actions::{DeleteWordBackward, InsertChar, LineBreak, RemoveChar, ReplaceChar};
 use edtui::events::{KeyEventHandler, KeyEventRegister, KeyInput};
 use edtui::{EditorEventHandler, EditorMode, EditorState, EditorTheme, EditorView, Index2, Lines};
@@ -31,18 +31,13 @@ use ratatui_core::style::{Color, Modifier, Style};
 use ratatui_core::widgets::Widget;
 use unicode_width::UnicodeWidthStr;
 
-use crate::limits::{Level, NEAR_BOUNDS_PASSED};
-use crate::render::{BAR_COLOR, Output, Status, answer_label, marks, start_bar_row};
+use crate::context::COLD_COLOR;
+use crate::limits::{Level, limit_level};
+use crate::render::{BAR_COLOR, Output, STATUS_COLOR, Status, answer_label, marks, start_bar_row};
+use crate::status;
 use crate::terminal::{Settings, run_in_terminal};
 use crate::{Shared, lock};
 
-// What Claude does stays in the background
-const STATUS_COLOR: &str = "\x1b[38;5;244m";
-
-// A limit near its end, before the red of a reached one
-const ORANGE: &str = "\x1b[38;5;208m";
-// A cold cache, and a limit reached
-const RED: &str = "\x1b[31m";
 const RESET: &str = "\x1b[0m";
 
 /// The rows of the input box.
@@ -256,6 +251,10 @@ impl InputLine {
                 self.show_full_view()?;
                 return Ok(None);
             }
+            KeyCode::Char('s') if control => {
+                self.show_status()?;
+                return Ok(None);
+            }
             KeyCode::Enter => return Ok(Some(Outcome::Send(self.text()))),
             _ => {}
         }
@@ -332,6 +331,51 @@ impl InputLine {
             self.state = insert_at_end(text);
         }
         Ok(())
+    }
+
+    /// Shows the status of the session as it stands, at the bottom of the terminal's alternate
+    /// screen, until the next key, which only closes it. The conversation stays as it was on the
+    /// main screen, and its new lines wait for the status to close. A resize meanwhile moves the
+    /// status to the new bottom and reaches the input box once the status closes.
+    fn show_status(&mut self) -> Result<(), String> {
+        let lines = {
+            let shared = lock(&self.shared);
+            status::lines(
+                shared.model.as_deref(),
+                shared.session_id.as_deref(),
+                &shared.limits,
+                &shared.context,
+                Instant::now(),
+                SystemTime::now(),
+            )
+        };
+        let mut out = Vec::new();
+        put!(out, EnterAlternateScreen, Hide);
+        write_out(&out)?;
+        let mut height = self.layout.height;
+        let mut resized = None;
+        loop {
+            let top = height.saturating_sub(u16::try_from(lines.len()).unwrap_or(u16::MAX));
+            let mut out = Vec::new();
+            put!(out, Clear(ClearType::All), MoveTo(0, top));
+            out.extend(lines.join("\r\n").as_bytes());
+            write_out(&out)?;
+            match event::read().map_err(|error| cannot_read_terminal(&error))? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => break,
+                Event::Resize(new_width, new_height) => {
+                    height = new_height;
+                    resized = Some((new_width, new_height));
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        put!(out, LeaveAlternateScreen);
+        write_out(&out)?;
+        match resized {
+            Some((width, height)) => self.resize(width, height),
+            None => Ok(()),
+        }
     }
 
     /// Shows the full view in less, from its end, where `F` follows the lines that keep coming
@@ -536,7 +580,7 @@ impl InputLine {
                 // On a cold cache, the space in front of T becomes *, which shows the cold cache
                 // without color and keeps the label's width
                 let (cold_mark, level_color) = if is_cold {
-                    ("*", RED)
+                    ("*", COLD_COLOR)
                 } else {
                     (" ", STATUS_COLOR)
                 };
@@ -544,8 +588,8 @@ impl InputLine {
                     "{}{level_color}{cold_mark}T{} {} {}",
                     marks(),
                     show_level(level),
-                    limit_indicator('S', shared.limits.session_level()),
-                    limit_indicator('W', shared.limits.week_level()),
+                    limit_indicator('S', shared.limits.session().map(limit_level)),
+                    limit_indicator('W', shared.limits.week().map(limit_level)),
                 );
                 let state = if shared.context.is_cold_confirmed(now) {
                     Some("cold, enter sends".to_string())
@@ -810,15 +854,10 @@ fn show_level(level: Option<usize>) -> String {
     level.map_or_else(|| "?".to_string(), |level| level.to_string())
 }
 
-/// The letter of a usage limit and its level, orange from `NEAR_BOUNDS_PASSED` and red once
-/// reached, so the color only repeats what the level says.
+/// The letter of a usage limit and its level, in the level's color, so the color only repeats
+/// what the level says.
 fn limit_indicator(letter: char, level: Option<Level>) -> String {
-    let color = match level {
-        None => STATUS_COLOR,
-        Some(Level::Below(passed)) if passed < NEAR_BOUNDS_PASSED => STATUS_COLOR,
-        Some(Level::Below(_)) => ORANGE,
-        Some(Level::Reached) => RED,
-    };
+    let color = level.and_then(Level::color).unwrap_or(STATUS_COLOR);
     format!("{color}{letter}{}", show_level(level.map(Level::to_number)))
 }
 

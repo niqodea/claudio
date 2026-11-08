@@ -9,6 +9,8 @@ publish = false
 crossterm = "0.29"
 # The input box's vi keys, without its clipboard, mouse and syntax highlighting
 edtui = { version = "0.11.7", default-features = false }
+# Only to read timestamps, so without the time zone database
+jiff = { version = "0.2", default-features = false, features = ["std"] }
 libc = "0.2"
 # The cells edtui draws the input box into
 ratatui-core = "0.1"

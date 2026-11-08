@@ -4,7 +4,7 @@
 //! Claude Code documents. Anywhere in the client, what relies on more than those types says so in
 //! a comment that starts with "Undocumented", followed by how it was learned.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use serde::de::IgnoredAny;
@@ -14,6 +14,7 @@ use serde_json::{Map, Value, json};
 const INITIALIZE_REQUEST_ID: &str = "initialize";
 const SETTINGS_REQUEST_ID: &str = "settings";
 const CONTEXT_REQUEST_ID: &str = "context";
+const USAGE_REQUEST_ID: &str = "usage";
 
 /// Something Claude Code reported.
 pub enum Event {
@@ -53,6 +54,10 @@ pub enum Event {
     Call(Usage),
     /// The last call of the session as Claude Code starts it, none in a new session.
     LastCall(Option<Usage>),
+    /// The model of the session as Claude Code starts it.
+    Model(String),
+    /// What the context can grow to as Claude Code starts the session.
+    Ceiling(Ceiling),
     /// A request this client has no answer for. Claude Code waits on it until it is refused.
     Unsupported {
         request_id: String,
@@ -76,6 +81,18 @@ pub struct Limit {
     pub utilization: f64,
     /// Whether the account reached the limit.
     pub is_reached: bool,
+    /// When the limit starts over, none when Claude Code left it out.
+    pub resets_at: Option<SystemTime>,
+}
+
+/// What the context can grow to, in tokens.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Ceiling {
+    /// The size at which Claude Code compacts the context.
+    Compact(u64),
+    /// The window the context fits in, which it grows to when Claude Code compacts it only on
+    /// request.
+    Window(u64),
 }
 
 /// What a call of Claude's read and wrote.
@@ -194,6 +211,10 @@ pub enum Command<'a> {
     /// summary comes from that call's usage, where the full answer would count each part of
     /// the context with the API.
     GetContext,
+    /// Asks for the plan's usage limits, which Claude Code reads from the plan's usage, where a
+    /// call to the API would only send them along with its reply. The SDK's types mark the
+    /// request experimental, with a shape that may change. Seen with Claude Code 2.1.319.
+    GetUsage,
     Refuse {
         request_id: &'a str,
         subtype: &'a str,
@@ -267,6 +288,12 @@ impl Command<'_> {
                 "type": "control_request",
                 "request_id": CONTEXT_REQUEST_ID,
                 "request": {"subtype": "get_context_usage", "detail": "summary"},
+            }),
+            // Without the scan of the week's transcripts, which tells nothing of the limits
+            Command::GetUsage => json!({
+                "type": "control_request",
+                "request_id": USAGE_REQUEST_ID,
+                "request": {"subtype": "get_usage", "skip_behaviors": true},
             }),
             Command::Refuse {
                 request_id,
@@ -401,6 +428,7 @@ fn read_response(request_id: &str, response: Option<Value>) -> Result<Vec<Event>
         INITIALIZE_REQUEST_ID => read_account(response),
         SETTINGS_REQUEST_ID => read_settings(response),
         CONTEXT_REQUEST_ID => read_context_usage(response),
+        USAGE_REQUEST_ID => read_plan_usage(response),
         // The other requests sent are interrupts, whose success needs no word
         _ => Ok(vec![]),
     }
@@ -431,12 +459,60 @@ fn read_settings(response: Option<Value>) -> Result<Vec<Event>, String> {
     }
 }
 
-/// The last call of the session, which the context's usage tells. A session without a call has
-/// no usage yet.
+/// The last call of the session, which the context's usage tells, with the model and the
+/// context's ceiling. A session without a call has no usage yet.
 fn read_context_usage(response: Option<Value>) -> Result<Vec<Event>, String> {
     let context: ContextUsage = serde_json::from_value(response.unwrap_or_default())
         .map_err(|error| format!("Unreadable context usage from Claude Code: {error}"))?;
-    Ok(vec![Event::LastCall(context.api_usage.map(Usage::from))])
+    let ceiling = match (
+        context.is_auto_compact_enabled,
+        context.auto_compact_threshold,
+    ) {
+        (true, Some(threshold)) => Ceiling::Compact(threshold),
+        _ => Ceiling::Window(context.max_tokens),
+    };
+    Ok(vec![
+        Event::LastCall(context.api_usage.map(Usage::from)),
+        Event::Model(context.model),
+        Event::Ceiling(ceiling),
+    ])
+}
+
+/// The plan's usage limits, none when they do not apply, like to a session an API key pays for.
+fn read_plan_usage(response: Option<Value>) -> Result<Vec<Event>, String> {
+    let usage: PlanUsage = serde_json::from_value(response.unwrap_or_default())
+        .map_err(|error| format!("Unreadable usage from Claude Code: {error}"))?;
+    let Some(limits) = usage.rate_limits else {
+        return Ok(vec![]);
+    };
+    Ok(vec![Event::Limits {
+        session: read_plan_limit(limits.five_hour)?,
+        week: read_plan_limit(limits.seven_day)?,
+    }])
+}
+
+/// A limit of the plan's usage, none when Claude Code leaves out how much of it the account
+/// used. The usage tells no status, so the limit counts as reached once it is all used.
+fn read_plan_limit(limit: Option<PlanLimit>) -> Result<Option<Limit>, String> {
+    let Some(PlanLimit {
+        utilization: Some(percent),
+        resets_at,
+    }) = limit
+    else {
+        return Ok(None);
+    };
+    let resets_at = resets_at
+        .map(|time| {
+            time.parse::<jiff::Timestamp>()
+                .map(SystemTime::from)
+                .map_err(|error| format!("Unreadable reset time from Claude Code: {error}"))
+        })
+        .transpose()?;
+    Ok(Some(Limit {
+        utilization: percent / 100.0,
+        is_reached: percent >= 100.0,
+        resets_at,
+    }))
 }
 
 fn read_request(request_id: String, request: Value) -> Result<Event, String> {
@@ -532,6 +608,8 @@ struct UnifiedWindows {
 struct Window {
     utilization: f64,
     status: Option<WindowStatus>,
+    #[serde(rename = "resetsAt")]
+    resets_at_seconds: Option<u64>,
 }
 
 #[derive(Deserialize, PartialEq)]
@@ -547,6 +625,9 @@ impl From<Window> for Limit {
         Limit {
             utilization: window.utilization,
             is_reached: window.status == Some(WindowStatus::Rejected),
+            resets_at: window
+                .resets_at_seconds
+                .map(|seconds| UNIX_EPOCH + Duration::from_secs(seconds)),
         }
     }
 }
@@ -785,6 +866,35 @@ struct Settings {
 struct ContextUsage {
     #[serde(rename = "apiUsage")]
     api_usage: Option<ApiUsage>,
+    model: String,
+    /// The window the context fits in.
+    #[serde(rename = "maxTokens")]
+    max_tokens: u64,
+    #[serde(rename = "isAutoCompactEnabled")]
+    is_auto_compact_enabled: bool,
+    /// The tokens at which Claude Code compacts the context on its own.
+    #[serde(rename = "autoCompactThreshold")]
+    auto_compact_threshold: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct PlanUsage {
+    /// Absent when the plan's limits do not apply.
+    rate_limits: Option<PlanLimits>,
+}
+
+#[derive(Deserialize)]
+struct PlanLimits {
+    five_hour: Option<PlanLimit>,
+    seven_day: Option<PlanLimit>,
+}
+
+#[derive(Deserialize)]
+struct PlanLimit {
+    /// The share of the limit used, from 0 to 100.
+    utilization: Option<f64>,
+    /// In ISO 8601.
+    resets_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -889,16 +999,22 @@ mod tests {
             *session,
             Some(Limit {
                 utilization: 0.39,
-                is_reached: false
+                is_reached: false,
+                resets_at: Some(since_epoch(1_794_088_800)),
             })
         );
         assert_eq!(
             *week,
             Some(Limit {
                 utilization: 1.0,
-                is_reached: true
+                is_reached: true,
+                resets_at: Some(since_epoch(1_794_492_000)),
             })
         );
+    }
+
+    fn since_epoch(seconds: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(seconds)
     }
 
     #[test]
@@ -958,21 +1074,95 @@ mod tests {
         assert!(matches!(events.as_slice(), [Event::SessionId(id)] if id == "a1"));
     }
 
-    fn context_response(api_usage: &Value) -> String {
+    /// A reply about the context's usage, from Claude Code that compacts the context at
+    /// `auto_compact` tokens, none when it compacts only on request.
+    fn context_response(api_usage: &Value, max_tokens: u64, auto_compact: Option<u64>) -> String {
         json!({
             "type": "control_response",
             "response": {"subtype": "success", "request_id": CONTEXT_REQUEST_ID, "response": {
                 "totalTokens": 13_351,
+                "maxTokens": max_tokens,
+                "model": "claude-opus-5-5",
+                "isAutoCompactEnabled": auto_compact.is_some(),
+                "autoCompactThreshold": auto_compact,
                 "apiUsage": api_usage,
             }},
         })
         .to_string()
     }
 
+    fn usage_response(rate_limits: &Value) -> String {
+        json!({
+            "type": "control_response",
+            "response": {"subtype": "success", "request_id": USAGE_REQUEST_ID, "response": {
+                "subscription_type": "team",
+                "rate_limits_available": !rate_limits.is_null(),
+                "rate_limits": rate_limits,
+            }},
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn the_plans_usage_tells_both_limits_with_when_they_reset() {
+        let rate_limits = json!({
+            "five_hour": {"utilization": 46, "resets_at": "2026-11-08T17:00:00.486618+00:00"},
+            "seven_day": {"utilization": 100, "resets_at": "2026-11-11T16:00:00+01:00"},
+        });
+        let events = read_events(&usage_response(&rate_limits)).expect("a readable line");
+        let [Event::Limits { session, week }] = events.as_slice() else {
+            panic!("limits");
+        };
+        assert_eq!(
+            *session,
+            Some(Limit {
+                utilization: 0.46,
+                is_reached: false,
+                resets_at: Some(since_epoch(1_794_157_200) + Duration::from_micros(486_618)),
+            })
+        );
+        assert_eq!(
+            *week,
+            Some(Limit {
+                utilization: 1.0,
+                is_reached: true,
+                resets_at: Some(since_epoch(1_794_409_200)),
+            })
+        );
+    }
+
+    #[test]
+    fn a_session_without_the_plans_limits_tells_none() {
+        let events = read_events(&usage_response(&Value::Null)).expect("a readable line");
+        assert!(events.is_empty());
+    }
+
     #[test]
     fn a_new_session_has_no_call_to_tell() {
-        let events = read_events(&context_response(&Value::Null)).expect("a readable line");
-        assert!(matches!(events.as_slice(), [Event::LastCall(None)]));
+        let line = context_response(&Value::Null, 1_000_000, Some(967_000));
+        let events = read_events(&line).expect("a readable line");
+        assert!(matches!(events.as_slice(), [Event::LastCall(None), ..]));
+    }
+
+    #[test]
+    fn the_context_usage_tells_the_model_and_where_claude_code_compacts() {
+        let line = context_response(&Value::Null, 1_000_000, Some(967_000));
+        let events = read_events(&line).expect("a readable line");
+        let [_, Event::Model(model), Event::Ceiling(ceiling)] = events.as_slice() else {
+            panic!("the model and the ceiling");
+        };
+        assert_eq!(model, "claude-opus-5-5");
+        assert_eq!(*ceiling, Ceiling::Compact(967_000));
+    }
+
+    #[test]
+    fn a_context_compacted_only_on_request_grows_to_the_window() {
+        let line = context_response(&Value::Null, 1_000_000, None);
+        let events = read_events(&line).expect("a readable line");
+        assert!(matches!(
+            events.as_slice(),
+            [.., Event::Ceiling(Ceiling::Window(1_000_000))]
+        ));
     }
 
     #[test]
@@ -983,8 +1173,9 @@ mod tests {
             "cache_creation_input_tokens": 12_141,
             "cache_read_input_tokens": 9_896,
         });
-        let events = read_events(&context_response(&api_usage)).expect("a readable line");
-        let [Event::LastCall(Some(usage))] = events.as_slice() else {
+        let line = context_response(&api_usage, 1_000_000, Some(967_000));
+        let events = read_events(&line).expect("a readable line");
+        let [Event::LastCall(Some(usage)), ..] = events.as_slice() else {
             panic!("a resumed call");
         };
         assert_eq!(usage.tokens, 22_039);

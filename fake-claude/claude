@@ -25,7 +25,7 @@ state("idle")
 for line in sys.stdin:
     message = json.loads(line)
     # claudio holds messages until the context's usage says how warm the cache is: a new session
-    # has no usage
+    # has no usage. The usage also tells the model, the window and where Claude Code compacts
     if message.get("request", {}).get("subtype") == "get_context_usage":
         send(
             {
@@ -33,7 +33,35 @@ for line in sys.stdin:
                 "response": {
                     "subtype": "success",
                     "request_id": message["request_id"],
-                    "response": {},
+                    "response": {
+                        "model": "claude-opus-5-5",
+                        "maxTokens": 1_000_000,
+                        "isAutoCompactEnabled": True,
+                        "autoCompactThreshold": 967_000,
+                    },
+                },
+            }
+        )
+    if message.get("request", {}).get("subtype") == "get_usage":
+        now = int(time.time())
+        send(
+            {
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": message["request_id"],
+                    "response": {
+                        "rate_limits": {
+                            "five_hour": {
+                                "utilization": 62,
+                                "resets_at": f"{time.strftime('%Y-%m-%dT%H:%M:%S+00:00', time.gmtime(now + 2 * 3600))}",
+                            },
+                            "seven_day": {
+                                "utilization": 81,
+                                "resets_at": f"{time.strftime('%Y-%m-%dT%H:%M:%S+00:00', time.gmtime(now + 4 * 86400))}",
+                            },
+                        }
+                    },
                 },
             }
         )
@@ -44,8 +72,30 @@ for line in sys.stdin:
     send(
         {
             "type": "stream_event",
-            "event": {"type": "message_start", "message": {"usage": {"input_tokens": 1}}},
+            "event": {
+                "type": "message_start",
+                "message": {
+                    "usage": {
+                        "input_tokens": 2,
+                        "cache_creation_input_tokens": 41_201,
+                        "cache_creation": {"ephemeral_1h_input_tokens": 41_201},
+                    }
+                },
+            },
             "parent_tool_use_id": None,
+        }
+    )
+    now = int(time.time())
+    send(
+        {
+            "type": "rate_limit_event",
+            "rate_limit_info": {
+                "status": "allowed",
+                "unifiedWindows": {
+                    "five_hour": {"utilization": 0.62, "resetsAt": now + 2 * 3600},
+                    "seven_day": {"utilization": 0.81, "resetsAt": now + 4 * 86400},
+                },
+            },
         }
     )
     send(

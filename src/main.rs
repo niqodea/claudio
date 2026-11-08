@@ -16,6 +16,7 @@ mod markdown;
 mod protocol;
 mod render;
 mod session;
+mod status;
 mod table;
 mod terminal;
 
@@ -46,6 +47,8 @@ struct Shared {
     limits: Limits,
     /// The session's id, once Claude Code tells it.
     session_id: Option<String>,
+    /// The session's model, once Claude Code tells it.
+    model: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -106,6 +109,7 @@ fn run() -> Result<ExitCode, String> {
         context: Context::new(),
         limits: Limits::new(),
         session_id: None,
+        model: None,
     }));
     let break_signal = Arc::new(AtomicBool::new(false));
     let (input_sender, inputs) = mpsc::channel();
@@ -238,6 +242,8 @@ fn read_claude(from_claude: ChildStdout, shared: &Mutex<Shared>, forward: &dyn F
                     shared.context.note_call(&usage, Instant::now());
                 }
                 Event::LastCall(usage) => shared.context.note_last_call(usage.as_ref()),
+                Event::Model(model) => shared.model = Some(model),
+                Event::Ceiling(ceiling) => shared.context.note_ceiling(ceiling),
                 Event::Ask(ask) => forward(Input::Ask(ask)),
                 Event::Unsupported {
                     request_id,

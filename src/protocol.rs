@@ -128,12 +128,8 @@ pub struct Ask {
 }
 
 pub enum AskKind {
-    /// Whether the tool may run. Allowing it for good adds `rules`, empty when Claude Code
-    /// offers none.
-    Permission {
-        reason: Option<String>,
-        rules: Vec<Value>,
-    },
+    /// Whether the tool may run, which is refused, since only auto mode is supported for now.
+    Permission,
     /// The questions of an `AskUserQuestion` call, which runs once all of them are answered.
     Questions(Vec<Question>),
     /// The plan of an `ExitPlanMode` call, in Markdown, which Claude carries out once the user
@@ -169,14 +165,13 @@ pub struct SettingsError {
 }
 
 pub enum Answer {
-    /// Run the tool with `input`, and from now on allow what `rules` match.
-    Allow {
-        input: Map<String, Value>,
-        rules: Vec<Value>,
-    },
-    /// Refuse the tool with `message`, which Claude reads. `interrupt` also ends the turn, so
-    /// Claude waits for the next message.
-    Deny { message: String, interrupt: bool },
+    /// Run the tool with `input`.
+    Allow { input: Map<String, Value> },
+    /// Refuse the tool and end the turn, so Claude waits for the next message.
+    Deny,
+    /// Refuse the tool for the user's reason, which Claude reads and goes on from in the same
+    /// turn.
+    DenyFor(String),
 }
 
 pub enum Command<'a> {
@@ -243,16 +238,21 @@ impl Command<'_> {
             }),
             Command::Answer(ask, answer) => {
                 let result = match answer {
-                    Answer::Allow { input, rules } => json!({
+                    Answer::Allow { input } => json!({
                         "behavior": "allow",
                         "updatedInput": input,
-                        "updatedPermissions": rules,
                         "toolUseID": ask.tool_use_id,
                     }),
-                    Answer::Deny { message, interrupt } => json!({
+                    Answer::Deny => json!({
                         "behavior": "deny",
-                        "message": message,
-                        "interrupt": interrupt,
+                        "message": "The user refused this tool use.",
+                        "interrupt": true,
+                        "toolUseID": ask.tool_use_id,
+                    }),
+                    Answer::DenyFor(reason) => json!({
+                        "behavior": "deny",
+                        "message": format!("The user refused this tool use. The user said: {reason}"),
+                        "interrupt": false,
                         "toolUseID": ask.tool_use_id,
                     }),
                 };
@@ -515,7 +515,7 @@ fn read_plan_limit(limit: Option<PlanLimit>) -> Result<Option<Limit>, String> {
     }))
 }
 
-fn read_request(request_id: String, request: Value) -> Result<Event, String> {
+pub(crate) fn read_request(request_id: String, request: Value) -> Result<Event, String> {
     let subtype = request["subtype"].as_str().unwrap_or_default().to_string();
     if subtype != "can_use_tool" {
         return Ok(Event::Unsupported {
@@ -534,16 +534,7 @@ fn read_request(request_id: String, request: Value) -> Result<Event, String> {
             .map_err(|error| format!("Unreadable plan from Claude: {error}"))?;
         AskKind::Plan(input.plan)
     } else {
-        // Claude Code marks the asks whose rule would allow more than the call itself
-        let rules = if request.suppress_always_allow_rule {
-            vec![]
-        } else {
-            request.permission_suggestions
-        };
-        AskKind::Permission {
-            reason: request.decision_reason,
-            rules,
-        }
+        AskKind::Permission
     };
     Ok(Event::Ask(Ask {
         request_id,
@@ -902,13 +893,6 @@ struct CanUseTool {
     tool_name: String,
     input: Map<String, Value>,
     tool_use_id: String,
-    // Claude Code leaves the list out when it has no rule to offer
-    #[serde(default)]
-    permission_suggestions: Vec<Value>,
-    decision_reason: Option<String>,
-    // Claude Code leaves the flag out when the rules may be offered
-    #[serde(default)]
-    suppress_always_allow_rule: bool,
 }
 
 #[derive(Deserialize)]

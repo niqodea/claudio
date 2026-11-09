@@ -7,10 +7,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// What the user does on the input line.
 #[derive(Clone)]
 pub enum Phase {
-    /// Writes a message to Claude.
-    Writing,
-    /// Answers what a tool asks, with the question.
-    Answering(String),
+    /// Writes a message to Claude, while this many questions of Claude's wait. A question waits
+    /// for Ctrl-Y rather than taking the input box as it arrives, since a key typed just then
+    /// would answer it. Enter sends no message while any waits, since Claude's turn waits on
+    /// the answers.
+    Writing(usize),
+    /// Answers the question the question view shows.
+    Answering(View),
     /// Has nothing more to say, while Claude finishes its work, which only Ctrl-C stops.
     Ending,
 }
@@ -22,17 +25,36 @@ impl Phase {
     }
 }
 
+/// What the question view shows: one of the questions that wait, which the input box answers.
+#[derive(Clone)]
+pub struct View {
+    /// What the label row says in front of the answer.
+    pub label: String,
+    /// The question in full, above the label row.
+    pub lines: Vec<String>,
+    /// Which question it is, from 0, of how many wait.
+    pub index: usize,
+    pub count: usize,
+}
+
 /// What a session key does. None of them changes the text.
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum SessionKey {
-    /// Ctrl-C: stops Claude's turn, refusing the tool that asks.
+    /// Ctrl-C: stops Claude's turn, refusing what Claude asks.
     Stop,
-    /// Ctrl-D: ends the session, refusing the tool that asks.
+    /// Ctrl-D: ends the session, refusing what Claude asks.
     End,
     /// Ctrl-O: shows the whole conversation.
     ShowFullView,
     /// Ctrl-S: shows the status.
     ShowStatus,
+    /// Ctrl-Y: opens the questions that wait, or goes back to the message from them. The same
+    /// key goes back, since Esc belongs to the vi keys.
+    Questions,
+    /// Ctrl-N: shows the next question, as Ctrl-N shows the next line in readline.
+    Next,
+    /// Ctrl-P: shows the previous question, as Ctrl-P shows the previous line in readline.
+    Previous,
 }
 
 impl SessionKey {
@@ -46,6 +68,9 @@ impl SessionKey {
             KeyCode::Char('d') => Some(SessionKey::End),
             KeyCode::Char('o') => Some(SessionKey::ShowFullView),
             KeyCode::Char('s') => Some(SessionKey::ShowStatus),
+            KeyCode::Char('y') => Some(SessionKey::Questions),
+            KeyCode::Char('n') => Some(SessionKey::Next),
+            KeyCode::Char('p') => Some(SessionKey::Previous),
             _ => None,
         }
     }
@@ -70,9 +95,14 @@ pub enum Action {
 pub fn action(phase: &Phase, key: &KeyEvent, is_empty: bool) -> Action {
     match (phase, SessionKey::of(key)) {
         (Phase::Ending, Some(SessionKey::Stop)) => Action::Session(SessionKey::Stop),
-        (Phase::Ending, _) => Action::Ignore,
+        (Phase::Ending, _)
+        | (Phase::Writing(0), Some(SessionKey::Questions))
+        | (Phase::Writing(_), Some(SessionKey::Next | SessionKey::Previous)) => Action::Ignore,
         (_, Some(SessionKey::End)) if !is_empty => Action::Ignore,
         (_, Some(session_key)) => Action::Session(session_key),
+        (Phase::Writing(waiting), None) if key.code == KeyCode::Enter && *waiting > 0 => {
+            Action::Ignore
+        }
         (_, None) if key.code == KeyCode::Enter => Action::Send,
         (_, None) => Action::Edit,
     }
@@ -90,10 +120,18 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    fn answering() -> Phase {
+        Phase::Answering(View {
+            label: "approve the plan? y/n".to_string(),
+            lines: vec![],
+            index: 0,
+            count: 2,
+        })
+    }
+
     #[test]
     fn writing_and_answering_take_the_same_keys() {
-        let question = Phase::Answering("allow Bash? y/N".to_string());
-        for phase in [Phase::Writing, question] {
+        for phase in [Phase::Writing(0), answering()] {
             let cases = [
                 (control('c'), false, Action::Session(SessionKey::Stop)),
                 (control('c'), true, Action::Session(SessionKey::Stop)),
@@ -117,6 +155,35 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_y_opens_only_questions_that_wait_and_holds_the_message_meanwhile() {
+        let none = Phase::Writing(0);
+        assert_eq!(action(&none, &control('y'), false), Action::Ignore);
+        let waiting = Phase::Writing(2);
+        let cases = [
+            (control('y'), Action::Session(SessionKey::Questions)),
+            (plain(KeyCode::Enter), Action::Ignore),
+            (control('n'), Action::Ignore),
+            (control('p'), Action::Ignore),
+            (plain(KeyCode::Char('y')), Action::Edit),
+        ];
+        for (key, expected) in cases {
+            assert_eq!(action(&waiting, &key, false), expected);
+        }
+    }
+
+    #[test]
+    fn the_question_view_moves_between_questions_and_goes_back_with_ctrl_y() {
+        let cases = [
+            (control('y'), Action::Session(SessionKey::Questions)),
+            (control('n'), Action::Session(SessionKey::Next)),
+            (control('p'), Action::Session(SessionKey::Previous)),
+        ];
+        for (key, expected) in cases {
+            assert_eq!(action(&answering(), &key, false), expected);
+        }
+    }
+
+    #[test]
     fn the_ending_takes_only_ctrl_c_which_stops() {
         assert_eq!(
             action(&Phase::Ending, &control('c'), true),
@@ -126,6 +193,8 @@ mod tests {
             control('d'),
             control('o'),
             control('s'),
+            control('y'),
+            control('n'),
             plain(KeyCode::Enter),
             plain(KeyCode::Char('a')),
         ] {

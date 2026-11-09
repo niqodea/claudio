@@ -26,7 +26,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::context::COLD_COLOR;
 use crate::keys::{self, Action, Phase, SessionKey};
 use crate::limits::{Level, limit_level};
-use crate::render::{Output, STATUS_COLOR, Status, answer_label, marks, start_bar_row};
+use crate::render::{ORANGE, Output, STATUS_COLOR, Status, answer_label, marks, start_bar_row};
 use crate::status;
 use crate::terminal::{Settings, run_in_terminal};
 use crate::vi::{Editor, Effect, Mode};
@@ -67,6 +67,14 @@ pub enum Outcome {
     Send(String),
     /// The user stops Claude's turn, with the text on the line, which stays the draft.
     Stop(String),
+    /// The user opens the questions that wait, or goes back from them to the message, with the
+    /// text on the line, which stays its draft.
+    Questions(String),
+    /// The user moves to the next question, with the text on the line, which stays the draft of
+    /// the question left.
+    Next(String),
+    /// The user moves to the previous question, like `Next`.
+    Previous(String),
     /// The user ends the session.
     End,
     /// Claude Code asked something, which the main thread acts on first, with the text on the
@@ -96,6 +104,13 @@ pub struct InputLine {
     drawn: Drawn,
     /// The label last drawn, which the input line redraws when it changes.
     label: String,
+    /// Whether the question view shows. It shows on the alternate screen, which keeps it out of
+    /// the scrollback, since a question matters only while it is answered, and the
+    /// conversation's new lines wait for the main screen to come back.
+    in_view: bool,
+    /// The size of the last resize while the question view showed, which reaches the main
+    /// screen once it comes back.
+    resized_in_view: Option<(u16, u16)>,
     is_closed: bool,
 }
 
@@ -132,13 +147,19 @@ impl InputLine {
             held: Vec::new(),
             drawn: Drawn::default(),
             label: String::new(),
+            in_view: false,
+            resized_in_view: None,
             is_closed: false,
         })
     }
 
     /// Reads the input line, starting from `draft`, while the conversation goes on above it.
     pub fn read(&mut self, phase: Phase, draft: &str) -> Result<Outcome, String> {
+        let answers = matches!(phase, Phase::Answering(_));
         lock(&self.shared).phase = phase;
+        if answers != self.in_view {
+            self.switch_screen()?;
+        }
         // A command typed for another line has nothing left to act on
         self.editor.cancel();
         if self.text() != draft {
@@ -178,6 +199,9 @@ impl InputLine {
             return Ok(());
         }
         self.is_closed = true;
+        if self.in_view {
+            self.switch_screen()?;
+        }
         let mut out = Vec::new();
         put!(
             out,
@@ -202,9 +226,30 @@ impl InputLine {
     }
 
     /// The row of the label: right below the conversation's end, down to the lowest row the
-    /// label row and the box fit above.
+    /// label row and the box fit above, where the question view always has it.
     fn label_row(&self) -> u16 {
+        if self.in_view {
+            return self.layout.lowest_label_row();
+        }
         self.end.next_row().min(self.layout.lowest_label_row())
+    }
+
+    /// Goes to the question view's screen, or back from it to the conversation's. The
+    /// conversation stays as it was on the main screen, and a resize meanwhile reaches it once
+    /// it comes back.
+    fn switch_screen(&mut self) -> Result<(), String> {
+        let mut out = Vec::new();
+        if self.in_view {
+            put!(out, LeaveAlternateScreen);
+        } else {
+            put!(out, EnterAlternateScreen);
+        }
+        write_out(&out)?;
+        self.in_view = !self.in_view;
+        match self.resized_in_view.take() {
+            Some((width, height)) if !self.in_view => self.resize(width, height),
+            _ => Ok(()),
+        }
     }
 
     /// Acts on a key, with an outcome for one that ends the reading.
@@ -218,6 +263,13 @@ impl InputLine {
         match action {
             Action::Session(SessionKey::Stop) => return Ok(Some(Outcome::Stop(self.text()))),
             Action::Session(SessionKey::End) => return Ok(Some(Outcome::End)),
+            Action::Session(SessionKey::Questions) => {
+                return Ok(Some(Outcome::Questions(self.text())));
+            }
+            Action::Session(SessionKey::Next) => return Ok(Some(Outcome::Next(self.text()))),
+            Action::Session(SessionKey::Previous) => {
+                return Ok(Some(Outcome::Previous(self.text())));
+            }
             Action::Session(SessionKey::ShowFullView) => self.show_full_view()?,
             Action::Session(SessionKey::ShowStatus) => self.show_status()?,
             Action::Send => return Ok(Some(Outcome::Send(self.text()))),
@@ -240,9 +292,16 @@ impl InputLine {
         let path = env::temp_dir().join(format!("claudio-{}.md", process::id()));
         fs::write(&path, self.text())
             .map_err(|error| format!("Cannot write {}: {error}", path.display()))?;
-        let status = self
+        let status = match self
             .run_program(process::Command::new(&self.editor_command).arg(&path))?
-            .map_err(|error| format!("Cannot run {}: {error}", self.editor_command))?;
+        {
+            Ok(status) => status,
+            // The draft stays on the line, and the session goes on
+            Err(error) => {
+                let _ = fs::remove_file(&path);
+                return self.show_error(&format!("Cannot run {}: {error}", self.editor_command));
+            }
+        };
         let text = fs::read_to_string(&path)
             .map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
         // The file goes with the draft, which the input line now holds
@@ -272,12 +331,31 @@ impl InputLine {
                 SystemTime::now(),
             )
         };
+        self.show_screen(&lines)
+    }
+
+    /// Shows `error` on a screen of its own, like a program the input line runs, since it
+    /// concerns the input line rather than the conversation.
+    fn show_error(&mut self, error: &str) -> Result<(), String> {
+        self.show_screen(&[error.to_string()])
+    }
+
+    /// Shows `lines` at the bottom of the terminal's alternate screen, until the next key or a
+    /// question from Claude Code closes them. The conversation stays as it was on the main
+    /// screen, which comes back once they close.
+    fn show_screen(&mut self, lines: &[String]) -> Result<(), String> {
+        // The question view is on the alternate screen already, and draws itself again after
         let mut out = Vec::new();
-        put!(out, EnterAlternateScreen, Hide);
+        if !self.in_view {
+            put!(out, EnterAlternateScreen);
+        }
+        put!(out, Hide);
         write_out(&out)?;
-        let shown = self.show_status_until_closed(&lines);
+        let shown = self.show_screen_until_closed(lines);
         let mut out = Vec::new();
-        put!(out, LeaveAlternateScreen);
+        if !self.in_view {
+            put!(out, LeaveAlternateScreen);
+        }
         let left = write_out(&out);
         match shown? {
             Some((width, height)) => left.and_then(|()| self.resize(width, height)),
@@ -285,9 +363,9 @@ impl InputLine {
         }
     }
 
-    /// Draws the status's `lines` on the alternate screen until a key or a question from Claude
-    /// Code closes it. Returns the size of the last resize meanwhile, if any.
-    fn show_status_until_closed(&self, lines: &[String]) -> Result<Option<(u16, u16)>, String> {
+    /// Draws `lines` on the alternate screen until a key or a question from Claude Code closes
+    /// it. Returns the size of the last resize meanwhile, if any.
+    fn show_screen_until_closed(&self, lines: &[String]) -> Result<Option<(u16, u16)>, String> {
         let mut height = self.layout.height;
         let mut resized = None;
         let mut is_drawn = false;
@@ -329,12 +407,10 @@ impl InputLine {
                 .env("LESSCHARSET", "utf-8")
                 .arg(&self.full_view),
         )?;
-        if let Err(error) = status {
-            lock(&self.shared)
-                .output
-                .show_error(&format!("Cannot show the full view: {error}"));
+        match status {
+            Ok(_) => Ok(()),
+            Err(error) => self.show_error(&format!("Cannot show the full view: {error}")),
         }
-        Ok(())
     }
 
     /// Runs `command` in the terminal, handed over with paste mode off and the cursor in the
@@ -349,6 +425,10 @@ impl InputLine {
         write_out(&out)?;
         let status = run_in_terminal(self.original_settings, command);
         let mut out = Vec::new();
+        // A program that draws on the alternate screen leaves it as it ends
+        if self.in_view {
+            put!(out, EnterAlternateScreen);
+        }
         put!(out, EnableBracketedPaste);
         write_out(&out)?;
         Ok(status)
@@ -359,7 +439,7 @@ impl InputLine {
     fn print_output(&mut self) -> Result<(), String> {
         let lines = lock(&self.shared).output.take_lines();
         self.held.extend(lines);
-        if self.held.is_empty() || !self.layout.shows_conversation() {
+        if self.held.is_empty() || self.in_view || !self.layout.shows_conversation() {
             return Ok(());
         }
         let mut out = Vec::new();
@@ -409,22 +489,39 @@ impl InputLine {
         out.extend(BEGIN_FRAME.as_bytes());
         put!(out, Hide);
         let label_row = self.label_row();
+        let view = match &lock(&self.shared).phase {
+            Phase::Answering(view) => Some(view.clone()),
+            _ => None,
+        };
+        if let Some(view) = &view {
+            draw_question(&mut out, &view.lines, layout.width, label_row);
+        }
         let mut widths = Vec::new();
         if layout.label_rows > 0 {
             put!(out, MoveTo(0, label_row));
             out.extend(format!("{}{}{RESET}", start_bar_row(), self.label).as_bytes());
             // The label row shows the keys of a half-typed vi command at its right edge, where
             // vim's `showcmd` shows them, so nothing else on the row moves when they appear or
-            // go. Keys wider than the screen wrap onto the box's first row
+            // go, and the question view which question it shows of how many. Keys wider than
+            // the screen wrap onto the box's first row
             let pending = self.editor.pending();
-            if pending.is_empty() {
+            let position = view
+                .as_ref()
+                .map(|view| format!("{}/{}", view.index + 1, view.count));
+            let right: Vec<&str> = [Some(pending.as_str()), position.as_deref()]
+                .into_iter()
+                .flatten()
+                .filter(|part| !part.is_empty())
+                .collect();
+            let right = right.join(" ");
+            if right.is_empty() {
                 widths.push(visible_width(&self.label));
             } else {
                 let column = layout
                     .width
-                    .saturating_sub(u16::try_from(pending.width()).unwrap_or(u16::MAX));
+                    .saturating_sub(u16::try_from(right.width()).unwrap_or(u16::MAX));
                 put!(out, MoveTo(column, label_row));
-                out.extend(format!("{}{STATUS_COLOR}{pending}{RESET}", start_bar_row()).as_bytes());
+                out.extend(format!("{}{STATUS_COLOR}{right}{RESET}", start_bar_row()).as_bytes());
                 // The row's text now reaches the right edge, so a narrower screen splits the
                 // whole row, not only the label
                 widths.push(usize::from(layout.width));
@@ -465,10 +562,14 @@ impl InputLine {
         let cursor_row =
             (label_row + layout.label_rows + cursor_in_box).min(layout.height.saturating_sub(1));
         widths.extend(row_widths.iter().take(usize::from(cursor_in_box)));
-        self.drawn = Drawn {
-            widths_above_cursor: widths,
-            cursor_column: cursor_x,
-        };
+        // A resize on the alternate screen leaves the main screen's rows as the last draw there
+        // left them
+        if !self.in_view {
+            self.drawn = Drawn {
+                widths_above_cursor: widths,
+                cursor_column: cursor_x,
+            };
+        }
         let shape = match self.editor.mode() {
             Mode::Insert => SetCursorStyle::SteadyBar,
             Mode::Normal | Mode::Visual | Mode::VisualLine => SetCursorStyle::SteadyBlock,
@@ -485,6 +586,12 @@ impl InputLine {
     /// A screen shrunk to no more rows than the label row and the box's rows above the cursor
     /// takes those rows into the scrollback, where copies of them stay.
     fn resize(&mut self, width: u16, height: u16) -> Result<(), String> {
+        // The question view draws its whole screen again, and the main screen waits
+        if self.in_view {
+            self.layout = Layout::new(width, height);
+            self.resized_in_view = Some((width, height));
+            return Ok(());
+        }
         let (_, cursor_row) = cursor::position().map_err(|error| cannot_read_terminal(&error))?;
         let width_now = usize::from(width.max(1));
         let rows_above: usize = self
@@ -518,12 +625,13 @@ impl InputLine {
     }
 
     /// The label row: for a message, `››` with the context's level, marked and red on a cold
-    /// cache, the levels of the plan's usage limits, and what Claude does after them; for an
-    /// answer, the question; at the end, the work Claude still does.
+    /// cache, the levels of the plan's usage limits, and after them the questions that wait, in
+    /// the color of a warning since only the user moves them on, or else what Claude does; for
+    /// an answer, the question; at the end, the work Claude still does.
     fn make_label(&self) -> String {
         let shared = lock(&self.shared);
         match &shared.phase {
-            Phase::Writing => {
+            Phase::Writing(waiting) => {
                 let now = Instant::now();
                 let level = shared.context.level();
                 let is_cold = shared.context.is_cold(now);
@@ -535,11 +643,12 @@ impl InputLine {
                     (" ", STATUS_COLOR)
                 };
                 let indicators = format!(
-                    "{}{level_color}{cold_mark}T{} {} {}",
+                    "{}{level_color}{cold_mark}T{} {} {} {}",
                     marks(),
                     show_level(level),
                     limit_indicator('S', shared.limits.session().map(limit_level)),
                     limit_indicator('W', shared.limits.week().map(limit_level)),
+                    waiting_indicator(*waiting),
                 );
                 let state = if shared.context.is_cold_confirmed(now) {
                     Some("cold, enter sends".to_string())
@@ -550,7 +659,7 @@ impl InputLine {
                     state.map_or_else(String::new, |state| format!(" {STATUS_COLOR}│ {state}"));
                 format!("{indicators}{state}")
             }
-            Phase::Answering(question) => answer_label(question),
+            Phase::Answering(view) => answer_label(&view.label),
             Phase::Ending => {
                 let output = &shared.output;
                 let tasks = output.background_tasks();
@@ -713,6 +822,42 @@ fn show_level(level: Option<usize>) -> String {
 fn limit_indicator(letter: char, level: Option<Level>) -> String {
     let color = level.and_then(Level::color).unwrap_or(STATUS_COLOR);
     format!("{color}{letter}{}", show_level(level.map(Level::to_number)))
+}
+
+/// Y and how many questions wait, up to 9 and + for more, which keeps one character for the
+/// count, in the color of a warning while any waits, since only the user moves them on.
+fn waiting_indicator(waiting: usize) -> String {
+    let (color, count) = match waiting {
+        0 => (STATUS_COLOR, "0".to_string()),
+        1..=9 => (ORANGE, waiting.to_string()),
+        _ => (ORANGE, "+".to_string()),
+    };
+    format!("{color}Y{count}")
+}
+
+/// Draws a question's `lines` from the top of the question view down to `label_row`, on a
+/// screen `width` wide that wraps them. A question taller than the rows ends with … where it
+/// is cut; the conversation has it whole.
+fn draw_question(out: &mut Vec<u8>, lines: &[String], width: u16, label_row: u16) {
+    put!(out, Clear(ClearType::All));
+    let width = usize::from(width.max(1));
+    let mut row: u16 = 0;
+    for (index, line) in lines.iter().enumerate() {
+        let rows = u16::try_from(visible_width(line).div_ceil(width).max(1)).unwrap_or(u16::MAX);
+        let room = label_row.saturating_sub(row);
+        let is_last = index + 1 == lines.len();
+        // A cut keeps a row for the …
+        if rows > room || (!is_last && rows == room) {
+            if room > 0 {
+                put!(out, MoveTo(0, row));
+                out.extend(format!("{STATUS_COLOR}…{RESET}").as_bytes());
+            }
+            return;
+        }
+        put!(out, MoveTo(0, row));
+        out.extend(format!("{line}{RESET}").as_bytes());
+        row += rows;
+    }
 }
 
 /// What Claude does, none while it waits for the user.

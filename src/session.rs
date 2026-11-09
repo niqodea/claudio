@@ -8,16 +8,14 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use crate::input_line::{InputLine, Outcome};
 use crate::keys::Phase;
-use crate::protocol::{Answer, Ask, AskKind, Command, Question};
+use crate::protocol::{Answer, Ask, AskKind, Command};
+use crate::questions::{Answered, Questions};
 use crate::render::{Interruption, Status};
 use crate::{Shared, lock};
-
-const REFUSAL: &str = "The user refused this tool use.";
 
 /// What Claude Code asks of the main thread.
 pub enum Input {
@@ -73,12 +71,24 @@ impl<'a> Conversation<'a> {
         // answering a status line with HTTP 429
         self.send(&Command::GetUsage)?;
         let mut draft = String::new();
+        // What Claude asks waits for the user to open it with Ctrl-Y, so no key typed before a
+        // question showed can answer it
+        let mut questions = Questions::default();
+        // The question the question view shows, while it shows
+        let mut shown: Option<usize> = None;
         loop {
             match self.session.next_input() {
+                Some(Input::Ask(ask)) if matches!(ask.kind, AskKind::Permission) => {
+                    lock(&self.session.shared).output.show_error(&format!(
+                        "Refused {}: only auto mode is supported",
+                        ask.tool_name
+                    ));
+                    self.reply(&ask, Answer::Deny)?;
+                    continue;
+                }
                 Some(Input::Ask(ask)) => {
-                    if self.answer(&ask)? == Leave::End {
-                        return Ok(Some(self.end_input()));
-                    }
+                    lock(&self.session.shared).output.show_ask(&ask);
+                    questions.add(ask);
                     continue;
                 }
                 Some(Input::Unsupported {
@@ -94,39 +104,138 @@ impl<'a> Conversation<'a> {
                 }
                 None => {}
             }
-            draft = match self.session.input.read(Phase::Writing, &draft)? {
-                // A message on a cold cache stays on the input line the first time, and the
-                // label says the next Enter sends it
-                Outcome::Send(text) => {
-                    if text.trim().is_empty() {
-                        String::new()
-                    } else if lock(&self.session.shared)
-                        .context
-                        .holds_message(Instant::now())
-                    {
-                        text
-                    } else {
-                        self.send_message(&text)?;
-                        String::new()
-                    }
+            let outcome = match shown {
+                None => self
+                    .session
+                    .input
+                    .read(Phase::Writing(questions.count()), &draft)?,
+                Some(index) => {
+                    let question_draft = questions.draft(index).to_string();
+                    self.session
+                        .input
+                        .read(Phase::Answering(questions.view(index)), &question_draft)?
                 }
-                Outcome::Stop(text) => {
-                    let is_working = lock(&self.session.shared).output.status() != Status::Idle;
-                    if is_working {
-                        self.interrupt(Interruption::Stop)?;
-                    }
-                    text
-                }
-                // Claude Code asked something, which the next round of the loop answers
-                Outcome::Break(text) => text,
-                Outcome::End => return Ok(Some(self.end_input())),
             };
+            match (shown, outcome) {
+                (_, Outcome::End) => return self.end_input(&mut questions),
+                (None, outcome) => {
+                    (draft, shown) = self.act_on_message(outcome, &mut questions)?;
+                }
+                (Some(index), outcome) => {
+                    shown = self.act_on_question(outcome, index, &mut questions)?;
+                }
+            }
         }
     }
 
-    /// Closes Claude Code's input, as the end of input does a program's in the terminal, since
-    /// the user has nothing more to say.
-    fn end_input(self) -> Ending<'a> {
+    /// Acts on how the user left the message's line, and returns the message's draft and the
+    /// question the question view shows next, if it opened.
+    fn act_on_message(
+        &mut self,
+        outcome: Outcome,
+        questions: &mut Questions,
+    ) -> Result<(String, Option<usize>), String> {
+        Ok(match outcome {
+            // A message on a cold cache stays on the input line the first time, and the label
+            // says the next Enter sends it
+            Outcome::Send(text) => {
+                if text.trim().is_empty() {
+                    (String::new(), None)
+                } else if lock(&self.session.shared)
+                    .context
+                    .holds_message(Instant::now())
+                {
+                    (text, None)
+                } else {
+                    self.send_message(&text)?;
+                    (String::new(), None)
+                }
+            }
+            Outcome::Questions(text) => (text, Some(0)),
+            // Claude's turn waits on its questions, so stopping it refuses them
+            Outcome::Stop(text) => {
+                if !questions.is_empty() {
+                    for ask in questions.remove_all() {
+                        self.reply(&ask, Answer::Deny)?;
+                    }
+                } else if lock(&self.session.shared).output.status() != Status::Idle {
+                    self.interrupt(Interruption::Stop)?;
+                }
+                (text, None)
+            }
+            // Claude Code asked something, which the next round of the loop shows
+            Outcome::Break(text) | Outcome::Next(text) | Outcome::Previous(text) => (text, None),
+            Outcome::End => unreachable!("the session ends before"),
+        })
+    }
+
+    /// Acts on how the user left the question at `index` in the question view, and returns the
+    /// question it shows next, none to go back to the message.
+    fn act_on_question(
+        &mut self,
+        outcome: Outcome,
+        index: usize,
+        questions: &mut Questions,
+    ) -> Result<Option<usize>, String> {
+        let count = questions.count();
+        Ok(match outcome {
+            Outcome::Send(text) => match questions.answer(index, &text) {
+                None => {
+                    questions.keep_draft(index, text);
+                    Some(index)
+                }
+                Some(Answered {
+                    label,
+                    answer,
+                    notes,
+                    reply,
+                }) => {
+                    {
+                        let output = &mut lock(&self.session.shared).output;
+                        output.show_answer(&label, &answer);
+                        if let Some(notes) = notes {
+                            output.show_answer("notes", &notes);
+                        }
+                    }
+                    if let Some((ask, answer)) = reply {
+                        self.reply(&ask, answer)?;
+                    }
+                    next_shown(questions, index)
+                }
+            },
+            Outcome::Questions(text) => {
+                questions.keep_draft(index, text);
+                None
+            }
+            Outcome::Next(text) => {
+                questions.keep_draft(index, text);
+                Some((index + 1) % count)
+            }
+            Outcome::Previous(text) => {
+                questions.keep_draft(index, text);
+                Some((index + count - 1) % count)
+            }
+            // Claude Code asked something more, which the next round of the loop adds
+            Outcome::Break(text) => {
+                questions.keep_draft(index, text);
+                Some(index)
+            }
+            // Claude Code takes or refuses a call's questions together
+            Outcome::Stop(_) => {
+                let ask = questions.remove_call(index);
+                self.reply(&ask, Answer::Deny)?;
+                next_shown(questions, index)
+            }
+            Outcome::End => unreachable!("the session ends before"),
+        })
+    }
+
+    /// Refuses what Claude asks, and closes Claude Code's input, as the end of input does a
+    /// program's in the terminal, since the user has nothing more to say.
+    fn end_input(mut self, questions: &mut Questions) -> Result<Option<Ending<'a>>, String> {
+        for ask in questions.remove_all() {
+            self.reply(&ask, Answer::Deny)?;
+        }
         let Conversation {
             session,
             to_claude,
@@ -134,126 +243,24 @@ impl<'a> Conversation<'a> {
             request_count: _,
         } = self;
         drop(to_claude);
-        Ending { session, claude }
+        Ok(Some(Ending { session, claude }))
     }
 
-    /// Asks the user about the tool, and tells Claude Code the answer, a refusal that stops
-    /// Claude's turn when the user leaves the question. Returns how the user left the question.
-    fn answer(&mut self, ask: &Ask) -> Result<Leave, String> {
-        lock(&self.session.shared).output.show_ask(ask);
-        let reply = match &ask.kind {
-            AskKind::Permission { rules, .. } => {
-                let always = if rules.is_empty() { "" } else { "/a" };
-                // Enter on an empty line refuses, which the capital N says
-                let question = format!("allow {}? y/N{always}", ask.tool_name);
-                self.read_permission(ask, &question, rules)?
-            }
-            // Leaving plan mode, Claude Code returns to the mode the session had before it
-            AskKind::Plan(_) => self.read_permission(ask, "approve the plan? y/N", &[])?,
-            AskKind::Questions(questions) => self.read_questions(ask, questions)?,
-        };
-        let (answer, leave) = match reply {
-            Ok(answer) => (answer, Leave::Answered),
-            Err(leave) => (refuse_and_stop(), leave),
-        };
-        if let Answer::Deny { interrupt, .. } = &answer {
-            let output = &mut lock(&self.session.shared).output;
-            output.hide_result(&ask.tool_use_id);
-            if *interrupt {
+    /// Tells Claude Code the answer to what it asked.
+    fn reply(&mut self, ask: &Ask, answer: Answer) -> Result<(), String> {
+        // The result of a refused tool repeats the refusal
+        match answer {
+            Answer::Deny => {
+                let output = &mut lock(&self.session.shared).output;
+                output.hide_result(&ask.tool_use_id);
                 output.note_interrupt(Interruption::Stop);
             }
+            Answer::DenyFor(_) => lock(&self.session.shared)
+                .output
+                .hide_result(&ask.tool_use_id),
+            Answer::Allow { .. } => {}
         }
-        self.send(&Command::Answer(ask, answer))?;
-        Ok(leave)
-    }
-
-    /// Reads whether the tool may run: once, for good with `rules` when there are any, or not,
-    /// for a reason the user gives or none.
-    fn read_permission(
-        &mut self,
-        ask: &Ask,
-        question: &str,
-        rules: &[Value],
-    ) -> Result<Result<Answer, Leave>, String> {
-        loop {
-            let text = match self.read_answer(question)? {
-                Ok(text) => text,
-                Err(leave) => return Ok(Err(leave)),
-            };
-            return Ok(Ok(match text.trim() {
-                "y" => Answer::Allow {
-                    input: ask.input.clone(),
-                    rules: vec![],
-                },
-                "a" if !rules.is_empty() => Answer::Allow {
-                    input: ask.input.clone(),
-                    rules: rules.to_vec(),
-                },
-                // Offered no rule, a lone a is a slip rather than a reason
-                "a" => continue,
-                "n" | "" => refuse_and_stop(),
-                reason => Answer::Deny {
-                    message: format!("{REFUSAL} The user said: {reason}"),
-                    interrupt: false,
-                },
-            }));
-        }
-    }
-
-    fn read_questions(
-        &mut self,
-        ask: &Ask,
-        questions: &[Question],
-    ) -> Result<Result<Answer, Leave>, String> {
-        let mut answers = Map::new();
-        for question in questions {
-            let several = if question.is_multi_select {
-                ", several apart"
-            } else {
-                ""
-            };
-            let label = format!("{} 1-{}{several}", question.header, question.options.len());
-            let choice = loop {
-                let text = match self.read_answer(&label)? {
-                    Ok(text) => text,
-                    Err(leave) => return Ok(Err(leave)),
-                };
-                if !text.trim().is_empty() {
-                    break choose(question, text.trim());
-                }
-            };
-            answers.insert(question.text.clone(), Value::String(choice));
-        }
-        let mut input = ask.input.clone();
-        input.insert("answers".to_string(), Value::Object(answers));
-        Ok(Ok(Answer::Allow {
-            input,
-            rules: vec![],
-        }))
-    }
-
-    /// Reads one answer to `question`, or how the user left it.
-    fn read_answer(&mut self, question: &str) -> Result<Result<String, Leave>, String> {
-        let mut draft = String::new();
-        loop {
-            match self
-                .session
-                .input
-                .read(Phase::Answering(question.to_string()), &draft)?
-            {
-                Outcome::Send(text) => {
-                    lock(&self.session.shared)
-                        .output
-                        .show_answer(question, &text);
-                    return Ok(Ok(text));
-                }
-                // Claude Code asked something more, which waits for this answer
-                Outcome::Break(text) => draft = text,
-                // Refusing the question drops the answer typed to it
-                Outcome::Stop(_) => return Ok(Err(Leave::Stop)),
-                Outcome::End => return Ok(Err(Leave::End)),
-            }
-        }
+        self.send(&Command::Answer(ask, answer))
     }
 
     /// Shows the message and sends it. While Claude works, Claude Code makes way for it, as for
@@ -291,9 +298,9 @@ impl<'a> Conversation<'a> {
     }
 
     fn refuse(&mut self, request_id: &str, subtype: &str) -> Result<(), String> {
-        lock(&self.session.shared).output.show_error(&format!(
-            "Claude Code asked for {subtype}, which this client does not offer"
-        ));
+        lock(&self.session.shared)
+            .output
+            .show_error(&format!("Refused {subtype}: not supported"));
         self.send(&Command::Refuse {
             request_id,
             subtype,
@@ -339,7 +346,12 @@ impl Ending<'_> {
                 Outcome::Stop(_) => self.interrupt()?,
                 // Claude Code fails what it asks once its input closed, and the ending takes no
                 // other key
-                Outcome::Break(_) | Outcome::Send(_) | Outcome::End => {}
+                Outcome::Break(_)
+                | Outcome::Send(_)
+                | Outcome::Questions(_)
+                | Outcome::Next(_)
+                | Outcome::Previous(_)
+                | Outcome::End => {}
             }
         }
     }
@@ -390,39 +402,9 @@ impl Session {
     }
 }
 
-/// The labels of the options the numbers in `text` pick, or `text` itself as the user's own
-/// answer.
-fn choose(question: &Question, text: &str) -> String {
-    let picks: Option<Vec<&str>> = text
-        .split([' ', ','])
-        .filter(|word| !word.is_empty())
-        .map(|word| {
-            let number: usize = word.parse().ok()?;
-            let choice = question.options.get(number.checked_sub(1)?)?;
-            Some(choice.label.as_str())
-        })
-        .collect();
-    match picks {
-        Some(labels) if labels.len() == 1 || question.is_multi_select => labels.join(", "),
-        _ => text.to_string(),
-    }
-}
-
-/// How the user leaves a question.
-#[derive(Clone, Copy, PartialEq)]
-enum Leave {
-    /// By answering it.
-    Answered,
-    /// By stopping Claude's turn.
-    Stop,
-    /// By ending the session, which stops Claude's turn too.
-    End,
-}
-
-/// Refuses the tool and ends the turn, so Claude waits for the user's next message.
-fn refuse_and_stop() -> Answer {
-    Answer::Deny {
-        message: REFUSAL.to_string(),
-        interrupt: true,
-    }
+/// The question the question view shows once the one at `index` is answered or refused: the
+/// one that took its place, or the new last one, or none once none waits, which takes the user
+/// back to the message.
+fn next_shown(questions: &Questions, index: usize) -> Option<usize> {
+    (!questions.is_empty()).then(|| index.min(questions.count() - 1))
 }

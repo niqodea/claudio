@@ -14,14 +14,15 @@ use std::io::Write;
 use serde_json::{Map, Value};
 
 use crate::markdown::Highlighter;
-use crate::protocol::{Ask, AskKind, SettingsError, State, ToolResult, ToolUse};
+use crate::protocol::{Ask, AskKind, Question, SettingsError, State, ToolResult, ToolUse};
+use crate::questions::own_key;
 
 const GREEN: &str = "\x1b[32m";
 // The marks of the user's lines
 const LIGHT_CYAN: &str = "\x1b[96m";
 const YELLOW: &str = "\x1b[33m";
 // For a warning
-const ORANGE: &str = "\x1b[38;5;208m";
+pub const ORANGE: &str = "\x1b[38;5;208m";
 // Only for failures, since red reads as an error
 const RED: &str = "\x1b[31m";
 // For what Claude did, which supports what Claude wrote
@@ -378,48 +379,12 @@ impl Output {
     pub fn show_ask(&mut self, ask: &Ask) {
         self.begin(Section::Tools);
         match &ask.kind {
-            AskKind::Permission { reason, .. } => {
-                if let Some(reason) = reason {
-                    self.push(format!("{YELLOW}{}{RESET}", reason.trim()));
-                }
-                // The tool's line shows only the start of an input it has no summary for
-                if !SUMMARY_FIELDS
-                    .iter()
-                    .any(|(tool, _)| *tool == ask.tool_name)
-                {
-                    let input = serde_json::to_string_pretty(&ask.input)
-                        .expect("a JSON object turns back into JSON");
-                    for line in input.lines() {
-                        self.push(format!("{DIM}{line}{RESET}"));
-                    }
-                }
-            }
-            AskKind::Plan(plan) => {
-                let mut highlighter = Highlighter::new();
-                for line in plan.trim().lines() {
-                    let colored = highlighter.color_line(line);
-                    self.push_all(colored);
-                }
-                let held = highlighter.finish();
-                self.push_all(held);
-            }
+            // Refused as it arrives, which the error line says
+            AskKind::Permission => {}
+            AskKind::Plan(plan) => self.push_all(plan_lines(plan)),
             AskKind::Questions(questions) => {
                 for question in questions {
-                    self.push(format!(
-                        "{BOLD}{}{RESET} {}",
-                        question.header, question.text
-                    ));
-                    for (number, choice) in (1..).zip(&question.options) {
-                        self.push(format!(
-                            "  {number}. {} {DIM}{}{RESET}",
-                            choice.label, choice.description
-                        ));
-                        if let Some(preview) = &choice.preview {
-                            for line in preview.lines() {
-                                self.push(format!("     {DIM}{line}{RESET}"));
-                            }
-                        }
-                    }
+                    self.push_all(question_lines(question));
                 }
             }
         }
@@ -577,6 +542,43 @@ pub fn marks() -> String {
 /// marks, since both say who starts.
 fn reply_mark() -> String {
     format!("{LIGHT_CYAN}‹‹{RESET}")
+}
+
+/// The lines of a plan, as Markdown.
+pub fn plan_lines(plan: &str) -> Vec<String> {
+    let mut highlighter = Highlighter::new();
+    let mut lines = Vec::new();
+    for line in plan.trim().lines() {
+        lines.extend(highlighter.color_line(line));
+    }
+    lines.extend(highlighter.finish());
+    lines
+}
+
+/// The lines of a question: its header and text, then its options, keyed by letter from a, and
+/// last, for a question of one choice, the key of the user's own answer.
+pub fn question_lines(question: &Question) -> Vec<String> {
+    let mut lines = vec![format!(
+        "{BOLD}{}{RESET} {}",
+        question.header, question.text
+    )];
+    for (key, choice) in ('a'..).zip(&question.options) {
+        lines.push(format!(
+            "  {key}. {} {DIM}{}{RESET}",
+            choice.label, choice.description
+        ));
+        if let Some(preview) = &choice.preview {
+            for line in preview.lines() {
+                lines.push(format!("     {DIM}{line}{RESET}"));
+            }
+        }
+    }
+    // A question of several choices takes items of the user's own after its keys instead
+    if !question.is_multi_select {
+        let own = own_key(question);
+        lines.push(format!("  {own}. {DIM}your own answer, after {own}{RESET}"));
+    }
+    lines
 }
 
 /// The question in front of an answer, on the bar.

@@ -15,6 +15,7 @@ mod keys;
 mod limits;
 mod markdown;
 mod protocol;
+mod questions;
 mod render;
 mod session;
 mod status;
@@ -66,8 +67,11 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<ExitCode, String> {
-    let editor_command =
-        env::var("EDITOR").map_err(|_| "Set EDITOR to the editor : opens".to_string())?;
+    // vi when EDITOR is unset or empty, since POSIX requires a vi on every system it covers
+    let editor_command = env::var("EDITOR")
+        .ok()
+        .filter(|editor| !editor.is_empty())
+        .unwrap_or_else(|| "vi".to_string());
     let mut claude = process::Command::new("claude")
         .args([
             "--print",
@@ -103,7 +107,7 @@ fn run() -> Result<ExitCode, String> {
         .tempfile()
         .map_err(|error| format!("Cannot create the file of the full view: {error}"))?;
     let shared = Arc::new(Mutex::new(Shared {
-        phase: Phase::Writing,
+        phase: Phase::Writing(0),
         output: Output::new(
             full_view
                 .reopen()

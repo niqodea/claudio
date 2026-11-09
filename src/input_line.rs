@@ -648,7 +648,7 @@ impl InputLine {
                     waiting_indicator(*waiting),
                 );
                 let state = if shared.context.is_cold_confirmed(now) {
-                    Some("cold, enter sends".to_string())
+                    Some(format!("{COLD_COLOR}cold, enter sends"))
                 } else {
                     describe_work(&shared.output)
                 };

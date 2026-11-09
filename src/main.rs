@@ -9,6 +9,7 @@
 //! files, which keeps the client small and its assumptions on how Claude Code works few.
 
 mod code;
+mod config;
 mod context;
 mod input_line;
 mod keys;
@@ -34,6 +35,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+use config::Config;
 use context::Context;
 use input_line::{InputLine, final_line};
 use keys::Phase;
@@ -67,6 +69,7 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<ExitCode, String> {
+    let config = Config::read()?;
     // vi when EDITOR is unset or empty, since POSIX requires a vi on every system it covers
     let editor_command = env::var("EDITOR")
         .ok()
@@ -112,6 +115,7 @@ fn run() -> Result<ExitCode, String> {
             full_view
                 .reopen()
                 .map_err(|error| format!("Cannot open the file of the full view: {error}"))?,
+            config.max_detail_columns,
         ),
         context: Context::new(),
         limits: Limits::new(),
@@ -140,6 +144,7 @@ fn run() -> Result<ExitCode, String> {
         editor_command,
         full_view.path().to_path_buf(),
         quiet_terminal.original(),
+        config.input_rows,
         Arc::clone(&break_signal),
         Arc::clone(&shared),
     )?;

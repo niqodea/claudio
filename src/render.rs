@@ -9,8 +9,10 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
+use std::num::NonZeroUsize;
 
 use serde_json::{Map, Value};
+use unicode_width::UnicodeWidthChar;
 
 use crate::markdown::Highlighter;
 use crate::protocol::{Ask, AskKind, Question, SettingsError, State, ToolResult, ToolUse};
@@ -79,6 +81,8 @@ pub struct Output {
     /// Each tool use that waits for its result. Claude can run several tools at once, so a
     /// result can come after a line of another tool.
     pending_calls: HashMap<String, PendingCall>,
+    /// The columns a detail line takes at most on screen.
+    max_detail_columns: NonZeroUsize,
     /// The tag of the next tool use.
     next_tag: u8,
     /// How the user stopped the turn that runs, if they did.
@@ -154,7 +158,7 @@ enum Section {
 }
 
 impl Output {
-    pub fn new(full_view: File) -> Self {
+    pub fn new(full_view: File, max_detail_columns: NonZeroUsize) -> Self {
         Output {
             text: String::new(),
             full_view,
@@ -164,6 +168,7 @@ impl Output {
             status: Status::Idle,
             hidden_results: HashSet::new(),
             pending_calls: HashMap::new(),
+            max_detail_columns,
             next_tag: 0,
             interruption: None,
             highlighter: Highlighter::new(),
@@ -264,7 +269,7 @@ impl Output {
         self.set_status(Status::Idle);
         if let Some(exit) = exit {
             self.begin(Section::Notice);
-            self.push(&format!("{DIM}{exit}{RESET}"));
+            self.push_detail(&format!("{DIM}{exit}{RESET}"));
         }
     }
 
@@ -315,7 +320,7 @@ impl Output {
         } else {
             String::new()
         };
-        self.push(&format!(
+        self.push_detail(&format!(
             "{mark} {}{RESET} {first}{more}{changes}",
             tool_use.name
         ));
@@ -361,7 +366,7 @@ impl Output {
         let label = call.map_or_else(String::new, |call| {
             format!("#{:02x} {}: ", call.tag, call.name)
         });
-        self.push(&format!("{outcome} {DIM}{label}{first}{more}{RESET}"));
+        self.push_detail(&format!("{outcome} {DIM}{label}{first}{more}{RESET}"));
         for line in text.lines().skip(1) {
             self.write_full_view_line(&format!("  {line}"));
         }
@@ -372,10 +377,10 @@ impl Output {
         match &ask.kind {
             // Refused as it arrives, which the error line says
             AskKind::Permission => {}
-            AskKind::Plan(plan) => self.push_all(plan_lines(plan)),
+            AskKind::Plan(plan) => self.push_details(plan_lines(plan)),
             AskKind::Questions(questions) => {
                 for question in questions {
-                    self.push_all(question_lines(question));
+                    self.push_details(question_lines(question));
                 }
             }
         }
@@ -393,7 +398,7 @@ impl Output {
         };
         if let Some(line) = line {
             self.begin(Section::Notice);
-            self.push(&format!("{DIM}{line}{RESET}"));
+            self.push_detail(&format!("{DIM}{line}{RESET}"));
         }
         // A message that waits for its reply still waits when an older turn ends
         if self.position != Position::In(Section::Message) {
@@ -405,7 +410,7 @@ impl Output {
         self.begin(Section::Notice);
         for error in errors {
             let file = error.file.as_deref().unwrap_or("A settings file");
-            self.push(&format!(
+            self.push_detail(&format!(
                 "{RED}Skipped {file}, so none of its settings apply: {} {}{RESET}",
                 error.path, error.message
             ));
@@ -414,14 +419,14 @@ impl Output {
 
     pub fn show_paying_key(&mut self, key: &str) {
         self.begin(Section::Notice);
-        self.push(&format!(
+        self.push_detail(&format!(
             "{ORANGE}{key} pays for this session, not the subscription{RESET}"
         ));
     }
 
     pub fn show_error(&mut self, error: &str) {
         self.begin(Section::Notice);
-        self.push(&format!("{RED}{error}{RESET}"));
+        self.push_detail(&format!("{RED}{error}{RESET}"));
     }
 
     /// Shows a line of Claude Code's error output. Claude's text has nothing that names it, so
@@ -442,7 +447,7 @@ impl Output {
 
     fn push_stderr(&mut self, line: &str) {
         self.begin(Section::Notice);
-        self.push(&format!("{DIM}stderr │{RESET} {RED}{line}{RESET}"));
+        self.push_detail(&format!("{DIM}stderr │{RESET} {RED}{line}{RESET}"));
     }
 
     /// Sets what Claude does. Once Claude stops writing, the lines of error output that waited
@@ -484,7 +489,7 @@ impl Output {
         self.position = Position::In(section);
     }
 
-    /// Adds a line, after the break that sets it apart, if one waits.
+    /// Adds a whole line, after the break that sets it apart, if one waits.
     fn push(&mut self, line: &str) {
         self.write_break();
         self.emit(line);
@@ -502,12 +507,27 @@ impl Output {
         }
     }
 
-    /// Adds a whole line to the screen and to the full view, on a row of its own: Claude's line
-    /// ends first where Claude got to, as when a message interrupts Claude mid-line.
+    /// Adds a detail line, after the break that sets it apart, if one waits: cut on screen, since
+    /// a detail line can run long, and whole in the full view. A detail line is any line other
+    /// than the conversation itself, the user's words and Claude's prose.
+    fn push_detail(&mut self, line: &str) {
+        self.write_break();
+        self.end_claude_line();
+        self.text.push_str(&cut(line, self.max_detail_columns));
+        self.text.push('\n');
+        self.write_full_view_line(line);
+    }
+
+    /// Adds a whole line to the screen and to the full view, on a row of its own.
     fn emit(&mut self, line: &str) {
+        self.end_claude_line();
+        self.write(&format!("{line}\n"));
+    }
+
+    /// Ends Claude's line where Claude got to, as when a message interrupts Claude mid-line.
+    fn end_claude_line(&mut self) {
         let colored = self.highlighter.end_line();
         self.write(&colored);
-        self.write(&format!("{line}\n"));
     }
 
     /// Adds text to the screen and to the full view.
@@ -530,9 +550,9 @@ impl Output {
             .write_all(text.replace(FILL_ROW, "").as_bytes());
     }
 
-    fn push_all(&mut self, lines: Vec<String>) {
+    fn push_details(&mut self, lines: Vec<String>) {
         for line in lines {
-            self.push(&line);
+            self.push_detail(&line);
         }
     }
 }
@@ -551,6 +571,74 @@ pub fn marks() -> String {
 /// marks, since both say who starts.
 fn reply_mark() -> String {
     format!("{LIGHT_CYAN}‹‹{RESET}")
+}
+
+/// `line` cut in the middle to take at most `columns` columns on screen, with `…` where it is
+/// cut. Both its start and its end stay, since the part that tells one line from the next is
+/// often at the end, like the file a command ends with:
+/// <https://v5-archive.patternfly.org/ux-writing/truncation>.
+fn cut(line: &str, columns: NonZeroUsize) -> String {
+    let mut characters = Vec::new();
+    let mut rest = line.char_indices();
+    while let Some((index, character)) = rest.next() {
+        if character == '\x1b' {
+            // Every sequence a line holds is a CSI, which ends with a letter and takes no column
+            rest.find(|(_, next)| next.is_ascii_alphabetic());
+            continue;
+        }
+        characters.push((index, character, character.width().unwrap_or(0)));
+    }
+    if characters.iter().map(|(_, _, width)| width).sum::<usize>() <= columns.get() {
+        return line.to_string();
+    }
+    // The `…` takes a column, and the start takes the odd one of the rest
+    let kept_columns = columns.get() - 1;
+    let (mut start_end, mut start_width) = (0, 0);
+    for (index, character, width) in &characters {
+        if start_width + width > kept_columns.div_ceil(2) {
+            break;
+        }
+        start_width += width;
+        start_end = index + character.len_utf8();
+    }
+    let (mut end_start, mut end_width) = (line.len(), 0);
+    for (index, _, width) in characters.iter().rev() {
+        if end_width + width > kept_columns / 2 {
+            break;
+        }
+        end_width += width;
+        end_start = *index;
+    }
+    format!(
+        "{}{RESET}…{}{}",
+        &line[..start_end],
+        colors_at(line, end_start),
+        &line[end_start..]
+    )
+}
+
+/// The color codes in effect at byte `end` of `line`, those since its last reset, which set the
+/// colors again where printing starts there.
+pub fn colors_at(line: &str, end: usize) -> String {
+    let mut codes = String::new();
+    let mut characters = line[..end].char_indices();
+    while let Some((index, character)) = characters.next() {
+        if character != '\x1b' {
+            continue;
+        }
+        // Every sequence a line holds is a CSI, which ends with a letter, and those that end with
+        // `m` set colors
+        let sequence_end = characters
+            .find(|(_, next)| next.is_ascii_alphabetic())
+            .map_or(end, |(next_index, next)| next_index + next.len_utf8());
+        let sequence = &line[index..sequence_end];
+        if sequence == RESET {
+            codes.clear();
+        } else if sequence.ends_with('m') {
+            codes.push_str(sequence);
+        }
+    }
+    codes
 }
 
 /// The lines of a plan, as Markdown.
@@ -614,9 +702,13 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::config::Config;
 
     fn new_output() -> Output {
-        Output::new(tempfile::tempfile().expect("the temporary directory takes a file"))
+        Output::new(
+            tempfile::tempfile().expect("the temporary directory takes a file"),
+            Config::default().max_detail_columns,
+        )
     }
 
     fn output_after_message() -> Output {
@@ -775,7 +867,10 @@ mod tests {
     /// Reads back what the output wrote to the full view, after the user's first message.
     fn full_view_after(show: impl FnOnce(&mut Output)) -> Vec<String> {
         let file = tempfile::NamedTempFile::new().expect("the temporary directory takes a file");
-        let mut output = Output::new(file.reopen().expect("the file opens again"));
+        let mut output = Output::new(
+            file.reopen().expect("the file opens again"),
+            Config::default().max_detail_columns,
+        );
         output.show_message("Hi");
         show(&mut output);
         let text = std::fs::read_to_string(file.path()).expect("the full view reads back");
@@ -825,6 +920,69 @@ mod tests {
                 format!("✓ {DIM}#01 Read: three{RESET}"),
             ]
         );
+    }
+
+    fn columns(count: usize) -> NonZeroUsize {
+        NonZeroUsize::new(count).expect("the count is not zero")
+    }
+
+    #[test]
+    fn a_line_that_fits_stays_whole() {
+        assert_eq!(cut("abc", columns(3)), "abc");
+    }
+
+    #[test]
+    fn a_line_too_long_keeps_its_start_and_its_end() {
+        assert_eq!(cut("abcdefgh", columns(6)), format!("abc{RESET}…gh"));
+    }
+
+    #[test]
+    fn the_end_kept_starts_with_the_colors_in_effect_there() {
+        assert_eq!(
+            cut(&format!("{DIM}abcdef"), columns(4)),
+            format!("{DIM}ab{RESET}…{DIM}f")
+        );
+        assert_eq!(
+            cut(&format!("{BOLD}ab{RESET}cdefgh"), columns(4)),
+            format!("{BOLD}ab{RESET}…h")
+        );
+    }
+
+    #[test]
+    fn a_wide_character_that_does_not_fit_is_cut_whole() {
+        assert_eq!(cut("ab日本", columns(4)), format!("ab{RESET}…"));
+    }
+
+    #[test]
+    fn a_detail_line_is_cut_on_screen_and_whole_in_the_full_view() {
+        let path = "a".repeat(100);
+        let mut screen = Vec::new();
+        let lines = full_view_after(|output| {
+            output.take_lines();
+            output.show_tool_use(&read_call("1", &path));
+            screen = output.take_lines();
+        });
+        let call = format!("{BOLD}○{RESET} {DIM}#00{RESET}{BOLD} Read{RESET} {path}");
+        assert_eq!(screen[1], cut(&call, Config::default().max_detail_columns));
+        assert_ne!(screen[1], call);
+        assert_eq!(lines[1], call);
+    }
+
+    #[test]
+    fn an_error_is_a_detail_line_and_an_answer_stays_whole() {
+        let long = "x".repeat(100);
+        let mut output = output_after_message();
+        output.show_error(&long);
+        output.show_answer("Q", &long);
+        let lines = output.take_lines();
+        assert_eq!(
+            lines[1],
+            cut(
+                &format!("{RED}{long}{RESET}"),
+                Config::default().max_detail_columns
+            )
+        );
+        assert!(lines[2].contains(&long));
     }
 
     #[test]

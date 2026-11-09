@@ -10,6 +10,7 @@
 use std::env;
 use std::fs;
 use std::io::{self, Write};
+use std::num::NonZeroU16;
 use std::path::PathBuf;
 use std::process::{self, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,7 +27,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::context::COLD_COLOR;
 use crate::keys::{self, Action, Phase, SessionKey};
 use crate::limits::{Level, limit_level};
-use crate::render::{ORANGE, Output, STATUS_COLOR, Status, answer_label, marks, start_bar_row};
+use crate::render::{
+    ORANGE, Output, STATUS_COLOR, Status, answer_label, colors_at, marks, start_bar_row,
+};
 use crate::status;
 use crate::terminal::{Settings, run_in_terminal};
 use crate::vi::{Editor, Effect, Mode};
@@ -34,10 +37,6 @@ use crate::wrap;
 use crate::{Shared, lock};
 
 const RESET: &str = "\x1b[0m";
-
-/// The rows of the input box.
-// TODO: Let the user choose the input box's height
-const INPUT_ROWS: u16 = 3;
 
 /// The rows the conversation keeps at least, since tmux ignores a scroll region of one row.
 const MIN_CONVERSATION_ROWS: u16 = 2;
@@ -92,6 +91,8 @@ pub struct InputLine {
     /// The terminal's settings from before the client changed them, for the programs the
     /// client runs in it.
     original_settings: Settings,
+    /// The rows the user chose for the input box, which a short screen gives fewer.
+    input_rows: NonZeroU16,
     editor: Editor,
     layout: Layout,
     /// The first row of the text the box shows.
@@ -121,12 +122,13 @@ impl InputLine {
         editor_command: String,
         full_view: PathBuf,
         original_settings: Settings,
+        input_rows: NonZeroU16,
         break_signal: Arc<AtomicBool>,
         shared: Arc<Mutex<Shared>>,
     ) -> Result<Self, String> {
         let (width, height) = terminal::size().map_err(|error| cannot_read_terminal(&error))?;
         let (_, row) = cursor::position().map_err(|error| cannot_read_terminal(&error))?;
-        let layout = Layout::new(width, height);
+        let layout = Layout::new(width, height, input_rows);
         let mut out = Vec::new();
         let lowest = layout.lowest_label_row();
         if row > lowest {
@@ -140,6 +142,7 @@ impl InputLine {
             editor_command,
             full_view,
             original_settings,
+            input_rows,
             editor: Editor::new(""),
             layout,
             scroll: 0,
@@ -580,7 +583,7 @@ impl InputLine {
     fn resize(&mut self, width: u16, height: u16) -> Result<(), String> {
         // The question view draws its whole screen again, and the main screen waits
         if self.in_view {
-            self.layout = Layout::new(width, height);
+            self.layout = Layout::new(width, height, self.input_rows);
             self.resized_in_view = Some((width, height));
             return Ok(());
         }
@@ -596,7 +599,7 @@ impl InputLine {
         let label_row = cursor_row.saturating_sub(u16::try_from(rows_above).unwrap_or(u16::MAX));
         let mut out = Vec::new();
         put!(out, MoveTo(0, label_row), Clear(ClearType::FromCursorDown));
-        self.layout = Layout::new(width, height);
+        self.layout = Layout::new(width, height, self.input_rows);
         // The label row is right below the conversation's end. The terminal wrapped the open
         // line again at the new width, which its next text continues from. On a screen too
         // short to show any of the conversation, the next text starts a line of its own
@@ -690,11 +693,14 @@ struct Layout {
 }
 
 impl Layout {
-    fn new(width: u16, height: u16) -> Self {
+    /// The layout of a screen `width` columns wide and `height` rows high, with an input box of
+    /// `input_rows` rows when the screen has them.
+    fn new(width: u16, height: u16, input_rows: NonZeroU16) -> Self {
         // A short screen keeps a row to type in first, then the label row, then the
         // conversation's rows, and takes the rest from the box
         let label_rows = u16::from(height >= 2);
-        let input_rows = INPUT_ROWS
+        let input_rows = input_rows
+            .get()
             .min(height.saturating_sub(MIN_CONVERSATION_ROWS + label_rows))
             .max(1);
         Layout {
@@ -794,37 +800,23 @@ fn continue_conversation(out: &mut Vec<u8>, end: &End, text: &str, width: u16) -
 /// another width, or a tab, puts the row's start elsewhere, and the line continues off its end.
 fn last_row(line: &str, width: usize) -> String {
     let width = width.max(1);
-    let mut codes = String::new();
-    let mut row_codes = String::new();
     let mut row_start = 0;
     let mut column = 0;
     let mut characters = line.char_indices();
     while let Some((index, character)) = characters.next() {
         if character == '\x1b' {
-            // Every sequence a line holds is a CSI, which ends with a letter
-            let mut sequence = String::from(character);
-            for (_, next) in characters.by_ref() {
-                sequence.push(next);
-                if next.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-            if sequence == RESET {
-                codes.clear();
-            } else if sequence.ends_with('m') {
-                codes.push_str(&sequence);
-            }
+            // Every sequence a line holds is a CSI, which ends with a letter and takes no column
+            characters.find(|(_, next)| next.is_ascii_alphabetic());
             continue;
         }
         let character_width = character.width().unwrap_or(0);
         if column + character_width > width && column > 0 {
             row_start = index;
-            row_codes.clone_from(&codes);
             column = 0;
         }
         column += character_width;
     }
-    format!("{row_codes}{}", &line[row_start..])
+    format!("{}{}", colors_at(line, row_start), &line[row_start..])
 }
 
 /// What the last draw left above the cursor.

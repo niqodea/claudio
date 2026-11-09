@@ -21,7 +21,7 @@ use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEvent, KeyEventKind,
 };
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::context::COLD_COLOR;
 use crate::keys::{self, Action, Phase, SessionKey};
@@ -97,8 +97,8 @@ pub struct InputLine {
     /// The first row of the text the box shows.
     scroll: u16,
     end: End,
-    /// Lines that wait for a screen with the rows to scroll them.
-    held: Vec<String>,
+    /// Text that waits for a screen with the rows to scroll it.
+    held: String,
     /// What the last draw left above the cursor, which a resize moves before the client hears
     /// of it.
     drawn: Drawn,
@@ -144,7 +144,7 @@ impl InputLine {
             layout,
             scroll: 0,
             end: End::Before(row.min(lowest)),
-            held: Vec::new(),
+            held: String::new(),
             drawn: Drawn::default(),
             label: String::new(),
             in_view: false,
@@ -192,8 +192,9 @@ impl InputLine {
         }
     }
 
-    /// Takes the bottom of the terminal away, once the session ended, and leaves the cursor at
-    /// the start of the row below the conversation, where the end of the output follows.
+    /// Takes the bottom of the terminal away, once the session ended, and leaves the cursor where
+    /// the rest of the conversation follows: at the end of its last line when the line is open,
+    /// and else at the start of the row below.
     pub fn close(&mut self) -> Result<(), String> {
         if self.is_closed {
             return Ok(());
@@ -210,12 +211,9 @@ impl InputLine {
             SetCursorStyle::DefaultUserShape,
             DisableBracketedPaste,
         );
-        put!(out, MoveTo(0, self.end.row()));
-        if let End::On(_) = self.end {
+        let held = std::mem::take(&mut self.held);
+        if continue_conversation(&mut out, &self.end, &held, self.layout.width).is_none() {
             out.extend(b"\r\n");
-        }
-        for line in std::mem::take(&mut self.held) {
-            out.extend(format!("{line}\r\n").as_bytes());
         }
         put!(out, Show);
         write_out(&out)
@@ -434,11 +432,11 @@ impl InputLine {
         Ok(status)
     }
 
-    /// Prints the conversation's new lines above the label row, in a scroll region over the
+    /// Prints the conversation's new text above the label row, in a scroll region over the
     /// conversation's rows, so the lines that leave the screen go to the scrollback.
     fn print_output(&mut self) -> Result<(), String> {
-        let lines = lock(&self.shared).output.take_lines();
-        self.held.extend(lines);
+        let text = lock(&self.shared).output.take_text();
+        self.held.push_str(&text);
         if self.held.is_empty() || self.in_view || !self.layout.shows_conversation() {
             return Ok(());
         }
@@ -454,28 +452,22 @@ impl InputLine {
         // Setting the region puts the cursor home, so the moves follow it
         let conversation_rows = self.layout.conversation_rows();
         out.extend(format!("\x1b[1;{conversation_rows}r").as_bytes());
-        let (row, mut is_first) = match self.end {
-            End::Before(row) if row < conversation_rows => (row, true),
+        let end = match &self.end {
             // The label was at the bottom, below the region, so the first line scrolls the
-            // region's rows up and starts its last row
-            End::Before(_) => (conversation_rows - 1, false),
-            End::On(row) => (row, false),
+            // region's rows up and starts its last row, as if a line ended on the row above
+            End::Before(row) if *row >= conversation_rows => End::On {
+                row: conversation_rows - 1,
+                open: None,
+            },
+            end => end.clone(),
         };
-        put!(out, MoveTo(0, row));
-        for line in std::mem::take(&mut self.held) {
-            for part in line.split('\n') {
-                if !is_first {
-                    out.extend(b"\r\n");
-                }
-                is_first = false;
-                out.extend(part.as_bytes());
-            }
-        }
+        let held = std::mem::take(&mut self.held);
+        let open = continue_conversation(&mut out, &end, &held, self.layout.width);
         write_out(&out)?;
         // The cursor is where the last line ends: past its last character, or on it when the
         // line ends at the row's end
         let (_, row) = cursor::position().map_err(|error| cannot_read_terminal(&error))?;
-        self.end = End::On(row);
+        self.end = End::On { row, open };
         // The frame ends with the label and the box drawn below the lines
         write_out(b"\x1b[r")?;
         self.draw()
@@ -605,21 +597,23 @@ impl InputLine {
         let mut out = Vec::new();
         put!(out, MoveTo(0, label_row), Clear(ClearType::FromCursorDown));
         self.layout = Layout::new(width, height);
-        // The label row is right below the conversation's end
-        self.end = match self.end {
-            End::Before(_) => End::Before(label_row),
-            End::On(_) => label_row.checked_sub(1).map_or(End::Before(0), End::On),
-        };
+        // The label row is right below the conversation's end. The terminal wrapped the open
+        // line again at the new width, which its next text continues from. On a screen too
+        // short to show any of the conversation, the next text starts a line of its own
+        match &mut self.end {
+            End::Before(row) => *row = label_row,
+            End::On { row, .. } if label_row > 0 => *row = label_row - 1,
+            End::On { .. } => self.end = End::Before(0),
+        }
         // A shorter screen has the conversation reach into the rows the label row and the box
         // take, so it scrolls up
         let lowest = self.layout.lowest_label_row();
         if self.end.next_row() > lowest {
             let rows = self.end.next_row() - lowest;
             scroll_screen(&mut out, self.layout, rows);
-            self.end = match self.end {
-                End::Before(row) => End::Before(row - rows),
-                End::On(row) => End::On(row - rows),
-            };
+            match &mut self.end {
+                End::Before(row) | End::On { row, .. } => *row -= rows,
+            }
         }
         write_out(&out)
     }
@@ -729,29 +723,108 @@ impl Layout {
     }
 }
 
-/// Where the conversation ends on screen, which its next line follows.
-#[derive(Clone, Copy)]
+/// Where the conversation ends on screen, which its next text continues.
+#[derive(Clone)]
 enum End {
     /// Nothing printed yet: the first line goes on this row, an empty one.
     Before(u16),
-    /// The last line printed ends on this row.
-    On(u16),
+    /// The last line printed ends on this row. The line break after a line that ended waits for
+    /// the text after it, so the label row stays right below the line. The line, when it is
+    /// still open, is in `open`, for its next text to continue.
+    On { row: u16, open: Option<String> },
 }
 
 impl End {
-    fn row(self) -> u16 {
-        match self {
-            End::Before(row) | End::On(row) => row,
-        }
-    }
-
     /// The first row below the conversation.
-    fn next_row(self) -> u16 {
+    fn next_row(&self) -> u16 {
         match self {
-            End::Before(row) => row,
-            End::On(row) => row + 1,
+            End::Before(row) => *row,
+            End::On { row, .. } => row + 1,
         }
     }
+}
+
+/// Writes to `out` what continues the conversation with `text`, from where it ends at `end` on
+/// a screen `width` columns wide, and returns the line it leaves open: none when `text` ends a
+/// line, whose line break then waits.
+fn continue_conversation(out: &mut Vec<u8>, end: &End, text: &str, width: u16) -> Option<String> {
+    let mut line = match end {
+        End::Before(row) => {
+            put!(out, MoveTo(0, *row));
+            String::new()
+        }
+        End::On { row, open: None } => {
+            put!(out, MoveTo(0, *row));
+            out.extend(b"\r\n");
+            String::new()
+        }
+        // Printed again, the row puts the cursor back where the line ends, also right after a
+        // character in its last column, where the terminal waits to wrap the next one
+        End::On {
+            row,
+            open: Some(open),
+        } => {
+            put!(out, MoveTo(0, *row));
+            out.extend(last_row(open, usize::from(width)).as_bytes());
+            open.clone()
+        }
+    };
+    let (body, ends_line) = match text.strip_suffix('\n') {
+        Some(body) => (body, true),
+        None => (text, false),
+    };
+    for (index, part) in body.split('\n').enumerate() {
+        if index > 0 {
+            out.extend(b"\r\n");
+            line.clear();
+        }
+        out.extend(part.as_bytes());
+        line.push_str(part);
+    }
+    (!ends_line).then_some(line)
+}
+
+/// The last row the terminal wraps `line` onto at `width` columns, after the color codes the
+/// rows before set, so that printed from the row's first column it shows the row as before, and
+/// leaves the cursor at the line's end. A character too wide for the rest of a row starts the
+/// next row, and a line that fills its last row keeps it as the last.
+///
+/// Assumes the terminal gives each character the width unicode-width gives it, and that the
+/// line holds no tab, which moves the cursor to a tab stop. A character the terminal gives
+/// another width, or a tab, puts the row's start elsewhere, and the line continues off its end.
+fn last_row(line: &str, width: usize) -> String {
+    let width = width.max(1);
+    let mut codes = String::new();
+    let mut row_codes = String::new();
+    let mut row_start = 0;
+    let mut column = 0;
+    let mut characters = line.char_indices();
+    while let Some((index, character)) = characters.next() {
+        if character == '\x1b' {
+            // Every sequence a line holds is a CSI, which ends with a letter
+            let mut sequence = String::from(character);
+            for (_, next) in characters.by_ref() {
+                sequence.push(next);
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            if sequence == RESET {
+                codes.clear();
+            } else if sequence.ends_with('m') {
+                codes.push_str(&sequence);
+            }
+            continue;
+        }
+        let character_width = character.width().unwrap_or(0);
+        if column + character_width > width && column > 0 {
+            row_start = index;
+            row_codes.clone_from(&codes);
+            column = 0;
+        }
+        column += character_width;
+    }
+    format!("{row_codes}{}", &line[row_start..])
 }
 
 /// What the last draw left above the cursor.
@@ -870,5 +943,72 @@ fn describe_work(output: &Output) -> Option<String> {
         }
         Status::Writing => Some("writing".to_string()),
         Status::Running(tool) => Some(format!("running {tool}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BOLD: &str = "\x1b[1m";
+
+    #[test]
+    fn the_last_row_of_a_line_that_fits_is_the_line() {
+        assert_eq!(last_row("abc", 5), "abc");
+    }
+
+    #[test]
+    fn the_last_row_starts_where_the_terminal_wraps() {
+        assert_eq!(last_row("abcdefg", 3), "g");
+    }
+
+    #[test]
+    fn a_line_that_fills_its_last_row_keeps_it_as_the_last() {
+        assert_eq!(last_row("abcdef", 3), "def");
+    }
+
+    #[test]
+    fn a_wide_character_that_does_not_fit_starts_the_last_row() {
+        assert_eq!(last_row("ab日", 3), "日");
+    }
+
+    #[test]
+    fn the_last_row_starts_with_the_colors_set_before_it() {
+        let line = format!("a{BOLD}bc{RESET}d{BOLD}efg");
+        assert_eq!(last_row(&line, 3), format!("{BOLD}g"));
+        let line = format!("a{BOLD}b{RESET}cdefg");
+        assert_eq!(last_row(&line, 3), "g");
+    }
+
+    fn continued(end: &End, text: &str) -> (String, Option<String>) {
+        let mut out = Vec::new();
+        let open = continue_conversation(&mut out, end, text, 80);
+        (String::from_utf8(out).expect("the text is UTF-8"), open)
+    }
+
+    #[test]
+    fn text_that_ends_a_line_leaves_its_line_break_waiting() {
+        let (out, open) = continued(&End::Before(4), "a\nb\n");
+        assert_eq!(out, "\x1b[5;1Ha\r\nb");
+        assert_eq!(open, None);
+    }
+
+    #[test]
+    fn the_line_break_that_waits_comes_before_the_next_text() {
+        let end = End::On { row: 4, open: None };
+        let (out, open) = continued(&end, "c");
+        assert_eq!(out, "\x1b[5;1H\r\nc");
+        assert_eq!(open, Some("c".to_string()));
+    }
+
+    #[test]
+    fn an_open_line_continues_after_its_last_row_printed_again() {
+        let end = End::On {
+            row: 4,
+            open: Some(format!("{BOLD}He")),
+        };
+        let (out, open) = continued(&end, "llo\n");
+        assert_eq!(out, format!("\x1b[5;1H{BOLD}Hello"));
+        assert_eq!(open, None);
     }
 }

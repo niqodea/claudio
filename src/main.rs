@@ -186,9 +186,8 @@ fn end(
         }
     };
     output.show_end(describe_exit(status).as_deref());
-    for line in output.take_lines() {
-        println!("{line}");
-    }
+    // The text ends with a line break, since the end ended every line
+    print!("{}", output.take_text());
     println!("{}", final_line(shared.session_id.as_deref()));
     Ok(code)
 }

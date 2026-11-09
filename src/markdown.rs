@@ -1,6 +1,16 @@
-//! Colors Markdown a line at a time, the way an editor highlights a Markdown file: every
-//! character stays, so the text copies back as the Markdown it was. A line's colors depend only
-//! on the lines before it, so each line is colored once, when it ends.
+//! Colors Markdown as it streams in, the way an editor highlights a Markdown file: every
+//! character stays, so the text copies back as the Markdown it was.
+//!
+//! The colored text never depends on how the Markdown arrives in pieces: the colored pieces, one
+//! after the other, are the colored whole. Each character is written once nothing after it can
+//! change its color, and never changed after:
+//! - most characters at once, since their color depends only on the characters before them;
+//! - a line's start once it says what the line is, which the character after its mark settles,
+//!   like the space in `- ` for a list item;
+//! - a `*` with the next character, which makes it half of bold's `**` or leaves it a star;
+//! - a line colored whole at its end: a code fence, a line of a code block, which its grammar
+//!   colors a line at a time, and a table's row, which waits for the table's end too, since the
+//!   widest cell sets each column's width.
 
 use crate::code;
 use crate::table::Table;
@@ -10,13 +20,15 @@ const BOLD: &str = "\x1b[1m";
 // For the marks that structure the text, which are not part of what it says
 const DIM: &str = "\x1b[2m";
 const CODE: &str = "\x1b[36m";
+// Opens a code block, and closes it
+const FENCE: &str = "```";
 
-/// Colors one block of Markdown, a line at a time.
+/// Colors one block of Markdown as it streams in.
 pub struct Highlighter {
     code_block: Option<CodeBlock>,
-    /// The rows of a table, held until the table ends, since its widest cell sets each column's
-    /// width.
+    /// The rows of a table, held until the table ends.
     table: Vec<String>,
+    line: Line,
 }
 
 /// A code block, colored in its language when a grammar knows the language.
@@ -25,35 +37,153 @@ enum CodeBlock {
     Language(code::Highlighter),
 }
 
+/// The line that streams in.
+enum Line {
+    /// The line's start, which does not settle yet what the line is.
+    Start(String),
+    Settled(Settled),
+}
+
+/// A line whose start settled what it is.
+enum Settled {
+    /// A table's row, colored with the table.
+    Row(String),
+    /// A code fence or a line of a code block.
+    Code(String),
+    /// A heading, all of it bold.
+    Heading,
+    /// Prose, with the inline marks open where it got to.
+    Prose(Inline),
+}
+
+/// What a line is, which its start settles.
+#[derive(Clone, Copy)]
+enum Kind {
+    Row,
+    Code,
+    Heading,
+    /// Prose that starts with the mark of a list item or a quote, which takes this many bytes
+    /// with the indent before it.
+    Marked(usize),
+    Prose,
+}
+
 impl Highlighter {
     pub fn new() -> Self {
         Highlighter {
             code_block: None,
             table: Vec::new(),
+            line: Line::Start(String::new()),
         }
     }
 
-    /// Colors the next line, given without its line ending, and returns the lines it completes:
-    /// none while it holds a table's row, and the table's lines once a line ends the table.
-    pub fn color_line(&mut self, line: &str) -> Vec<String> {
-        if self.code_block.is_none() && line.trim_start().starts_with('|') {
-            self.table.push(line.to_string());
-            return vec![];
+    /// Takes the next piece of the Markdown and returns the colored text it settles, each line
+    /// that ended followed by a line break.
+    pub fn push(&mut self, text: &str) -> String {
+        let mut colored = String::new();
+        for character in text.chars() {
+            self.push_character(character, &mut colored);
         }
-        let mut lines = self.take_table();
-        lines.push(self.color_other(line));
-        lines
+        colored
     }
 
-    /// Returns the lines still held, since the block ended, and starts afresh for the next one.
-    pub fn finish(&mut self) -> Vec<String> {
-        let lines = self.take_table();
+    /// Ends the line where the Markdown got to, when it got into one, and returns the colored
+    /// text that settles.
+    pub fn end_line(&mut self) -> String {
+        match &self.line {
+            Line::Start(start) if start.is_empty() => String::new(),
+            Line::Start(_) | Line::Settled(_) => self.push("\n"),
+        }
+    }
+
+    /// Ends the block and returns the colored text still held, then starts afresh for the next
+    /// block.
+    pub fn finish(&mut self) -> String {
+        let mut colored = self.end_line();
+        colored.push_str(&self.take_table());
         *self = Highlighter::new();
-        lines
+        colored
     }
 
-    fn color_other(&mut self, line: &str) -> String {
-        if line.trim_start().starts_with("```") {
+    fn push_character(&mut self, character: char, colored: &mut String) {
+        let is_end = character == '\n';
+        match &mut self.line {
+            Line::Start(start) => {
+                if !is_end {
+                    start.push(character);
+                }
+                let Some(kind) = kind(start, self.code_block.is_some(), is_end) else {
+                    return;
+                };
+                let start = std::mem::take(start);
+                self.line = Line::Settled(self.settle(kind, &start, colored));
+                // The line's end settles what the line is, and then ends it
+                if is_end {
+                    self.push_character(character, colored);
+                }
+            }
+            Line::Settled(line) if is_end => {
+                match line {
+                    Settled::Row(row) => self.table.push(std::mem::take(row)),
+                    Settled::Code(code) => {
+                        let code = std::mem::take(code);
+                        colored.push_str(&self.color_code(&code));
+                        colored.push('\n');
+                    }
+                    Settled::Heading => {
+                        colored.push_str(RESET);
+                        colored.push('\n');
+                    }
+                    Settled::Prose(inline) => {
+                        std::mem::take(inline).end(colored);
+                        colored.push('\n');
+                    }
+                }
+                self.line = Line::Start(String::new());
+            }
+            Line::Settled(Settled::Row(text) | Settled::Code(text)) => text.push(character),
+            Line::Settled(Settled::Heading) => colored.push(character),
+            Line::Settled(Settled::Prose(inline)) => inline.push(character, colored),
+        }
+    }
+
+    /// The line `kind` makes of its start, with the start's colored text: a line other than a
+    /// row ends the table before it.
+    fn settle(&mut self, kind: Kind, start: &str, colored: &mut String) -> Settled {
+        match kind {
+            Kind::Row => {}
+            Kind::Code | Kind::Heading | Kind::Marked(_) | Kind::Prose => {
+                colored.push_str(&self.take_table());
+            }
+        }
+        match kind {
+            Kind::Row => Settled::Row(start.to_string()),
+            Kind::Code => Settled::Code(start.to_string()),
+            Kind::Heading => {
+                colored.push_str(BOLD);
+                colored.push_str(start);
+                Settled::Heading
+            }
+            Kind::Marked(length) => {
+                let (mark, text) = start.split_at(length);
+                colored.push_str(DIM);
+                colored.push_str(mark);
+                colored.push_str(RESET);
+                let mut inline = Inline::default();
+                inline.push_str(text, colored);
+                Settled::Prose(inline)
+            }
+            Kind::Prose => {
+                let mut inline = Inline::default();
+                inline.push_str(start, colored);
+                Settled::Prose(inline)
+            }
+        }
+    }
+
+    /// Colors a code fence, which opens or closes a code block, or a line of a code block.
+    fn color_code(&mut self, line: &str) -> String {
+        if is_fence(line) {
             self.code_block = if self.code_block.is_some() {
                 None
             } else {
@@ -72,84 +202,153 @@ impl Highlighter {
         }
         match &mut self.code_block {
             Some(CodeBlock::Language(highlighter)) => highlighter.color_line(line),
-            Some(CodeBlock::Plain) => format!("{CODE}{line}{RESET}"),
-            None => color_prose(line),
+            // Only a fence opens a code block, so every line here but a fence is in one
+            Some(CodeBlock::Plain) | None => format!("{CODE}{line}{RESET}"),
         }
     }
 
-    /// The table rows held, laid out when they make a table, and as they were written otherwise.
-    /// A table wider than the terminal is laid out too, and the terminal wraps its lines.
-    fn take_table(&mut self) -> Vec<String> {
-        let lines = std::mem::take(&mut self.table);
-        match Table::read(&lines) {
+    /// The table's rows held, laid out when they make a table, and as they were written
+    /// otherwise, each followed by a line break. A table wider than the terminal is laid out
+    /// too, and the terminal wraps its lines.
+    fn take_table(&mut self) -> String {
+        let rows = std::mem::take(&mut self.table);
+        let lines = match Table::read(&rows) {
             Some(table) => table.render(color_inline),
-            None => lines,
-        }
+            None => rows,
+        };
+        lines.into_iter().map(|line| line + "\n").collect()
     }
 }
 
-/// Colors a line of prose: a heading in bold, the mark that starts a list item or a quote dim,
-/// and the inline marks of the rest.
-fn color_prose(line: &str) -> String {
-    let rest = line.trim_start_matches(' ');
-    let indent = line.len() - rest.len();
-    let hashes = rest.len() - rest.trim_start_matches('#').len();
-    if hashes > 0 && rest[hashes..].starts_with(' ') {
-        return format!("{BOLD}{line}{RESET}");
+/// What the line that starts with `start` is, once nothing after `start` can change it: when the
+/// line is whole, or when the character after each mark arrived.
+fn kind(start: &str, in_code_block: bool, is_whole: bool) -> Option<Kind> {
+    if in_code_block {
+        return Some(Kind::Code);
     }
-    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-    let mark_length = match rest[digits..].chars().next() {
+    let rest = start.trim_start();
+    if rest.is_empty() {
+        return is_whole.then_some(Kind::Prose);
+    }
+    if rest.starts_with('|') {
+        return Some(Kind::Row);
+    }
+    if is_fence(start) {
+        return Some(Kind::Code);
+    }
+    // A start of the fence's backticks may grow into the fence
+    if !is_whole && FENCE.starts_with(rest) {
+        return None;
+    }
+    let text = start.trim_start_matches(' ');
+    let indent = start.len() - text.len();
+    // Whether the character after a mark of `length` bytes arrived, which settles the mark
+    let is_settled = |length: usize| is_whole || length < text.len();
+    let hashes = text.len() - text.trim_start_matches('#').len();
+    if hashes > 0 {
+        if !is_settled(hashes) {
+            return None;
+        }
+        if text[hashes..].starts_with(' ') {
+            return Some(Kind::Heading);
+        }
+    }
+    let digits = text.len() - text.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits > 0 && !is_settled(digits) {
+        return None;
+    }
+    let mark_length = match text[digits..].chars().next() {
         Some('-' | '*' | '+' | '>') if digits == 0 => 1,
         Some('.' | ')') if digits > 0 => digits + 1,
         _ => 0,
     };
-    // A mark is followed by a space, so `**bold**` or `-1` start no list item
-    if mark_length == 0 || !rest[mark_length..].starts_with(' ') {
-        return color_inline(line);
+    if mark_length == 0 {
+        return Some(Kind::Prose);
     }
-    let (mark, text) = line.split_at(indent + mark_length);
-    format!("{DIM}{mark}{RESET}{}", color_inline(text))
+    if !is_settled(mark_length) {
+        return None;
+    }
+    // A mark is followed by a space, so `**bold**` or `-1` start no list item
+    if text[mark_length..].starts_with(' ') {
+        Some(Kind::Marked(indent + mark_length))
+    } else {
+        Some(Kind::Prose)
+    }
 }
 
-/// Colors the inline marks of text: code spans in the code color, and bold in bold. The marks
-/// stay, colored with what they mark.
-fn color_inline(text: &str) -> String {
-    let mut colored = String::new();
-    let mut is_code_span = false;
-    let mut is_bold = false;
-    let mut characters = text.chars().peekable();
-    while let Some(character) = characters.next() {
-        match character {
-            '`' if is_code_span => {
-                colored.push('`');
-                is_code_span = false;
-                colored.push_str(RESET);
-                if is_bold {
-                    colored.push_str(BOLD);
-                }
-            }
-            '`' => {
-                is_code_span = true;
-                colored.push_str(CODE);
-                colored.push('`');
-            }
-            '*' if !is_code_span && characters.peek() == Some(&'*') => {
-                characters.next();
-                if is_bold {
+fn is_fence(line: &str) -> bool {
+    line.trim_start().starts_with(FENCE)
+}
+
+/// The inline marks open where a line got to: code spans in the code color, and bold in bold.
+/// The marks stay, colored with what they mark.
+#[derive(Default)]
+struct Inline {
+    is_code_span: bool,
+    is_bold: bool,
+    /// A `*` that waits for the next character: with another `*` it opens or closes bold, and
+    /// with any other character it is a star.
+    has_star: bool,
+}
+
+impl Inline {
+    fn push_str(&mut self, text: &str, colored: &mut String) {
+        for character in text.chars() {
+            self.push(character, colored);
+        }
+    }
+
+    fn push(&mut self, character: char, colored: &mut String) {
+        if std::mem::take(&mut self.has_star) {
+            if character == '*' {
+                if self.is_bold {
                     colored.push_str("**");
                     colored.push_str(RESET);
                 } else {
                     colored.push_str(BOLD);
                     colored.push_str("**");
                 }
-                is_bold = !is_bold;
+                self.is_bold = !self.is_bold;
+                return;
             }
+            colored.push('*');
+        }
+        match character {
+            '`' if self.is_code_span => {
+                colored.push('`');
+                self.is_code_span = false;
+                colored.push_str(RESET);
+                if self.is_bold {
+                    colored.push_str(BOLD);
+                }
+            }
+            '`' => {
+                self.is_code_span = true;
+                colored.push_str(CODE);
+                colored.push('`');
+            }
+            '*' if !self.is_code_span => self.has_star = true,
             character => colored.push(character),
         }
     }
-    if is_code_span || is_bold {
-        colored.push_str(RESET);
+
+    /// Ends the line: a star that waits stays a star, and the marks still open close.
+    fn end(self, colored: &mut String) {
+        if self.has_star {
+            colored.push('*');
+        }
+        if self.is_code_span || self.is_bold {
+            colored.push_str(RESET);
+        }
     }
+}
+
+/// Colors the inline marks of `text`, as a whole line's.
+fn color_inline(text: &str) -> String {
+    let mut colored = String::new();
+    let mut inline = Inline::default();
+    inline.push_str(text, &mut colored);
+    inline.end(&mut colored);
     colored
 }
 
@@ -158,13 +357,10 @@ mod tests {
     use super::*;
 
     fn color(lines: &[&str]) -> Vec<String> {
-        let mut highlighter = Highlighter::new();
-        let mut colored: Vec<String> = lines
-            .iter()
-            .flat_map(|line| highlighter.color_line(line))
-            .collect();
-        colored.extend(highlighter.finish());
-        colored
+        color_in_pieces(&[lines.join("\n")])
+            .lines()
+            .map(str::to_string)
+            .collect()
     }
 
     #[test]
@@ -269,5 +465,80 @@ mod tests {
     #[test]
     fn a_lone_star_stays_plain() {
         assert_eq!(color(&["2 * 3 = 6"]), ["2 * 3 = 6"]);
+    }
+
+    /// Colors the Markdown that arrives in `pieces`, one after the other.
+    fn color_in_pieces<S: AsRef<str>>(pieces: &[S]) -> String {
+        let mut highlighter = Highlighter::new();
+        let mut colored: String = pieces
+            .iter()
+            .map(|piece| highlighter.push(piece.as_ref()))
+            .collect();
+        colored.push_str(&highlighter.finish());
+        colored
+    }
+
+    /// Markdown with each kind of line, mark and block the highlighter knows.
+    const SAMPLE: &str = "## Title\n\nText with **bold**, `code`, 2 * 3 and ***.\n- item\n  12. item\n\
+        12) item\n> quote\n-1 and #2\n**b** c\n   \n| a | b |\n|---|---|\n| `x` | **y** |\n\
+        After\n```python\nimport os\n```\n  ```\n# not a heading\n```\n``x``\nends with *";
+
+    #[test]
+    fn the_colors_do_not_depend_on_how_the_text_arrives() {
+        let whole = color_in_pieces(&[SAMPLE]);
+        let characters: Vec<String> = SAMPLE.chars().map(String::from).collect();
+        assert_eq!(color_in_pieces(&characters), whole);
+        for (index, _) in SAMPLE.char_indices() {
+            let (before, after) = SAMPLE.split_at(index);
+            assert_eq!(
+                color_in_pieces(&[before, after]),
+                whole,
+                "split at byte {index}"
+            );
+        }
+    }
+
+    /// Asserts that each piece, pushed in turn, settles the colored text paired with it.
+    fn assert_settles(pieces: &[(&str, &str)]) {
+        let mut highlighter = Highlighter::new();
+        for (piece, settled) in pieces {
+            assert_eq!(highlighter.push(piece), *settled, "after {piece:?}");
+        }
+    }
+
+    #[test]
+    fn prose_is_written_as_it_arrives() {
+        assert_settles(&[("Hello wor", "Hello wor"), ("ld", "ld")]);
+    }
+
+    #[test]
+    fn a_line_start_waits_for_the_character_that_settles_its_mark() {
+        assert_settles(&[("-", ""), (" item", &format!("{DIM}-{RESET} item"))]);
+        assert_settles(&[("-", ""), ("1", "-1")]);
+        assert_settles(&[("12", ""), (".", ""), (" x", &format!("{DIM}12.{RESET} x"))]);
+        assert_settles(&[("##", ""), (" T", &format!("{BOLD}## T"))]);
+        assert_settles(&[("  ", ""), ("x", "  x")]);
+        assert_settles(&[("``", ""), ("x", &format!("{CODE}``{RESET}x"))]);
+    }
+
+    #[test]
+    fn a_star_waits_for_the_next_character() {
+        assert_settles(&[
+            ("a *", "a "),
+            ("*", &format!("{BOLD}**")),
+            ("b*", "b"),
+            ("*", &format!("**{RESET}")),
+        ]);
+        assert_settles(&[("2 *", "2 "), (" 3", "* 3")]);
+    }
+
+    #[test]
+    fn a_fence_and_a_row_wait_for_their_line_to_end() {
+        assert_settles(&[
+            ("``", ""),
+            ("`py", ""),
+            ("\n", &format!("{DIM}```py{RESET}\n")),
+        ]);
+        assert_settles(&[("| a |", ""), ("\n", "")]);
     }
 }

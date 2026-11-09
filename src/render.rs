@@ -2,10 +2,9 @@
 //! terminal wraps them to its width and copies them whole.
 //!
 //! The input line stays open below the conversation, so the user can type at any time, and the
-//! conversation reaches the terminal above it a whole line at a time. A line shown before it
-//! ended would have to be rewritten in place as the rest of it arrives, and nothing above the
-//! input line is ever rewritten. Claude writes each paragraph as one line, so its prose appears
-//! a paragraph at a time, and the input line's label says what Claude does meanwhile.
+//! conversation reaches the terminal above it as text, each line followed by a line break once it
+//! ended. Claude's prose reaches it as it streams in, as far as its colors are settled, and the
+//! rest of the conversation a whole line at a time.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -56,17 +55,17 @@ const SUMMARY_FIELDS: [(&str, &str); 10] = [
     ("Write", "file_path"),
 ];
 
-/// The conversation's lines that wait to be printed above the input line, and what Claude does
+/// The conversation's text that waits to be printed above the input line, and what Claude does
 /// meanwhile.
 pub struct Output {
-    lines: Vec<String>,
+    /// Each line followed by a line break once it ended. Only Claude's text leaves its last line
+    /// open, and any other line ends it first.
+    text: String,
     /// The file of the full view: the lines the screen shows, each followed by what it leaves
     /// out, like a tool's whole input under its call. It holds the conversation in place of the
     /// client, which writes each line to it as it adds the line to the screen's. It holds only
     /// what this client showed, so a resumed session starts it empty.
     full_view: File,
-    /// The start of a line of Claude's reply, which waits for its end.
-    partial: String,
     position: Position,
     /// What sets the next line apart from the last one. It is written with that line, so
     /// nothing the user sends in between can land between the two.
@@ -157,9 +156,8 @@ enum Section {
 impl Output {
     pub fn new(full_view: File) -> Self {
         Output {
-            lines: Vec::new(),
+            text: String::new(),
             full_view,
-            partial: String::new(),
             position: Position::Start,
             pending_break: None,
             text_ended: false,
@@ -186,28 +184,26 @@ impl Output {
         self.background_tasks = tasks;
     }
 
-    /// Takes the lines that wait to be printed above the input line.
-    pub fn take_lines(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.lines)
+    /// Takes the text that waits to be printed above the input line.
+    pub fn take_text(&mut self) -> String {
+        std::mem::take(&mut self.text)
+    }
+
+    #[cfg(test)]
+    fn take_lines(&mut self) -> Vec<String> {
+        self.take_text().lines().map(str::to_string).collect()
     }
 
     /// Shows the message the user sends, after all that Claude wrote before it, so the
     /// conversation reads in the order Claude sees it.
     pub fn show_message(&mut self, text: &str) {
-        // Claude stops mid-line when the message interrupts it, and keeps the line as far as it
-        // got
-        if !self.partial.is_empty() {
-            let line = std::mem::take(&mut self.partial);
-            let colored = self.highlighter.color_line(&line);
-            self.push_all(colored);
-        }
         // A message follows the line before it, and starts what the reply mark then introduces
         self.pending_break = None;
         // Each message starts with marks of its own, as Claude Code keeps each message apart, also
         // those it delivers together in one turn
-        self.emit(format!("{}{}{FILL_ROW}{RESET}", start_bar_row(), marks()));
+        self.emit(&format!("{}{}{FILL_ROW}{RESET}", start_bar_row(), marks()));
         for line in text.split('\n') {
-            self.emit(format!("{}{line}{FILL_ROW}{RESET}", start_bar_row()));
+            self.emit(&format!("{}{line}{FILL_ROW}{RESET}", start_bar_row()));
         }
         self.position = Position::In(Section::Message);
         self.set_status(Status::Working);
@@ -217,7 +213,10 @@ impl Output {
 
     /// Shows the user's answer to what a tool asks, after the question.
     pub fn show_answer(&mut self, question: &str, text: &str) {
-        self.push(format!("{}{text}{FILL_ROW}{RESET}", answer_label(question)));
+        self.push(&format!(
+            "{}{text}{FILL_ROW}{RESET}",
+            answer_label(question)
+        ));
     }
 
     /// Notes that the user stopped the turn, whose end then says so in the user's terms.
@@ -243,12 +242,10 @@ impl Output {
     pub fn show_text(&mut self, text: &str) {
         self.begin(Section::Text);
         self.set_status(Status::Writing);
-        self.partial.push_str(text);
-        while let Some(end) = self.partial.find('\n') {
-            let line: String = self.partial.drain(..=end).collect();
-            let colored = self.highlighter.color_line(line.trim_end_matches('\n'));
-            self.push_all(colored);
-        }
+        // The break goes before the text, even before the highlighter settles any of it
+        self.write_break();
+        let colored = self.highlighter.push(text);
+        self.write(&colored);
     }
 
     pub fn show_text_end(&mut self) {
@@ -267,20 +264,14 @@ impl Output {
         self.set_status(Status::Idle);
         if let Some(exit) = exit {
             self.begin(Section::Notice);
-            self.push(format!("{DIM}{exit}{RESET}"));
+            self.push(&format!("{DIM}{exit}{RESET}"));
         }
     }
 
-    /// Adds the rest of the text Claude wrote, which its last line and the lines the
-    /// highlighter holds wait in.
+    /// Adds the rest of the text Claude wrote, which the highlighter holds.
     fn end_text(&mut self) {
-        if !self.partial.is_empty() {
-            let line = std::mem::take(&mut self.partial);
-            let colored = self.highlighter.color_line(&line);
-            self.push_all(colored);
-        }
-        let held = self.highlighter.finish();
-        self.push_all(held);
+        let colored = self.highlighter.finish();
+        self.write(&colored);
     }
 
     pub fn show_tool_use(&mut self, tool_use: &ToolUse) {
@@ -324,7 +315,7 @@ impl Output {
         } else {
             String::new()
         };
-        self.push(format!(
+        self.push(&format!(
             "{mark} {}{RESET} {first}{more}{changes}",
             tool_use.name
         ));
@@ -332,12 +323,12 @@ impl Output {
         for (field, value) in &tool_use.input {
             match value {
                 Value::String(text) => {
-                    self.write_full_view(&format!("{indent}{DIM}{field}:{RESET}"));
+                    self.write_full_view_line(&format!("{indent}{DIM}{field}:{RESET}"));
                     for line in text.lines() {
-                        self.write_full_view(&format!("{indent}  {line}"));
+                        self.write_full_view_line(&format!("{indent}  {line}"));
                     }
                 }
-                _ => self.write_full_view(&format!("{indent}{DIM}{field}:{RESET} {value}")),
+                _ => self.write_full_view_line(&format!("{indent}{DIM}{field}:{RESET} {value}")),
             }
         }
     }
@@ -370,9 +361,9 @@ impl Output {
         let label = call.map_or_else(String::new, |call| {
             format!("#{:02x} {}: ", call.tag, call.name)
         });
-        self.push(format!("{outcome} {DIM}{label}{first}{more}{RESET}"));
+        self.push(&format!("{outcome} {DIM}{label}{first}{more}{RESET}"));
         for line in text.lines().skip(1) {
-            self.write_full_view(&format!("  {line}"));
+            self.write_full_view_line(&format!("  {line}"));
         }
     }
 
@@ -402,7 +393,7 @@ impl Output {
         };
         if let Some(line) = line {
             self.begin(Section::Notice);
-            self.push(format!("{DIM}{line}{RESET}"));
+            self.push(&format!("{DIM}{line}{RESET}"));
         }
         // A message that waits for its reply still waits when an older turn ends
         if self.position != Position::In(Section::Message) {
@@ -414,7 +405,7 @@ impl Output {
         self.begin(Section::Notice);
         for error in errors {
             let file = error.file.as_deref().unwrap_or("A settings file");
-            self.push(format!(
+            self.push(&format!(
                 "{RED}Skipped {file}, so none of its settings apply: {} {}{RESET}",
                 error.path, error.message
             ));
@@ -423,14 +414,14 @@ impl Output {
 
     pub fn show_paying_key(&mut self, key: &str) {
         self.begin(Section::Notice);
-        self.push(format!(
+        self.push(&format!(
             "{ORANGE}{key} pays for this session, not the subscription{RESET}"
         ));
     }
 
     pub fn show_error(&mut self, error: &str) {
         self.begin(Section::Notice);
-        self.push(format!("{RED}{error}{RESET}"));
+        self.push(&format!("{RED}{error}{RESET}"));
     }
 
     /// Shows a line of Claude Code's error output. Claude's text has nothing that names it, so
@@ -451,7 +442,7 @@ impl Output {
 
     fn push_stderr(&mut self, line: &str) {
         self.begin(Section::Notice);
-        self.push(format!("{DIM}stderr │{RESET} {RED}{line}{RESET}"));
+        self.push(&format!("{DIM}stderr │{RESET} {RED}{line}{RESET}"));
     }
 
     /// Sets what Claude does. Once Claude stops writing, the lines of error output that waited
@@ -494,36 +485,54 @@ impl Output {
     }
 
     /// Adds a line, after the break that sets it apart, if one waits.
-    fn push(&mut self, line: String) {
-        match self.pending_break.take() {
-            Some(Break::Reply) => self.emit(reply_mark()),
-            Some(Break::Prose) => {
-                self.emit(String::new());
-                self.emit(reply_mark());
-            }
-            Some(Break::Blank) => self.emit(String::new()),
-            None => {}
-        }
+    fn push(&mut self, line: &str) {
+        self.write_break();
         self.emit(line);
     }
 
-    /// Adds a line to the screen and to the full view.
-    fn emit(&mut self, line: String) {
-        self.write_full_view(&line);
-        self.lines.push(line);
+    fn write_break(&mut self) {
+        match self.pending_break.take() {
+            Some(Break::Reply) => self.emit(&reply_mark()),
+            Some(Break::Prose) => {
+                self.emit("");
+                self.emit(&reply_mark());
+            }
+            Some(Break::Blank) => self.emit(""),
+            None => {}
+        }
     }
 
-    /// Adds a line to the full view, without the codes that fill a row with the bar, since a
-    /// pager shows only the codes of colors. A write that fails, like on a full disk, leaves the
-    /// line out of the full view only.
-    fn write_full_view(&mut self, line: &str) {
-        let line = format!("{}\n", line.replace(FILL_ROW, ""));
-        let _ = self.full_view.write_all(line.as_bytes());
+    /// Adds a whole line to the screen and to the full view, on a row of its own: Claude's line
+    /// ends first where Claude got to, as when a message interrupts Claude mid-line.
+    fn emit(&mut self, line: &str) {
+        let colored = self.highlighter.end_line();
+        self.write(&colored);
+        self.write(&format!("{line}\n"));
+    }
+
+    /// Adds text to the screen and to the full view.
+    fn write(&mut self, text: &str) {
+        self.write_full_view_text(text);
+        self.text.push_str(text);
+    }
+
+    /// Adds a line to the full view only.
+    fn write_full_view_line(&mut self, line: &str) {
+        self.write_full_view_text(&format!("{line}\n"));
+    }
+
+    /// Adds text to the full view, without the codes that fill a row with the bar, since a pager
+    /// shows only the codes of colors. A write that fails, like on a full disk, leaves the text
+    /// out of the full view only.
+    fn write_full_view_text(&mut self, text: &str) {
+        let _ = self
+            .full_view
+            .write_all(text.replace(FILL_ROW, "").as_bytes());
     }
 
     fn push_all(&mut self, lines: Vec<String>) {
         for line in lines {
-            self.push(line);
+            self.push(&line);
         }
     }
 }
@@ -547,12 +556,9 @@ fn reply_mark() -> String {
 /// The lines of a plan, as Markdown.
 pub fn plan_lines(plan: &str) -> Vec<String> {
     let mut highlighter = Highlighter::new();
-    let mut lines = Vec::new();
-    for line in plan.trim().lines() {
-        lines.extend(highlighter.color_line(line));
-    }
-    lines.extend(highlighter.finish());
-    lines
+    let mut colored = highlighter.push(plan.trim());
+    colored.push_str(&highlighter.finish());
+    colored.lines().map(str::to_string).collect()
 }
 
 /// The lines of a question: its header and text, then its options, keyed by letter from a, and
@@ -655,6 +661,31 @@ mod tests {
         let lines = output.take_lines();
         assert_eq!(lines[..2], [reply_mark(), "Hel".to_string()]);
         assert!(lines[3].ends_with(&format!("Stop{FILL_ROW}{RESET}")));
+    }
+
+    #[test]
+    fn a_line_from_elsewhere_ends_claudes_line_where_it_got_to() {
+        let mut output = output_after_message();
+        output.show_text("Hel");
+        output.show_error("Failed");
+        assert_eq!(
+            output.take_lines(),
+            [
+                reply_mark(),
+                "Hel".to_string(),
+                String::new(),
+                format!("{RED}Failed{RESET}")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_line_start_the_highlighter_holds_follows_the_mark() {
+        let mut output = output_after_message();
+        output.show_text("##");
+        output.show_message("Stop");
+        let lines = output.take_lines();
+        assert_eq!(lines[..2], [reply_mark(), "##".to_string()]);
     }
 
     #[test]

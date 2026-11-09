@@ -30,6 +30,21 @@ To always use the subscription, add this to `~/.claude/settings.json`, which emp
 Claude Code's [headless docs](https://code.claude.com/docs/en/headless#start-faster-with-bare-mode) say `--bare` will become the default for `-p` in a future release.
 Bare mode ignores the subscription login, as well as CLAUDE.md files, hooks, plugins and auto-memory, so from that release claudio needs whatever turns it back off.
 
+## Config
+
+claudio reads `claudio/config.toml` in `$XDG_CONFIG_HOME`, or in `~/.config` when that is unset, once as it starts.
+Every setting is optional, and these are the defaults:
+
+```toml
+# The rows of the input box
+input_rows = 3
+# The columns a detail line takes at most: any line other than your words and Claude's prose
+max_detail_columns = 88
+```
+
+A detail line wider than that loses its middle to `…`, and Ctrl-O shows it whole.
+A setting claudio does not know, or a 0, stops claudio with an error that names it.
+
 ## Keys
 
 Keys come in two kinds.

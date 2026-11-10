@@ -7,11 +7,23 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// What the user does on the input line.
 #[derive(Clone)]
 pub enum Phase {
-    /// Writes a message to Claude, while this many questions of Claude's wait. A question waits
+    /// Writes a message to Claude, while `waiting` questions of Claude's wait. A question waits
     /// for Ctrl-Y rather than taking the input box as it arrives, since a key typed just then
-    /// would answer it. Enter sends no message while any waits, since Claude's turn waits on
-    /// the answers.
-    Writing(usize),
+    /// would answer it. Claude Code's own interface instead puts a question in place of the
+    /// input box, where typing only answers it, and refusing it ends the turn before the user
+    /// writes again. So the first Enter on a message keeps it in the box and sets
+    /// `refusal_confirmed`, and the second Enter refuses the waiting questions and sends it. A
+    /// question that arrives in between clears `refusal_confirmed`, so Enter never refuses a
+    /// question the user has not seen.
+    ///
+    /// Claude Code 2.1.321 also accepts a plain message while a question waits, though its
+    /// interface never sends one: the message queues behind the question, and Claude reads it
+    /// right after the answer, in the same turn. A message sent with send now cancels the
+    /// question instead.
+    Writing {
+        waiting: usize,
+        refusal_confirmed: bool,
+    },
     /// Answers the question the question view shows.
     Answering(View),
     /// Has nothing more to say, while Claude finishes its work, which only Ctrl-C stops.
@@ -98,13 +110,10 @@ pub fn action(phase: &Phase, key: &KeyEvent, is_empty: bool) -> Action {
     match (phase, SessionKey::of(key)) {
         (Phase::Ending, Some(SessionKey::Stop)) => Action::Session(SessionKey::Stop),
         (Phase::Ending, _)
-        | (Phase::Writing(0), Some(SessionKey::Questions))
-        | (Phase::Writing(_), Some(SessionKey::Next | SessionKey::Previous)) => Action::Ignore,
+        | (Phase::Writing { waiting: 0, .. }, Some(SessionKey::Questions))
+        | (Phase::Writing { .. }, Some(SessionKey::Next | SessionKey::Previous)) => Action::Ignore,
         (_, Some(SessionKey::End)) if !is_empty => Action::Ignore,
         (_, Some(session_key)) => Action::Session(session_key),
-        (Phase::Writing(waiting), None) if key.code == KeyCode::Enter && *waiting > 0 => {
-            Action::Ignore
-        }
         (_, None) if key.code == KeyCode::Enter => Action::Send,
         (_, None) => Action::Edit,
     }
@@ -122,6 +131,13 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    fn writing(waiting: usize) -> Phase {
+        Phase::Writing {
+            waiting,
+            refusal_confirmed: false,
+        }
+    }
+
     fn answering() -> Phase {
         Phase::Answering(View {
             label: "approve the plan? y/n".to_string(),
@@ -134,7 +150,7 @@ mod tests {
 
     #[test]
     fn writing_and_answering_take_the_same_keys() {
-        for phase in [Phase::Writing(0), answering()] {
+        for phase in [writing(0), answering()] {
             let cases = [
                 (control('c'), false, Action::Session(SessionKey::Stop)),
                 (control('c'), true, Action::Session(SessionKey::Stop)),
@@ -158,13 +174,13 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_y_opens_only_questions_that_wait_and_holds_the_message_meanwhile() {
-        let none = Phase::Writing(0);
+    fn ctrl_y_opens_only_questions_that_wait_and_enter_still_sends() {
+        let none = writing(0);
         assert_eq!(action(&none, &control('y'), false), Action::Ignore);
-        let waiting = Phase::Writing(2);
+        let waiting = writing(2);
         let cases = [
             (control('y'), Action::Session(SessionKey::Questions)),
-            (plain(KeyCode::Enter), Action::Ignore),
+            (plain(KeyCode::Enter), Action::Send),
             (control('n'), Action::Ignore),
             (control('p'), Action::Ignore),
             (plain(KeyCode::Char('y')), Action::Edit),

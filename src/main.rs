@@ -110,7 +110,10 @@ fn run() -> Result<ExitCode, String> {
         .tempfile()
         .map_err(|error| format!("Cannot create the file of the full view: {error}"))?;
     let shared = Arc::new(Mutex::new(Shared {
-        phase: Phase::Writing(0),
+        phase: Phase::Writing {
+            waiting: 0,
+            refusal_confirmed: false,
+        },
         output: Output::new(
             full_view
                 .reopen()

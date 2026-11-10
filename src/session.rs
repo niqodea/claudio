@@ -105,10 +105,13 @@ impl<'a> Conversation<'a> {
                 None => {}
             }
             let outcome = match shown {
-                None => self
-                    .session
-                    .input
-                    .read(Phase::Writing(questions.count()), &draft)?,
+                None => self.session.input.read(
+                    Phase::Writing {
+                        waiting: questions.count(),
+                        refusal_confirmed: questions.is_refusal_confirmed(),
+                    },
+                    &draft,
+                )?,
                 Some(index) => {
                     let question_draft = questions.draft(index).to_string();
                     self.session
@@ -136,17 +139,21 @@ impl<'a> Conversation<'a> {
         questions: &mut Questions,
     ) -> Result<(String, Option<usize>), String> {
         Ok(match outcome {
-            // A message on a cold cache stays on the input line the first time, and the label
-            // says the next Enter sends it
+            // A message while questions wait, or on a cold cache, stays on the input line the
+            // first time, and the label says what the next Enter does
             Outcome::Send(text) => {
                 if text.trim().is_empty() {
                     (String::new(), None)
-                } else if lock(&self.session.shared)
-                    .context
-                    .holds_message(Instant::now())
+                } else if questions.holds_message()
+                    || lock(&self.session.shared)
+                        .context
+                        .holds_message(Instant::now())
                 {
                     (text, None)
                 } else {
+                    for ask in questions.remove_all() {
+                        self.reply(&ask, Answer::Deny)?;
+                    }
                     self.send_message(&text)?;
                     (String::new(), None)
                 }

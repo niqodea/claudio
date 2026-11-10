@@ -15,7 +15,10 @@ use crate::render::{plan_lines, question_lines};
 #[derive(Default)]
 pub struct Questions {
     calls: Vec<Call>,
-    questions: Vec<Waiting>,
+    waiting: Vec<Waiting>,
+    /// Whether the user pressed Enter on a message once while these questions wait, so the next
+    /// Enter refuses them.
+    is_refusal_confirmed: bool,
 }
 
 /// A call that asks, with the answers and notes it has so far, each under its question's text.
@@ -61,8 +64,9 @@ impl Questions {
             AskKind::Plan(_) => vec![Kind::Plan],
             AskKind::Questions(questions) => (0..questions.len()).map(Kind::Question).collect(),
         };
+        self.is_refusal_confirmed = false;
         for (kind, full_view_line) in kinds.into_iter().zip(full_view_lines) {
-            self.questions.push(Waiting {
+            self.waiting.push(Waiting {
                 tool_use_id: ask.tool_use_id.clone(),
                 kind,
                 full_view_line,
@@ -76,20 +80,33 @@ impl Questions {
         });
     }
 
+    pub fn is_refusal_confirmed(&self) -> bool {
+        self.is_refusal_confirmed && !self.waiting.is_empty()
+    }
+
+    /// Whether a message the user sends stays in the input box, which it does the first time
+    /// while questions wait. The confirmation lasts until the questions are refused or a new
+    /// question arrives.
+    pub fn holds_message(&mut self) -> bool {
+        let holds = !self.waiting.is_empty() && !self.is_refusal_confirmed;
+        self.is_refusal_confirmed |= holds;
+        holds
+    }
+
     pub fn count(&self) -> usize {
-        self.questions.len()
+        self.waiting.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.questions.is_empty()
+        self.waiting.is_empty()
     }
 
     pub fn draft(&self, index: usize) -> &str {
-        &self.questions[index].draft
+        &self.waiting[index].draft
     }
 
     pub fn keep_draft(&mut self, index: usize, text: String) {
-        self.questions[index].draft = text;
+        self.waiting[index].draft = text;
     }
 
     /// What the question view shows of the question at `index`. The label shows the forms an
@@ -97,7 +114,7 @@ impl Questions {
     /// them, as in a `y/n` prompt, keys run together for any of them run together, as in
     /// `ls -la`, `<…>` for words that must follow and `[…]` for words that may.
     pub fn view(&self, index: usize) -> View {
-        let waiting = &self.questions[index];
+        let waiting = &self.waiting[index];
         let call = self.call(&waiting.tool_use_id);
         let (label, lines) = match (waiting.kind, &call.ask.kind) {
             (Kind::Question(number), AskKind::Questions(questions)) => {
@@ -131,7 +148,7 @@ impl Questions {
     /// Answers the question at `index` with `text`, or answers nothing when the text does not
     /// read as an answer, and the question keeps it.
     pub fn answer(&mut self, index: usize, text: &str) -> Option<Answered> {
-        let waiting = &self.questions[index];
+        let waiting = &self.waiting[index];
         match waiting.kind {
             Kind::Plan => self.answer_plan(index, text),
             Kind::Question(number) => {
@@ -156,7 +173,7 @@ impl Questions {
                 }
                 // Claude Code takes the answers to a call's questions together
                 let is_complete = call.answers.len() == questions.len();
-                self.questions.remove(index);
+                self.waiting.remove(index);
                 let reply = is_complete.then(|| {
                     let call = self.calls.remove(call_index);
                     let mut input = call.ask.input.clone();
@@ -207,8 +224,8 @@ impl Questions {
     /// Takes away the call the question at `index` belongs to, with all its questions, and
     /// returns what it asked, to refuse, since Claude Code refuses a call's questions together.
     pub fn remove_call(&mut self, index: usize) -> Ask {
-        let tool_use_id = self.questions[index].tool_use_id.clone();
-        self.questions
+        let tool_use_id = self.waiting[index].tool_use_id.clone();
+        self.waiting
             .retain(|waiting| waiting.tool_use_id != tool_use_id);
         let call_index = self.call_index(&tool_use_id);
         self.calls.remove(call_index).ask
@@ -216,7 +233,8 @@ impl Questions {
 
     /// Takes away every call, and returns what they asked, to refuse.
     pub fn remove_all(&mut self) -> Vec<Ask> {
-        self.questions.clear();
+        self.is_refusal_confirmed = false;
+        self.waiting.clear();
         self.calls.drain(..).map(|call| call.ask).collect()
     }
 
@@ -434,6 +452,21 @@ mod tests {
             panic!("an answer");
         };
         assert!(matches!(reply, Some((_, Answer::Allow { .. }))));
+    }
+
+    #[test]
+    fn a_message_refuses_the_questions_only_the_second_time_and_none_unseen() {
+        let mut questions = Questions::default();
+        assert!(!questions.holds_message());
+        questions.add(plan("a"), vec![1]);
+        assert!(questions.holds_message());
+        assert!(questions.is_refusal_confirmed());
+        questions.add(plan("b"), vec![2]);
+        assert!(!questions.is_refusal_confirmed());
+        assert!(questions.holds_message());
+        assert!(!questions.holds_message());
+        questions.remove_all();
+        assert!(!questions.is_refusal_confirmed());
     }
 
     #[test]

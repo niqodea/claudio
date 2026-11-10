@@ -633,7 +633,10 @@ impl InputLine {
     fn make_label(&self) -> String {
         let shared = lock(&self.shared);
         match &shared.phase {
-            Phase::Writing(waiting) => {
+            Phase::Writing {
+                waiting,
+                refusal_confirmed,
+            } => {
                 let now = Instant::now();
                 let level = shared.context.level();
                 let is_cold = shared.context.is_cold(now);
@@ -654,6 +657,15 @@ impl InputLine {
                 );
                 let state = if shared.context.is_cold_confirmed(now) {
                     Some(format!("{COLD_COLOR}cold, enter sends"))
+                } else if *refusal_confirmed {
+                    let (questions, them) = if *waiting == 1 {
+                        ("question", "it")
+                    } else {
+                        ("questions", "them")
+                    };
+                    Some(format!(
+                        "{ORANGE}{waiting} {questions} waiting, enter refuses {them} and sends"
+                    ))
                 } else {
                     describe_work(&shared.output)
                 };

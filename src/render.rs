@@ -42,6 +42,8 @@ const FILL_ROW: &str = "\x1b[K";
 const INPUT_SUMMARY_CHARACTERS: usize = 200;
 
 /// The field that sums up a call of each tool that has one.
+/// TODO: Show the description a call carries, like Bash's, before the field, which stays for the
+/// user to check what ran
 const SUMMARY_FIELDS: [(&str, &str); 10] = [
     ("Agent", "description"),
     ("Bash", "command"),

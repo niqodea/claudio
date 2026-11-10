@@ -136,6 +136,8 @@ impl Questions {
 
     /// Answers the question at `index` with `draft`. Returns none when `draft` answers nothing,
     /// like the user's own answer left empty, and the question stays.
+    /// TODO: Keep a call's answered questions open to change until its last one is answered,
+    /// since Claude Code takes a call's answers together and Claude reads none of them before
     pub fn answer(&mut self, index: usize, draft: &Draft) -> Option<Answered> {
         let waiting = &self.waiting[index];
         let call_index = self.call_index(&waiting.tool_use_id);

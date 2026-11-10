@@ -396,15 +396,20 @@ impl InputLine {
     }
 
     /// Shows the full view in less, from its end, where `F` follows the lines that keep coming
-    /// until Ctrl-C. less keeps the colors, draws on a screen of its own, which leaves the
+    /// until Ctrl-C, or from the question the question view shows, which reads in full there
+    /// with less's own keys and then answers on `q`. less keeps the colors, draws on a screen of its own, which leaves the
     /// conversation's rows as they were, and stays open on a view shorter than a screen,
     /// whatever `LESS` says. It reads the file as the UTF-8 the output writes, whatever the
     /// locale. Each of these takes a flag of less's own, which another pager has no use for, so
     /// the view runs less whatever `PAGER` says.
     fn show_full_view(&mut self) -> Result<(), String> {
+        let start = match &lock(&self.shared).phase {
+            Phase::Answering(view) => format!("+{}g", view.full_view_line),
+            _ => "+G".to_string(),
+        };
         let status = self.run_program(
             process::Command::new("less")
-                .args(["-R", "-+X", "-+F", "+G"])
+                .args(["-R", "-+X", "-+F", &start])
                 .env("LESSCHARSET", "utf-8")
                 .arg(&self.full_view),
         )?;
@@ -915,7 +920,7 @@ fn draw_question(out: &mut Vec<u8>, lines: &[String], width: u16, label_row: u16
         if rows > room || (!is_last && rows == room) {
             if room > 0 {
                 put!(out, MoveTo(0, row));
-                out.extend(format!("{STATUS_COLOR}…{RESET}").as_bytes());
+                out.extend(format!("{STATUS_COLOR}… Ctrl-O shows it whole{RESET}").as_bytes());
             }
             return;
         }

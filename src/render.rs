@@ -68,6 +68,8 @@ pub struct Output {
     /// client, which writes each line to it as it adds the line to the screen's. It holds only
     /// what this client showed, so a resumed session starts it empty.
     full_view: File,
+    /// How many lines the full view holds.
+    full_view_lines: usize,
     position: Position,
     /// What sets the next line apart from the last one. It is written with that line, so
     /// nothing the user sends in between can land between the two.
@@ -162,6 +164,7 @@ impl Output {
         Output {
             text: String::new(),
             full_view,
+            full_view_lines: 0,
             position: Position::Start,
             pending_break: None,
             text_ended: false,
@@ -372,17 +375,18 @@ impl Output {
         }
     }
 
-    pub fn show_ask(&mut self, ask: &Ask) {
+    /// Shows what `ask` asks, and gives the line of the full view, from 1, that each of its
+    /// questions starts on.
+    pub fn show_ask(&mut self, ask: &Ask) -> Vec<usize> {
         self.begin(Section::Tools);
         match &ask.kind {
             // Refused as it arrives, which the error line says
-            AskKind::Permission => {}
-            AskKind::Plan(plan) => self.push_details(plan_lines(plan)),
-            AskKind::Questions(questions) => {
-                for question in questions {
-                    self.push_details(question_lines(question));
-                }
-            }
+            AskKind::Permission => vec![],
+            AskKind::Plan(plan) => vec![self.push_details(plan_lines(plan))],
+            AskKind::Questions(questions) => questions
+                .iter()
+                .map(|question| self.push_details(question_lines(question)))
+                .collect(),
         }
     }
 
@@ -545,15 +549,21 @@ impl Output {
     /// shows only the codes of colors. A write that fails, like on a full disk, leaves the text
     /// out of the full view only.
     fn write_full_view_text(&mut self, text: &str) {
+        self.full_view_lines += text.matches('\n').count();
         let _ = self
             .full_view
             .write_all(text.replace(FILL_ROW, "").as_bytes());
     }
 
-    fn push_details(&mut self, lines: Vec<String>) {
+    /// Adds detail lines, and gives the line of the full view, from 1, that the first one is on.
+    fn push_details(&mut self, lines: Vec<String>) -> usize {
+        self.write_break();
+        self.end_claude_line();
+        let first = self.full_view_lines + 1;
         for line in lines {
             self.push_detail(&line);
         }
+        first
     }
 }
 
@@ -875,6 +885,43 @@ mod tests {
         show(&mut output);
         let text = std::fs::read_to_string(file.path()).expect("the full view reads back");
         text.lines().skip(2).map(str::to_string).collect()
+    }
+
+    #[test]
+    fn each_question_starts_on_the_full_view_line_its_ask_gives() {
+        let file = tempfile::NamedTempFile::new().expect("the temporary directory takes a file");
+        let mut output = Output::new(
+            file.reopen().expect("the file opens again"),
+            Config::default().max_detail_columns,
+        );
+        output.show_message("Hi");
+        output.show_text("Two questions:");
+        let request = json!({
+            "subtype": "can_use_tool",
+            "tool_name": "AskUserQuestion",
+            "tool_use_id": "1",
+            "input": {"questions": [
+                {"question": "Which database?", "header": "Database",
+                 "options": [{"label": "Postgres", "description": "a\nserver"}]},
+                {"question": "Which checks?", "header": "Checks", "options": []},
+            ]},
+        });
+        let Ok(crate::protocol::Event::Ask(ask)) =
+            crate::protocol::read_request("request-1".to_string(), request)
+        else {
+            panic!("an ask");
+        };
+        let starts = output.show_ask(&ask);
+        let text = std::fs::read_to_string(file.path()).expect("the full view reads back");
+        let lines: Vec<&str> = text.lines().collect();
+        let headers: Vec<&str> = starts.iter().map(|start| lines[start - 1]).collect();
+        assert_eq!(
+            headers,
+            [
+                format!("{BOLD}Database{RESET} Which database?"),
+                format!("{BOLD}Checks{RESET} Which checks?"),
+            ]
+        );
     }
 
     #[test]

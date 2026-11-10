@@ -87,8 +87,8 @@ impl<'a> Conversation<'a> {
                     continue;
                 }
                 Some(Input::Ask(ask)) => {
-                    lock(&self.session.shared).output.show_ask(&ask);
-                    questions.add(ask);
+                    let full_view_lines = lock(&self.session.shared).output.show_ask(&ask);
+                    questions.add(ask, full_view_lines);
                     continue;
                 }
                 Some(Input::Unsupported {

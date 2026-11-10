@@ -32,6 +32,8 @@ pub struct View {
     pub label: String,
     /// The question in full, above the label row.
     pub lines: Vec<String>,
+    /// The line of the full view, from 1, that the question starts on.
+    pub full_view_line: usize,
     /// Which question it is, from 0, of how many wait.
     pub index: usize,
     pub count: usize,
@@ -44,7 +46,7 @@ pub enum SessionKey {
     Stop,
     /// Ctrl-D: ends the session, refusing what Claude asks.
     End,
-    /// Ctrl-O: shows the whole conversation.
+    /// Ctrl-O: shows the whole conversation, from the question the question view shows.
     ShowFullView,
     /// Ctrl-S: shows the status.
     ShowStatus,
@@ -124,6 +126,7 @@ mod tests {
         Phase::Answering(View {
             label: "approve the plan? y/n".to_string(),
             lines: vec![],
+            full_view_line: 1,
             index: 0,
             count: 2,
         })

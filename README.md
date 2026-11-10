@@ -68,6 +68,7 @@ Keys come in two kinds.
 Claude's questions, a plan to approve or the choices of `AskUserQuestion`, wait until you open them, so no key meant for your message answers one.
 `Y` on the label row counts them, up to 9 and then `+`, in orange while any waits, and Enter sends no message meanwhile.
 Ctrl-Y shows them one at a time, with which one of how many at the right end of the label row, and the input box answers the one shown.
+A question longer than the screen ends in `… Ctrl-O shows it whole`: Ctrl-O there opens the whole conversation at the question, to read with less's keys, and `q` brings you back to answer.
 
 The label shows the forms an answer takes, in the notation of a command's usage line:
 

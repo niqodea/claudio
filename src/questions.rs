@@ -30,6 +30,8 @@ struct Waiting {
     /// The call it belongs to.
     tool_use_id: String,
     kind: Kind,
+    /// The line of the full view, from 1, that it starts on.
+    full_view_line: usize,
     /// What was typed to it so far.
     draft: String,
 }
@@ -51,18 +53,19 @@ pub struct Answered {
 }
 
 impl Questions {
-    /// Adds the questions of a call that asks. A permission has none, since it is refused as it
-    /// arrives.
-    pub fn add(&mut self, ask: Ask) {
+    /// Adds the questions of a call that asks, each starting on its line of `full_view_lines`. A
+    /// permission has none, since it is refused as it arrives.
+    pub fn add(&mut self, ask: Ask, full_view_lines: Vec<usize>) {
         let kinds: Vec<Kind> = match &ask.kind {
             AskKind::Permission => return,
             AskKind::Plan(_) => vec![Kind::Plan],
             AskKind::Questions(questions) => (0..questions.len()).map(Kind::Question).collect(),
         };
-        for kind in kinds {
+        for (kind, full_view_line) in kinds.into_iter().zip(full_view_lines) {
             self.questions.push(Waiting {
                 tool_use_id: ask.tool_use_id.clone(),
                 kind,
+                full_view_line,
                 draft: String::new(),
             });
         }
@@ -119,6 +122,7 @@ impl Questions {
         View {
             label,
             lines,
+            full_view_line: waiting.full_view_line,
             index,
             count: self.count(),
         }
@@ -344,8 +348,8 @@ mod tests {
     #[test]
     fn the_label_shows_the_forms_an_answer_takes() {
         let mut questions = Questions::default();
-        questions.add(two_questions("a"));
-        questions.add(plan("b"));
+        questions.add(two_questions("a"), vec![1, 2]);
+        questions.add(plan("b"), vec![1]);
         assert_eq!(questions.count(), 3);
         assert_eq!(questions.view(0).label, "Database? a/b, or c <own>");
         assert_eq!(questions.view(1).label, "Checks? abc [more, …]");
@@ -355,7 +359,7 @@ mod tests {
     #[test]
     fn a_call_is_answered_once_all_its_questions_are() {
         let mut questions = Questions::default();
-        questions.add(two_questions("a"));
+        questions.add(two_questions("a"), vec![1, 2]);
         let Some(Answered { reply, .. }) = questions.answer(0, "B\nit is one file") else {
             panic!("an answer");
         };
@@ -380,7 +384,7 @@ mod tests {
     #[test]
     fn one_choice_takes_a_key_alone_or_the_own_key_and_words() {
         let mut questions = Questions::default();
-        questions.add(two_questions("a"));
+        questions.add(two_questions("a"), vec![1, 2]);
         for text in ["", "ab", "a fast one", "c", "d", "apple", "1"] {
             assert!(questions.answer(0, text).is_none(), "{text:?}");
         }
@@ -393,9 +397,9 @@ mod tests {
     #[test]
     fn several_choices_take_keys_run_together_and_more_items_apart_with_commas() {
         let mut questions = Questions::default();
-        questions.add(two_questions("a"));
-        questions.add(two_questions("b"));
-        questions.add(two_questions("c"));
+        questions.add(two_questions("a"), vec![1, 2]);
+        questions.add(two_questions("b"), vec![1, 2]);
+        questions.add(two_questions("c"), vec![1, 2]);
         for text in ["", "d", "abd", "-", "lint"] {
             assert!(questions.answer(1, text).is_none(), "{text:?}");
         }
@@ -411,7 +415,7 @@ mod tests {
     #[test]
     fn a_plan_takes_y_alone_or_n_with_a_reason_or_none() {
         let mut questions = Questions::default();
-        questions.add(plan("a"));
+        questions.add(plan("a"), vec![1]);
         for text in ["", "yes and also tests", "y but", "sure", "nope"] {
             assert!(questions.answer(0, text).is_none(), "{text:?}");
         }
@@ -420,12 +424,12 @@ mod tests {
         };
         assert_eq!(answer, "refused: use SQLite");
         assert!(matches!(reply, Some((_, Answer::DenyFor(reason))) if reason == "use SQLite"));
-        questions.add(plan("b"));
+        questions.add(plan("b"), vec![1]);
         let Some(Answered { reply, .. }) = questions.answer(0, "n") else {
             panic!("an answer");
         };
         assert!(matches!(reply, Some((_, Answer::Deny))));
-        questions.add(plan("c"));
+        questions.add(plan("c"), vec![1]);
         let Some(Answered { reply, .. }) = questions.answer(0, "Yes") else {
             panic!("an answer");
         };
@@ -435,8 +439,8 @@ mod tests {
     #[test]
     fn refusing_a_question_takes_away_its_whole_call() {
         let mut questions = Questions::default();
-        questions.add(two_questions("a"));
-        questions.add(plan("b"));
+        questions.add(two_questions("a"), vec![1, 2]);
+        questions.add(plan("b"), vec![1]);
         let ask = questions.remove_call(1);
         assert_eq!(ask.tool_use_id, "a");
         assert_eq!(questions.count(), 1);

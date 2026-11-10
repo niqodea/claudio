@@ -123,9 +123,8 @@ impl Questions {
                 let forms = if question.is_multi_select {
                     format!("{} [more, …]", keys.collect::<String>())
                 } else {
-                    let own = own_key(question);
                     let keys: Vec<String> = keys.map(String::from).collect();
-                    format!("{}, or {own} <own>", keys.join("/"))
+                    format!("{}, or {OWN_KEY} <own>", keys.join("/"))
                 };
                 (
                     format!("{}? {forms}", question.header),
@@ -250,13 +249,10 @@ impl Questions {
     }
 }
 
-/// The key of the answer of the user's own to a question of one choice: the letter after its
-/// options'. Claude Code accepts any text as an answer, and offers it on every question.
-pub fn own_key(question: &Question) -> char {
-    ('a'..)
-        .nth(question.options.len())
-        .expect("a question has at most 4 options")
-}
+/// The key in front of an answer of the user's own to a question of one choice. It is the same
+/// on every question, and no option's key, so a one-letter answer of the user's own reads as
+/// theirs. Claude Code accepts any text as an answer, and offers it on every question.
+pub const OWN_KEY: char = '>';
 
 /// The first word of `text` and the rest, both trimmed. A comma, colon or period right after the
 /// first word only parts it from the rest, as in `no, use SQLite`.
@@ -270,11 +266,17 @@ fn split_first_word(text: &str) -> (&str, &str) {
 /// What `line` answers to `question`, none when it does not read as an answer. Claude gets the
 /// options' labels and the user's words, never the keys, which only the question view shows.
 ///
-/// A question of one choice takes one key alone, or the own key and the user's own answer after
-/// it, so an answer of the user's own is never taken for a key. A question of several choices
+/// A question of one choice takes one key alone, or the user's own answer after `OWN_KEY`, with
+/// or without a space. A question of several choices
 /// takes keys run together, or `-` for none, and after them more items of the user's own, apart
 /// with commas, since an item can be several words.
 fn choose(question: &Question, line: &str) -> Option<String> {
+    if !question.is_multi_select
+        && let Some(own) = line.trim().strip_prefix(OWN_KEY)
+    {
+        let own = own.trim();
+        return (!own.is_empty()).then(|| own.to_string());
+    }
     let (first, rest) = split_first_word(line);
     let options = &question.options;
     let index_of = |key: char| {
@@ -289,7 +291,6 @@ fn choose(question: &Question, line: &str) -> Option<String> {
         }
         return match (index_of(key), rest.is_empty()) {
             (Some(index), true) => Some(options[index].label.clone()),
-            (None, false) if key == own_key(question) => Some(rest.to_string()),
             _ => None,
         };
     }
@@ -369,7 +370,7 @@ mod tests {
         questions.add(two_questions("a"), vec![1, 2]);
         questions.add(plan("b"), vec![1]);
         assert_eq!(questions.count(), 3);
-        assert_eq!(questions.view(0).label, "Database? a/b, or c <own>");
+        assert_eq!(questions.view(0).label, "Database? a/b, or > <own>");
         assert_eq!(questions.view(1).label, "Checks? abc [more, …]");
         assert_eq!(questions.view(2).label, "approve? y, or n [reason]");
     }
@@ -400,16 +401,18 @@ mod tests {
     }
 
     #[test]
-    fn one_choice_takes_a_key_alone_or_the_own_key_and_words() {
+    fn one_choice_takes_a_key_alone_or_words_after_the_own_key() {
         let mut questions = Questions::default();
         questions.add(two_questions("a"), vec![1, 2]);
-        for text in ["", "ab", "a fast one", "c", "d", "apple", "1"] {
+        questions.add(two_questions("b"), vec![1, 2]);
+        for text in ["", "ab", "a fast one", "c", "c DuckDB", "> ", "apple", "1"] {
             assert!(questions.answer(0, text).is_none(), "{text:?}");
         }
         assert_eq!(
-            answer(&mut questions, 0, "c DuckDB, in a file"),
+            answer(&mut questions, 0, "> DuckDB, in a file"),
             "DuckDB, in a file"
         );
+        assert_eq!(answer(&mut questions, 1, ">b"), "b");
     }
 
     #[test]

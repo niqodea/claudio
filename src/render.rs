@@ -16,7 +16,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::markdown::Highlighter;
 use crate::protocol::{Ask, AskKind, Question, SettingsError, State, ToolResult, ToolUse};
-use crate::questions::own_key;
+use crate::questions::OWN_KEY;
 
 const GREEN: &str = "\x1b[32m";
 // The marks of the user's lines
@@ -679,8 +679,7 @@ pub fn question_lines(question: &Question) -> Vec<String> {
     }
     // A question of several choices takes items of the user's own after its keys instead
     if !question.is_multi_select {
-        let own = own_key(question);
-        lines.push(format!("  {own}. {DIM}your own answer, after {own}{RESET}"));
+        lines.push(format!("  {OWN_KEY} {DIM}your own answer{RESET}"));
     }
     lines
 }

@@ -76,7 +76,7 @@ The label shows the forms an answer takes, in the notation of a command's usage 
 | Label                       | Answers                                                      |
 | --------------------------- | ------------------------------------------------------------ |
 | `approve? y, or n [reason]` | `y`, or `n`, or `n` and why                                  |
-| `Fruit? a/b/c, or d <own>`  | one key, like `b`, or `d` and your own answer                |
+| `Fruit? a/b/c, or > <own>`  | one key, like `b`, or `>` and your own answer                |
 | `Toppings? abcd [more, …]`  | keys run together, like `ac`, then more items apart with commas, or `-` for no key |
 
 Keys apart with `/` take one of them, as a `y/n` prompt does, and keys run together take any of them run together, as a command's flags do, like `ls -la`; `<…>` must follow, and `[…]` may.

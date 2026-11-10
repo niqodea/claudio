@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """A stand-in for `claude` that answers each message with a tool call of several lines and its
-result, then two text blocks in a row, as Claude Code's stream-json output carries them. Run
-claudio with this directory first in PATH. FAKE_DELAY is how many seconds each answer waits
-before it starts, 0 when unset."""
+result, then two text blocks in a row, as Claude Code's stream-json output carries them, and the
+message `ask` with two questions of AskUserQuestion's, whose turn ends once they are answered: one
+of one choice whose options have previews, and one of several choices. Run claudio with this
+directory first in PATH. FAKE_DELAY is how many seconds each answer waits before it starts, 0
+when unset."""
 
 import json
 import os
@@ -10,6 +12,34 @@ import sys
 import time
 
 BLOCKS = ["The first block of text.", "The second block, right after the first."]
+
+ASK_REQUEST_ID = "fake-ask"
+
+
+def option(label, description, preview=None):
+    return {"label": label, "description": description} | ({"preview": preview} if preview else {})
+
+
+QUESTIONS = [
+    {
+        "question": "Which greeting function style do you prefer?",
+        "header": "Code style",
+        "options": [
+            option("Arrow function", "Short one-liner.", "```js\nconst greet = (name) => `Hello, ${name}!`;\n```"),
+            option(
+                "Classic function",
+                "Named function declaration.",
+                "```js\nfunction greet(name) {\n  return `Hello, ${name}!`;\n}\n```",
+            ),
+        ],
+    },
+    {
+        "question": "Which checks should CI run?",
+        "header": "Checks",
+        "multiSelect": True,
+        "options": [option("Lint", ""), option("Tests", ""), option("Types", "")],
+    },
+]
 
 
 def send(message):
@@ -65,9 +95,27 @@ for line in sys.stdin:
                 },
             }
         )
+    # The answers to the questions end the turn that asked them
+    if message.get("response", {}).get("request_id") == ASK_REQUEST_ID:
+        send({"type": "result", "subtype": "success"})
+        state("idle")
     if message.get("type") != "user":
         continue
     state("running")
+    if message["message"]["content"].strip() == "ask":
+        send(
+            {
+                "type": "control_request",
+                "request_id": ASK_REQUEST_ID,
+                "request": {
+                    "subtype": "can_use_tool",
+                    "tool_name": "AskUserQuestion",
+                    "tool_use_id": "fake-ask-call",
+                    "input": {"questions": QUESTIONS},
+                },
+            }
+        )
+        continue
     time.sleep(float(os.environ.get("FAKE_DELAY", "0")))
     send(
         {

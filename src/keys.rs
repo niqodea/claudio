@@ -1,8 +1,11 @@
 //! What each key does. Keys come in two kinds. The session keys, Ctrl with a letter, act on the
 //! session the same in every vi mode, so the key alone decides which one it is. Every other key
-//! works on the text: Enter sends it, and the rest edit it with the vi keys of the input box.
+//! works on the text: Enter sends it, and the rest edit it with the vi keys of the input box. In
+//! the question view, they also move between the options above the box.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+use crate::picker::{Choice, Form};
 
 /// What the user does on the input line.
 #[derive(Clone)]
@@ -37,13 +40,18 @@ impl Phase {
     }
 }
 
-/// What the question view shows: one of the questions that wait, which the input box answers.
+/// What the question view shows: one of the questions that wait.
 #[derive(Clone)]
 pub struct View {
-    /// What the label row says in front of the answer.
+    /// The question's header, which the label row shows.
     pub label: String,
-    /// The question in full, above the label row.
+    /// The question's text, or the plan, above the options.
     pub lines: Vec<String>,
+    /// The question's options, or a plan's approval and refusal.
+    pub choices: Vec<Choice>,
+    /// What the item of the user's own answer says.
+    pub own_label: String,
+    pub form: Form,
     /// The line of the full view, from 1, that the question starts on.
     pub full_view_line: usize,
     /// Which question it is, from 0, of how many wait.
@@ -62,13 +70,15 @@ pub enum SessionKey {
     ShowFullView,
     /// Ctrl-S: shows the status.
     ShowStatus,
-    /// Ctrl-Y: opens the questions that wait, or goes back to the message from them. The same
-    /// key goes back, since Esc belongs to the vi keys.
+    /// Ctrl-Y: opens the questions that wait, or goes back to the message from them, as Esc
+    /// also does on the list of options.
     Questions,
-    /// Ctrl-N: shows the next question, as Ctrl-N shows the next line in readline.
-    Next,
-    /// Ctrl-P: shows the previous question, as Ctrl-P shows the previous line in readline.
-    Previous,
+    /// Ctrl-N: moves down the options of the question the question view shows, to the user's own
+    /// answer after the last, from the input box too, as Ctrl-N moves down a list in fzf and in
+    /// vim's completion menu.
+    Down,
+    /// Ctrl-P: moves up the options, like `Down`.
+    Up,
 }
 
 impl SessionKey {
@@ -83,20 +93,21 @@ impl SessionKey {
             KeyCode::Char('o') => Some(SessionKey::ShowFullView),
             KeyCode::Char('s') => Some(SessionKey::ShowStatus),
             KeyCode::Char('y') => Some(SessionKey::Questions),
-            KeyCode::Char('n') => Some(SessionKey::Next),
-            KeyCode::Char('p') => Some(SessionKey::Previous),
+            KeyCode::Char('n') => Some(SessionKey::Down),
+            KeyCode::Char('p') => Some(SessionKey::Up),
             _ => None,
         }
     }
 }
 
 /// What a key does.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
     Session(SessionKey),
     /// Sends the text, as a message or an answer.
     Send,
-    /// Edits the text, with the input box's vi keys.
+    /// Edits the text with the input box's vi keys, or in the question view, acts on the options
+    /// or the input box.
     Edit,
     Ignore,
 }
@@ -111,7 +122,7 @@ pub fn action(phase: &Phase, key: &KeyEvent, is_empty: bool) -> Action {
         (Phase::Ending, Some(SessionKey::Stop)) => Action::Session(SessionKey::Stop),
         (Phase::Ending, _)
         | (Phase::Writing { waiting: 0, .. }, Some(SessionKey::Questions))
-        | (Phase::Writing { .. }, Some(SessionKey::Next | SessionKey::Previous)) => Action::Ignore,
+        | (Phase::Writing { .. }, Some(SessionKey::Down | SessionKey::Up)) => Action::Ignore,
         (_, Some(SessionKey::End)) if !is_empty => Action::Ignore,
         (_, Some(session_key)) => Action::Session(session_key),
         (_, None) if key.code == KeyCode::Enter => Action::Send,
@@ -140,8 +151,11 @@ mod tests {
 
     fn answering() -> Phase {
         Phase::Answering(View {
-            label: "approve the plan? y/n".to_string(),
+            label: "plan".to_string(),
             lines: vec![],
+            choices: vec![],
+            own_label: String::new(),
+            form: Form::One,
             full_view_line: 1,
             index: 0,
             count: 2,
@@ -194,8 +208,8 @@ mod tests {
     fn the_question_view_moves_between_questions_and_goes_back_with_ctrl_y() {
         let cases = [
             (control('y'), Action::Session(SessionKey::Questions)),
-            (control('n'), Action::Session(SessionKey::Next)),
-            (control('p'), Action::Session(SessionKey::Previous)),
+            (control('n'), Action::Session(SessionKey::Down)),
+            (control('p'), Action::Session(SessionKey::Up)),
         ];
         for (key, expected) in cases {
             assert_eq!(action(&answering(), &key, false), expected);

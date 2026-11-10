@@ -10,7 +10,7 @@
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroUsize};
 use std::path::PathBuf;
 use std::process::{self, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,16 +19,18 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::cursor::{self, Hide, MoveTo, SetCursorStyle, Show};
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEvent, KeyEventKind,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
 };
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::context::COLD_COLOR;
-use crate::keys::{self, Action, Phase, SessionKey};
+use crate::keys::{self, Action, Phase, SessionKey, View};
 use crate::limits::{Level, limit_level};
+use crate::picker::{self, Cursor, Draft, InputBox, Pick};
 use crate::render::{
-    ORANGE, Output, STATUS_COLOR, Status, answer_label, colors_at, marks, start_bar_row,
+    LIGHT_CYAN, ORANGE, Output, STATUS_COLOR, Status, YELLOW, colors_at, cut, marks, start_bar_row,
 };
 use crate::status;
 use crate::terminal::{Settings, run_in_terminal};
@@ -60,25 +62,39 @@ macro_rules! put {
     };
 }
 
-/// How reading the input line ended.
-pub enum Outcome {
-    /// The user sends the text on the line.
-    Send(String),
-    /// The user stops Claude's turn, with the text on the line, which stays the draft.
-    Stop(String),
+/// How reading the input line ended, with `D`, the draft: the text on the line, or the pick of
+/// the question the question view shows.
+pub enum Outcome<D> {
+    /// The user sends the text on the line, or picks an answer.
+    Send(D),
+    /// The user stops Claude's turn, with the draft.
+    Stop(D),
     /// The user opens the questions that wait, or goes back from them to the message, with the
-    /// text on the line, which stays its draft.
-    Questions(String),
-    /// The user moves to the next question, with the text on the line, which stays the draft of
-    /// the question left.
-    Next(String),
+    /// draft of what the user leaves.
+    Questions(D),
+    /// The user moves to the next question, with the draft of the question left.
+    Next(D),
     /// The user moves to the previous question, like `Next`.
-    Previous(String),
+    Previous(D),
     /// The user ends the session.
     End,
-    /// Claude Code asked something, which the main thread acts on first, with the text on the
-    /// line.
-    Break(String),
+    /// Claude Code asked something, which the main thread acts on first, with the draft.
+    Break(D),
+}
+
+impl Outcome<()> {
+    /// The same outcome, with `draft`.
+    fn with<D>(self, draft: D) -> Outcome<D> {
+        match self {
+            Outcome::Send(()) => Outcome::Send(draft),
+            Outcome::Stop(()) => Outcome::Stop(draft),
+            Outcome::Questions(()) => Outcome::Questions(draft),
+            Outcome::Next(()) => Outcome::Next(draft),
+            Outcome::Previous(()) => Outcome::Previous(draft),
+            Outcome::End => Outcome::End,
+            Outcome::Break(()) => Outcome::Break(draft),
+        }
+    }
 }
 
 /// The bottom of the terminal, and where the conversation above it ends.
@@ -94,6 +110,11 @@ pub struct InputLine {
     /// The rows the user chose for the input box, which a short screen gives fewer.
     input_rows: NonZeroU16,
     editor: Editor,
+    /// What the user picks on the question the question view shows.
+    pick: Pick,
+    /// Whether the last key was an answer that would leave out the user's own text, which the
+    /// label row then warns of, so the same key again answers.
+    is_drop_warned: bool,
     layout: Layout,
     /// The first row of the text the box shows.
     scroll: u16,
@@ -144,6 +165,8 @@ impl InputLine {
             original_settings,
             input_rows,
             editor: Editor::new(""),
+            pick: Draft::new().pick,
+            is_drop_warned: false,
             layout,
             scroll: 0,
             end: End::Before(row.min(lowest)),
@@ -157,22 +180,45 @@ impl InputLine {
     }
 
     /// Reads the input line, starting from `draft`, while the conversation goes on above it.
-    pub fn read(&mut self, phase: Phase, draft: &str) -> Result<Outcome, String> {
-        let answers = matches!(phase, Phase::Answering(_));
-        lock(&self.shared).phase = phase;
-        if answers != self.in_view {
-            self.switch_screen()?;
-        }
+    pub fn read(&mut self, phase: Phase, draft: &str) -> Result<Outcome<String>, String> {
         // A command typed for another line has nothing left to act on
         self.editor.cancel();
         if self.text() != draft {
             self.editor.replace(draft);
         }
+        let outcome = self.run(phase)?;
+        Ok(outcome.with(self.text()))
+    }
+
+    /// Reads what the user picks and writes on the question that `view` shows, starting from
+    /// `draft`.
+    pub fn read_question(&mut self, view: View, draft: Draft) -> Result<Outcome<Draft>, String> {
+        self.editor.cancel();
+        self.editor.replace(&draft.text);
+        // The box waits in normal mode while the cursor is on the list
+        if draft.pick.cursor != Cursor::Writing {
+            self.editor.press(&escape());
+        }
+        self.pick = draft.pick;
+        let outcome = self.run(Phase::Answering(view))?;
+        Ok(outcome.with(Draft {
+            pick: self.pick.clone(),
+            text: self.text(),
+        }))
+    }
+
+    /// Reads keys in `phase` until one ends the reading.
+    fn run(&mut self, phase: Phase) -> Result<Outcome<()>, String> {
+        let answers = matches!(phase, Phase::Answering(_));
+        lock(&self.shared).phase = phase;
+        if answers != self.in_view {
+            self.switch_screen()?;
+        }
         self.draw()?;
         loop {
             // Taking the signal lets a line opened again for the same question wait for keys
             if self.break_signal.swap(false, Ordering::Relaxed) {
-                return Ok(Outcome::Break(self.text()));
+                return Ok(Outcome::Break(()));
             }
             self.print_output()?;
             if self.make_label() != self.label {
@@ -227,11 +273,8 @@ impl InputLine {
     }
 
     /// The row of the label: right below the conversation's end, down to the lowest row the
-    /// label row and the box fit above, where the question view always has it.
+    /// label row and the box fit above.
     fn label_row(&self) -> u16 {
-        if self.in_view {
-            return self.layout.lowest_label_row();
-        }
         self.end.next_row().min(self.layout.lowest_label_row())
     }
 
@@ -254,37 +297,121 @@ impl InputLine {
     }
 
     /// Acts on a key, with an outcome for one that ends the reading.
-    fn key(&mut self, key: KeyEvent) -> Result<Option<Outcome>, String> {
+    fn key(&mut self, key: KeyEvent) -> Result<Option<Outcome<()>>, String> {
         let phase = lock(&self.shared).phase.clone();
+        let was_drop_warned = std::mem::take(&mut self.is_drop_warned);
         let action = keys::action(&phase, &key, self.editor.is_empty());
         // Any key other than an edit cancels the half-typed vi command
         if action != Action::Edit {
             self.editor.cancel();
         }
         match action {
-            Action::Session(SessionKey::Stop) => return Ok(Some(Outcome::Stop(self.text()))),
+            Action::Session(SessionKey::Stop) => return Ok(Some(Outcome::Stop(()))),
             Action::Session(SessionKey::End) => return Ok(Some(Outcome::End)),
-            Action::Session(SessionKey::Questions) => {
-                return Ok(Some(Outcome::Questions(self.text())));
-            }
-            Action::Session(SessionKey::Next) => return Ok(Some(Outcome::Next(self.text()))),
-            Action::Session(SessionKey::Previous) => {
-                return Ok(Some(Outcome::Previous(self.text())));
+            Action::Session(SessionKey::Questions) => return Ok(Some(Outcome::Questions(()))),
+            Action::Session(direction @ (SessionKey::Down | SessionKey::Up)) => {
+                if let Phase::Answering(view) = &phase {
+                    let choices = view.choices.len();
+                    let effect = if direction == SessionKey::Down {
+                        self.pick.move_down(choices)
+                    } else {
+                        self.pick.move_up(choices)
+                    };
+                    return self.carry_out(effect, &key);
+                }
             }
             Action::Session(SessionKey::ShowFullView) => self.show_full_view()?,
             Action::Session(SessionKey::ShowStatus) => self.show_status()?,
-            Action::Send => return Ok(Some(Outcome::Send(self.text()))),
-            Action::Edit => {
-                if self.editor.press(&key) == Effect::OpenEditor {
-                    self.edit_in_editor()?;
+            // The question view answers to Enter and the other keys on its own
+            Action::Send | Action::Edit => {
+                if let Phase::Answering(view) = &phase {
+                    return self.answer_key(view, &key, was_drop_warned);
                 }
+                if action == Action::Send {
+                    return Ok(Some(Outcome::Send(())));
+                }
+                self.edit(&key)?;
             }
             Action::Ignore => {}
         }
         Ok(None)
     }
 
+    /// Acts on a key of the question view's that is not a session key, Enter among them. An
+    /// answer that leaves out the user's own text waits for the same key again, which the label
+    /// row asks for, and `was_drop_warned` says whether it did.
+    fn answer_key(
+        &mut self,
+        view: &View,
+        key: &KeyEvent,
+        was_drop_warned: bool,
+    ) -> Result<Option<Outcome<()>>, String> {
+        let text = self.text();
+        let input = InputBox {
+            is_idle: self.editor.mode() == Mode::Normal && self.editor.pending().is_empty(),
+            is_empty: text.trim().is_empty(),
+        };
+        let before = self.pick.clone();
+        let effect = self.pick.press(key, view.choices.len(), view.form, input);
+        if effect == picker::Effect::Submit
+            && self.pick.leaves_out(view.form, &text)
+            && !was_drop_warned
+        {
+            self.pick = before;
+            self.is_drop_warned = true;
+            return Ok(None);
+        }
+        self.carry_out(effect, key)
+    }
+
+    /// Carries out what `key` does in the question view besides changing the pick.
+    fn carry_out(
+        &mut self,
+        effect: picker::Effect,
+        key: &KeyEvent,
+    ) -> Result<Option<Outcome<()>>, String> {
+        Ok(match effect {
+            picker::Effect::Stay => None,
+            picker::Effect::Type => {
+                self.edit(key)?;
+                None
+            }
+            picker::Effect::StartWriting => {
+                self.enter_box();
+                None
+            }
+            picker::Effect::StopWriting => {
+                if self.editor.mode() != Mode::Normal {
+                    self.editor.press(&escape());
+                }
+                None
+            }
+            picker::Effect::Submit => Some(Outcome::Send(())),
+            picker::Effect::Back => Some(Outcome::Questions(())),
+            picker::Effect::Next => Some(Outcome::Next(())),
+            picker::Effect::Previous => Some(Outcome::Previous(())),
+        })
+    }
+
+    /// Puts the box in insert mode, at the end of its text, as vi's `A` on the last line.
+    fn enter_box(&mut self) {
+        self.editor.replace(&self.text());
+    }
+
+    fn edit(&mut self, key: &KeyEvent) -> Result<(), String> {
+        if self.editor.press(key) == Effect::OpenEditor {
+            self.edit_in_editor()?;
+        }
+        Ok(())
+    }
+
+    /// Pastes `text` into the box, which the question view takes the cursor into first.
     fn paste(&mut self, text: &str) {
+        let is_answering = matches!(lock(&self.shared).phase, Phase::Answering(_));
+        if is_answering && self.pick.cursor != Cursor::Writing {
+            self.pick.start_writing();
+            self.enter_box();
+        }
         self.editor.paste(text);
     }
 
@@ -481,54 +608,34 @@ impl InputLine {
         self.draw()
     }
 
-    /// Draws the label row and the input box, with the cursor in the box.
+    /// Draws the label row and the input box, with the cursor in the box. The question view also
+    /// draws the question above the label row, and its options between the label row and the
+    /// box, where the options' pointer stands for the cursor while it is on them.
     fn draw(&mut self) -> Result<(), String> {
         self.label = self.make_label();
         let layout = self.layout;
         let mut out = Vec::new();
         out.extend(BEGIN_FRAME.as_bytes());
         put!(out, Hide);
-        let label_row = self.label_row();
         let view = match &lock(&self.shared).phase {
             Phase::Answering(view) => Some(view.clone()),
             _ => None,
         };
-        if let Some(view) = &view {
-            draw_question(&mut out, &view.lines, layout.width, label_row);
+        let view_rows = view
+            .as_ref()
+            .map(|view| ViewRows::new(layout, view.choices.len()));
+        let label_row = view_rows.map_or_else(|| self.label_row(), |rows| rows.label);
+        if let (Some(view), Some(rows)) = (&view, view_rows) {
+            self.draw_question(&mut out, view, rows);
         }
         let mut widths = Vec::new();
         if layout.label_rows > 0 {
-            put!(out, MoveTo(0, label_row));
-            out.extend(format!("{}{}{RESET}", start_bar_row(), self.label).as_bytes());
-            // The label row shows the keys of a half-typed vi command at its right edge, where
-            // vim's `showcmd` shows them, so nothing else on the row moves when they appear or
-            // go, and the question view which question it shows of how many. Keys wider than
-            // the screen wrap onto the box's first row
-            let pending = self.editor.pending();
-            let position = view
-                .as_ref()
-                .map(|view| format!("{}/{}", view.index + 1, view.count));
-            let right: Vec<&str> = [Some(pending.as_str()), position.as_deref()]
-                .into_iter()
-                .flatten()
-                .filter(|part| !part.is_empty())
-                .collect();
-            let right = right.join(" ");
-            if right.is_empty() {
-                widths.push(visible_width(&self.label));
-            } else {
-                let column = layout
-                    .width
-                    .saturating_sub(u16::try_from(right.width()).unwrap_or(u16::MAX));
-                put!(out, MoveTo(column, label_row));
-                out.extend(format!("{}{STATUS_COLOR}{right}{RESET}", start_bar_row()).as_bytes());
-                // The row's text now reaches the right edge, so a narrower screen splits the
-                // whole row, not only the label
-                widths.push(usize::from(layout.width));
-            }
+            widths.push(self.draw_label(&mut out, label_row, view.as_ref()));
         }
+        let box_top = view_rows.map_or(label_row + layout.label_rows, |rows| rows.box_top);
+        let text = self.text();
         let wrapped = wrap::wrap(
-            &self.text(),
+            &text,
             self.editor.cursor(),
             self.editor.selection(),
             usize::from(layout.width),
@@ -546,7 +653,7 @@ impl InputLine {
             .max((cursor_y + 1).saturating_sub(rows));
         let mut row_widths = Vec::new();
         for y in 0..rows {
-            let row = label_row + layout.label_rows + y;
+            let row = box_top + y;
             if row >= layout.height {
                 break;
             }
@@ -559,8 +666,7 @@ impl InputLine {
             row_widths.push(width);
         }
         let cursor_in_box = cursor_y - self.scroll;
-        let cursor_row =
-            (label_row + layout.label_rows + cursor_in_box).min(layout.height.saturating_sub(1));
+        let cursor_row = (box_top + cursor_in_box).min(layout.height.saturating_sub(1));
         widths.extend(row_widths.iter().take(usize::from(cursor_in_box)));
         // A resize on the alternate screen leaves the main screen's rows as the last draw there
         // left them
@@ -570,13 +676,104 @@ impl InputLine {
                 cursor_column: cursor_x,
             };
         }
-        let shape = match self.editor.mode() {
-            Mode::Insert => SetCursorStyle::SteadyBar,
-            Mode::Normal | Mode::Visual | Mode::VisualLine => SetCursorStyle::SteadyBlock,
-        };
-        put!(out, MoveTo(cursor_x, cursor_row), shape, Show);
+        // In the question view, the cursor shows only while the user writes in the box
+        if view.is_none() || self.pick.cursor == Cursor::Writing {
+            let shape = match self.editor.mode() {
+                Mode::Insert => SetCursorStyle::SteadyBar,
+                Mode::Normal | Mode::Visual | Mode::VisualLine => SetCursorStyle::SteadyBlock,
+            };
+            put!(out, MoveTo(cursor_x, cursor_row), shape, Show);
+        }
         out.extend(END_FRAME.as_bytes());
         write_out(&out)
+    }
+
+    /// Draws the label row at `label_row`, and returns the width of its text. The row shows the
+    /// keys of a half-typed vi command at its right edge, where vim's `showcmd` shows them, so
+    /// nothing else on the row moves when they appear or go, and the question view which
+    /// question it shows of how many. Keys wider than the screen wrap onto the box's first row.
+    fn draw_label(&self, out: &mut Vec<u8>, label_row: u16, view: Option<&View>) -> usize {
+        let width = self.layout.width;
+        put_bar_line(out, label_row, &self.label);
+        let pending = self.editor.pending();
+        let position = view.map(|view| format!("{}/{}", view.index + 1, view.count));
+        let right: Vec<&str> = [Some(pending.as_str()), position.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter(|part| !part.is_empty())
+            .collect();
+        let right = right.join(" ");
+        if right.is_empty() {
+            return visible_width(&self.label);
+        }
+        let column = width.saturating_sub(u16::try_from(right.width()).unwrap_or(u16::MAX));
+        put!(out, MoveTo(column, label_row));
+        out.extend(format!("{}{STATUS_COLOR}{right}{RESET}", start_bar_row()).as_bytes());
+        // The row's text now reaches the right edge, so a narrower screen splits the whole row,
+        // not only the label
+        usize::from(width)
+    }
+
+    /// Draws the question of `view` in `rows`: the question above the label row, and on a
+    /// question whose options have previews, the preview of the option the cursor is on from the
+    /// top of the screen, between an edge titled with the option and a rule above the question,
+    /// as fzf's preview window with a label, so only the preview changes as the cursor moves.
+    /// Below the label row go the options, on the bar, and the user's own answer right above the
+    /// box. Each option and preview line takes one row, and loses its middle to `…` when it is
+    /// wider than the screen.
+    fn draw_question(&self, out: &mut Vec<u8>, view: &View, rows: ViewRows) {
+        let width = self.layout.width;
+        put!(out, Clear(ClearType::All));
+        let columns = NonZeroUsize::new(usize::from(width)).unwrap_or(NonZeroUsize::MIN);
+        let preview = picker::preview(&view.choices, &self.pick);
+        // An edge across the screen, with `title` in it, as fzf's preview label
+        let rule = |title: &str| {
+            let title = if title.is_empty() {
+                String::new()
+            } else {
+                format!("── {LIGHT_CYAN}{}{STATUS_COLOR} ", cut(title, columns))
+            };
+            let fill = "─".repeat(usize::from(width).saturating_sub(visible_width(&title)));
+            format!("{STATUS_COLOR}{title}{fill}")
+        };
+        let mut lines = Vec::new();
+        if preview.is_some() {
+            lines.push(rule(""));
+        }
+        lines.extend(view.lines.iter().cloned());
+        let top = draw_lines_above(out, &lines, width, rows.label);
+        if let Some(preview) = preview {
+            put_line(out, 0, &rule(preview.title.as_deref().unwrap_or_default()));
+            // The rows between the edge and the rule above the question, less a blank row
+            // above the rule. A cut keeps the last of them for the …
+            let room = usize::from(top.saturating_sub(2));
+            let is_cut = preview.lines.len() > room;
+            let shown = if is_cut {
+                room.saturating_sub(1)
+            } else {
+                preview.lines.len()
+            };
+            let mut lines: Vec<String> = preview.lines[..shown]
+                .iter()
+                .map(|line| cut(line, columns))
+                .collect();
+            if is_cut && room > 0 {
+                lines.push(format!("{STATUS_COLOR}… Ctrl-O shows it whole"));
+            }
+            for (row, line) in (1..).zip(lines) {
+                put_line(out, row, &line);
+            }
+        }
+        let (options, own) = picker::lines(&view.choices, &view.own_label, view.form, &self.pick);
+        // The rows the options leave empty stay on the bar, above the user's own answer
+        let mut options = options.iter();
+        for row in rows.options..rows.own {
+            let line = options
+                .next()
+                .map_or_else(String::new, |line| cut(line, columns));
+            put_bar_line(out, row, &line);
+        }
+        put_bar_line(out, rows.own, &cut(&own, columns));
     }
 
     /// Puts the bottom of the terminal back in place after a resize. The terminal moved it
@@ -673,7 +870,14 @@ impl InputLine {
                     state.map_or_else(String::new, |state| format!(" {STATUS_COLOR}│ {state}"));
                 format!("{indicators}{state}")
             }
-            Phase::Answering(view) => answer_label(&view.label),
+            Phase::Answering(view) => {
+                let hint = if self.is_drop_warned {
+                    format!("{ORANGE}press again to leave out your own answer")
+                } else {
+                    picker::hint(view.form, self.pick.cursor).to_string()
+                };
+                format!("{} {YELLOW}{} {STATUS_COLOR}│ {hint}", marks(), view.label)
+            }
             Phase::Ending => {
                 let output = &shared.output;
                 let tasks = output.background_tasks();
@@ -917,29 +1121,83 @@ fn waiting_indicator(waiting: usize) -> String {
     format!("{color}Y{count}")
 }
 
-/// Draws a question's `lines` from the top of the question view down to `label_row`, on a
-/// screen `width` wide that wraps them. A question taller than the rows ends with … where it
-/// is cut; the conversation has it whole.
-fn draw_question(out: &mut Vec<u8>, lines: &[String], width: u16, label_row: u16) {
-    put!(out, Clear(ClearType::All));
-    let width = usize::from(width.max(1));
-    let mut row: u16 = 0;
-    for (index, line) in lines.iter().enumerate() {
-        let rows = u16::try_from(visible_width(line).div_ceil(width).max(1)).unwrap_or(u16::MAX);
-        let room = label_row.saturating_sub(row);
-        let is_last = index + 1 == lines.len();
+/// Draws `lines` so that they end right above `bottom`, after a blank row, on a screen `width`
+/// wide that wraps them. Lines taller than the rows left lose their start, where `…` shows, since
+/// the conversation has them whole.
+fn draw_lines_above(out: &mut Vec<u8>, lines: &[String], width: u16, bottom: u16) -> u16 {
+    let mut row = bottom.saturating_sub(1);
+    for (index, line) in lines.iter().enumerate().rev() {
+        let line_rows = rows_of(line, width);
         // A cut keeps a row for the …
-        if rows > room || (!is_last && rows == room) {
-            if room > 0 {
-                put!(out, MoveTo(0, row));
+        let room = if index == 0 {
+            row
+        } else {
+            row.saturating_sub(1)
+        };
+        if line_rows > room {
+            if row > 0 {
+                put!(out, MoveTo(0, row - 1));
                 out.extend(format!("{STATUS_COLOR}… Ctrl-O shows it whole{RESET}").as_bytes());
             }
-            return;
+            return row.saturating_sub(1);
         }
-        put!(out, MoveTo(0, row));
-        out.extend(format!("{line}{RESET}").as_bytes());
-        row += rows;
+        row -= line_rows;
+        put_line(out, row, line);
     }
+    row
+}
+
+/// Writes `line` on `row`, from its start, and resets the colors after it, so they reach nothing
+/// drawn next.
+fn put_line(out: &mut Vec<u8>, row: u16, line: &str) {
+    put!(out, MoveTo(0, row));
+    out.extend(format!("{line}{RESET}").as_bytes());
+}
+
+/// Writes `line` on `row` on the bar, like `put_line`. A reset inside the line ends the bar, which
+/// then starts again.
+fn put_bar_line(out: &mut Vec<u8>, row: u16, line: &str) {
+    let bar = start_bar_row();
+    let line = line.replace(RESET, &format!("{RESET}{bar}"));
+    put_line(out, row, &format!("{bar}{line}"));
+}
+
+/// The rows of the question view, from the bottom of the screen up: the input box, the user's own
+/// answer right above it, the options above that, and the label row above them.
+#[derive(Clone, Copy)]
+struct ViewRows {
+    label: u16,
+    /// The first row of the options.
+    options: u16,
+    own: u16,
+    box_top: u16,
+}
+
+impl ViewRows {
+    /// The rows of the question view of a question of `choices` options, on a screen laid out as
+    /// `layout`.
+    fn new(layout: Layout, choices: usize) -> Self {
+        let box_top = layout.height.saturating_sub(layout.input_rows);
+        let own = box_top.saturating_sub(1);
+        let options = own.saturating_sub(picker::option_rows(choices));
+        ViewRows {
+            label: options.saturating_sub(1),
+            options,
+            own,
+            box_top,
+        }
+    }
+}
+
+/// The rows `line` takes on a screen `width` wide, which wraps it.
+fn rows_of(line: &str, width: u16) -> u16 {
+    let width = usize::from(width.max(1));
+    u16::try_from(visible_width(line).div_ceil(width).max(1)).unwrap_or(u16::MAX)
+}
+
+/// The Esc key, which takes the box to normal mode.
+fn escape() -> KeyEvent {
+    KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
 }
 
 /// What Claude does, none while it waits for the user.

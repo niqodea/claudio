@@ -15,6 +15,7 @@ mod input_line;
 mod keys;
 mod limits;
 mod markdown;
+mod picker;
 mod protocol;
 mod questions;
 mod render;

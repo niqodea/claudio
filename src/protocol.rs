@@ -129,12 +129,11 @@ pub struct Ask {
 
 pub enum AskKind {
     /// Whether the tool may run, which is refused, since only auto mode is supported for now.
+    /// TODO: Ask the user to approve the plan of an `ExitPlanMode` call, which Claude Code asks
+    /// about once claudio supports plan mode
     Permission,
     /// The questions of an `AskUserQuestion` call, which runs once all of them are answered.
     Questions(Vec<Question>),
-    /// The plan of an `ExitPlanMode` call, in Markdown, which Claude carries out once the user
-    /// approves it.
-    Plan(String),
 }
 
 #[derive(Deserialize)]
@@ -169,9 +168,6 @@ pub enum Answer {
     Allow { input: Map<String, Value> },
     /// Refuse the tool and end the turn, so Claude waits for the next message.
     Deny,
-    /// Refuse the tool for the user's reason, which Claude reads and goes on from in the same
-    /// turn.
-    DenyFor(String),
 }
 
 pub enum Command<'a> {
@@ -247,12 +243,6 @@ impl Command<'_> {
                         "behavior": "deny",
                         "message": "The user refused this tool use.",
                         "interrupt": true,
-                        "toolUseID": ask.tool_use_id,
-                    }),
-                    Answer::DenyFor(reason) => json!({
-                        "behavior": "deny",
-                        "message": format!("The user refused this tool use. The user said: {reason}"),
-                        "interrupt": false,
                         "toolUseID": ask.tool_use_id,
                     }),
                 };
@@ -529,10 +519,6 @@ pub(crate) fn read_request(request_id: String, request: Value) -> Result<Event, 
         let input: QuestionsInput = serde_json::from_value(Value::Object(request.input.clone()))
             .map_err(|error| format!("Unreadable questions from Claude: {error}"))?;
         AskKind::Questions(input.questions)
-    } else if request.tool_name == "ExitPlanMode" {
-        let input: PlanInput = serde_json::from_value(Value::Object(request.input.clone()))
-            .map_err(|error| format!("Unreadable plan from Claude: {error}"))?;
-        AskKind::Plan(input.plan)
     } else {
         AskKind::Permission
     };
@@ -900,11 +886,6 @@ struct QuestionsInput {
     questions: Vec<Question>,
 }
 
-#[derive(Deserialize)]
-struct PlanInput {
-    plan: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1182,7 +1163,7 @@ mod tests {
     }
 
     #[test]
-    fn an_exit_plan_mode_request_asks_about_its_plan() {
+    fn an_exit_plan_mode_request_asks_for_permission() {
         let request = serde_json::json!({
             "subtype": "can_use_tool",
             "tool_name": "ExitPlanMode",
@@ -1192,6 +1173,6 @@ mod tests {
         let Ok(Event::Ask(ask)) = read_request("request-1".to_string(), request) else {
             panic!("an ask");
         };
-        assert!(matches!(ask.kind, AskKind::Plan(plan) if plan == "# Plan"));
+        assert!(matches!(ask.kind, AskKind::Permission));
     }
 }

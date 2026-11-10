@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::input_line::{InputLine, Outcome};
 use crate::keys::Phase;
+use crate::picker::Draft;
 use crate::protocol::{Answer, Ask, AskKind, Command};
 use crate::questions::{Answered, Questions};
 use crate::render::{Interruption, Status};
@@ -104,28 +105,31 @@ impl<'a> Conversation<'a> {
                 }
                 None => {}
             }
-            let outcome = match shown {
-                None => self.session.input.read(
-                    Phase::Writing {
+            match shown {
+                None => {
+                    let phase = Phase::Writing {
                         waiting: questions.count(),
                         refusal_confirmed: questions.is_refusal_confirmed(),
-                    },
-                    &draft,
-                )?,
+                    };
+                    match self.session.input.read(phase, &draft)? {
+                        Outcome::End => return self.end_input(&mut questions),
+                        outcome => {
+                            (draft, shown) = self.act_on_message(outcome, &mut questions)?;
+                        }
+                    }
+                }
                 Some(index) => {
-                    let question_draft = questions.draft(index).to_string();
-                    self.session
+                    let view = questions.view(index);
+                    match self
+                        .session
                         .input
-                        .read(Phase::Answering(questions.view(index)), &question_draft)?
-                }
-            };
-            match (shown, outcome) {
-                (_, Outcome::End) => return self.end_input(&mut questions),
-                (None, outcome) => {
-                    (draft, shown) = self.act_on_message(outcome, &mut questions)?;
-                }
-                (Some(index), outcome) => {
-                    shown = self.act_on_question(outcome, index, &mut questions)?;
+                        .read_question(view, questions.draft(index))?
+                    {
+                        Outcome::End => return self.end_input(&mut questions),
+                        outcome => {
+                            shown = self.act_on_question(outcome, index, &mut questions)?;
+                        }
+                    }
                 }
             }
         }
@@ -135,7 +139,7 @@ impl<'a> Conversation<'a> {
     /// question the question view shows next, if it opened.
     fn act_on_message(
         &mut self,
-        outcome: Outcome,
+        outcome: Outcome<String>,
         questions: &mut Questions,
     ) -> Result<(String, Option<usize>), String> {
         Ok(match outcome {
@@ -180,51 +184,46 @@ impl<'a> Conversation<'a> {
     /// question it shows next, none to go back to the message.
     fn act_on_question(
         &mut self,
-        outcome: Outcome,
+        outcome: Outcome<Draft>,
         index: usize,
         questions: &mut Questions,
     ) -> Result<Option<usize>, String> {
         let count = questions.count();
         Ok(match outcome {
-            Outcome::Send(text) => match questions.answer(index, &text) {
+            Outcome::Send(draft) => match questions.answer(index, &draft) {
                 None => {
-                    questions.keep_draft(index, text);
+                    questions.keep_draft(index, draft);
                     Some(index)
                 }
                 Some(Answered {
                     label,
                     answer,
-                    notes,
                     reply,
                 }) => {
-                    {
-                        let output = &mut lock(&self.session.shared).output;
-                        output.show_answer(&label, &answer);
-                        if let Some(notes) = notes {
-                            output.show_answer("notes", &notes);
-                        }
-                    }
+                    lock(&self.session.shared)
+                        .output
+                        .show_answer(&label, &answer);
                     if let Some((ask, answer)) = reply {
                         self.reply(&ask, answer)?;
                     }
                     next_shown(questions, index)
                 }
             },
-            Outcome::Questions(text) => {
-                questions.keep_draft(index, text);
+            Outcome::Questions(draft) => {
+                questions.keep_draft(index, draft);
                 None
             }
-            Outcome::Next(text) => {
-                questions.keep_draft(index, text);
+            Outcome::Next(draft) => {
+                questions.keep_draft(index, draft);
                 Some((index + 1) % count)
             }
-            Outcome::Previous(text) => {
-                questions.keep_draft(index, text);
+            Outcome::Previous(draft) => {
+                questions.keep_draft(index, draft);
                 Some((index + count - 1) % count)
             }
             // Claude Code asked something more, which the next round of the loop adds
-            Outcome::Break(text) => {
-                questions.keep_draft(index, text);
+            Outcome::Break(draft) => {
+                questions.keep_draft(index, draft);
                 Some(index)
             }
             // Claude Code takes or refuses a call's questions together
@@ -262,9 +261,6 @@ impl<'a> Conversation<'a> {
                 output.hide_result(&ask.tool_use_id);
                 output.note_interrupt(Interruption::Stop);
             }
-            Answer::DenyFor(_) => lock(&self.session.shared)
-                .output
-                .hide_result(&ask.tool_use_id),
             Answer::Allow { .. } => {}
         }
         self.send(&Command::Answer(ask, answer))

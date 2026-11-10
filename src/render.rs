@@ -16,20 +16,19 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::markdown::Highlighter;
 use crate::protocol::{Ask, AskKind, Question, SettingsError, State, ToolResult, ToolUse};
-use crate::questions::OWN_KEY;
 
 const GREEN: &str = "\x1b[32m";
 // The marks of the user's lines
-const LIGHT_CYAN: &str = "\x1b[96m";
-const YELLOW: &str = "\x1b[33m";
+pub const LIGHT_CYAN: &str = "\x1b[96m";
+pub const YELLOW: &str = "\x1b[33m";
 // For a warning
 pub const ORANGE: &str = "\x1b[38;5;208m";
 // Only for failures, since red reads as an error
 const RED: &str = "\x1b[31m";
 // For what Claude did, which supports what Claude wrote
-const DIM: &str = "\x1b[2m";
-const BOLD: &str = "\x1b[1m";
-const RESET: &str = "\x1b[0m";
+pub const DIM: &str = "\x1b[2m";
+pub const BOLD: &str = "\x1b[1m";
+pub const RESET: &str = "\x1b[0m";
 /// The background of the user's lines, which sets them apart from Claude's.
 pub const BAR_COLOR: u8 = 236;
 /// The color of text that stays in the background.
@@ -47,7 +46,6 @@ const SUMMARY_FIELDS: [(&str, &str); 10] = [
     ("Agent", "description"),
     ("Bash", "command"),
     ("Edit", "file_path"),
-    // Its ask shows the plan
     ("ExitPlanMode", "planFilePath"),
     ("Glob", "pattern"),
     ("Grep", "pattern"),
@@ -382,7 +380,6 @@ impl Output {
         match &ask.kind {
             // Refused as it arrives, which the error line says
             AskKind::Permission => vec![],
-            AskKind::Plan(plan) => vec![self.push_details(plan_lines(plan))],
             AskKind::Questions(questions) => questions
                 .iter()
                 .map(|question| self.push_details(question_lines(question)))
@@ -587,7 +584,7 @@ fn reply_mark() -> String {
 /// cut. Both its start and its end stay, since the part that tells one line from the next is
 /// often at the end, like the file a command ends with:
 /// <https://v5-archive.patternfly.org/ux-writing/truncation>.
-fn cut(line: &str, columns: NonZeroUsize) -> String {
+pub fn cut(line: &str, columns: NonZeroUsize) -> String {
     let mut characters = Vec::new();
     let mut rest = line.char_indices();
     while let Some((index, character)) = rest.next() {
@@ -651,24 +648,24 @@ pub fn colors_at(line: &str, end: usize) -> String {
     codes
 }
 
-/// The lines of a plan, as Markdown.
-pub fn plan_lines(plan: &str) -> Vec<String> {
+/// The lines of Markdown, highlighted.
+pub fn markdown_lines(markdown: &str) -> Vec<String> {
     let mut highlighter = Highlighter::new();
-    let mut colored = highlighter.push(plan.trim());
+    let mut colored = highlighter.push(markdown.trim());
     colored.push_str(&highlighter.finish());
     colored.lines().map(str::to_string).collect()
 }
 
-/// The lines of a question: its header and text, then its options, keyed by letter from a, and
-/// last, for a question of one choice, the key of the user's own answer.
+/// The lines of a question: its header and text, then its options, numbered from 1 as the question
+/// view numbers them.
 pub fn question_lines(question: &Question) -> Vec<String> {
     let mut lines = vec![format!(
         "{BOLD}{}{RESET} {}",
         question.header, question.text
     )];
-    for (key, choice) in ('a'..).zip(&question.options) {
+    for (number, choice) in (1..).zip(&question.options) {
         lines.push(format!(
-            "  {key}. {} {DIM}{}{RESET}",
+            "  {number}. {} {DIM}{}{RESET}",
             choice.label, choice.description
         ));
         if let Some(preview) = &choice.preview {
@@ -676,10 +673,6 @@ pub fn question_lines(question: &Question) -> Vec<String> {
                 lines.push(format!("     {DIM}{line}{RESET}"));
             }
         }
-    }
-    // A question of several choices takes items of the user's own after its keys instead
-    if !question.is_multi_select {
-        lines.push(format!("  {OWN_KEY} {DIM}your own answer{RESET}"));
     }
     lines
 }

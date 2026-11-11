@@ -604,8 +604,8 @@ impl Editor {
             }
             Operator::Delete => self.delete(range.start, range.end),
             Operator::Change => {
-                // Changing whole lines keeps the first one's indentation, as Neovim does with
-                // its autoindent, on by default
+                // Changing whole lines keeps the first one's indentation, as Vim does with
+                // autoindent
                 let start = if range.is_linewise {
                     self.first_non_blank(range.start)
                 } else {
@@ -1619,9 +1619,9 @@ mod tests {
         assert_eq!(shown(&after("a\n\nc", "J")), "|a\nc");
     }
 
-    /// Texts and keys whose outcome the editor shares with Neovim: the commands of its grammar,
-    /// and vim's special cases.
-    const NEOVIM_CASES: &[(&str, &str)] = &[
+    /// Texts and keys whose outcome the editor shares with Vim: the commands of its grammar, and
+    /// Vim's special cases.
+    const VIM_CASES: &[(&str, &str)] = &[
         ("foo bar baz", "w"),
         ("foo bar baz", "2w"),
         ("foo.bar baz", "w"),
@@ -1735,10 +1735,11 @@ mod tests {
         ("abc def", "Ax\x15y\x1b"),
     ];
 
-    /// Runs `keys` on `text` in Neovim, from normal mode at its first character, and returns
-    /// what the comparison takes: the text, the cursor's line and column, from 1, and the
-    /// register's type, `v` for characters, `V` for lines.
-    fn neovim(text: &str, keys: &str) -> String {
+    /// Runs `keys` on `text` in Vim, from normal mode at its first character, and returns what
+    /// the comparison takes: the text, the cursor's line and column, from 1, and the register's
+    /// type, `v` for characters, `V` for lines. Vim runs without a screen, in its silent Ex
+    /// mode, with autoindent, which the editor has.
+    fn vim(text: &str, keys: &str) -> String {
         let lines: Vec<String> = text
             .split('\n')
             .map(|line| format!("'{}'", line.replace('\'', "''")))
@@ -1756,10 +1757,12 @@ mod tests {
                 character => character.to_string(),
             })
             .collect();
-        let output = std::process::Command::new("nvim")
+        let output = std::process::Command::new("vim")
             .args([
                 "--clean",
-                "--headless",
+                "-es",
+                "-c",
+                "set autoindent",
                 "-c",
                 &format!("call setline(1, [{}])", lines.join(", ")),
                 "-c",
@@ -1770,11 +1773,11 @@ mod tests {
                 "qa!",
             ])
             .output()
-            .expect("nvim runs");
+            .expect("vim runs");
         String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
-    /// The same as `neovim`, from the editor.
+    /// The same as `vim`, from the editor.
     fn ours(text: &str, keys: &str) -> String {
         let mut editor = Editor::new(text);
         editor.mode = Mode::Normal;
@@ -1801,14 +1804,14 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "runs Neovim, which `cargo test -- --ignored` takes from PATH"]
-    fn the_editor_does_what_neovim_does() {
-        let mismatches: Vec<String> = NEOVIM_CASES
+    #[ignore = "runs Vim, which `cargo test -- --ignored` takes from PATH"]
+    fn the_editor_does_what_vim_does() {
+        let mismatches: Vec<String> = VIM_CASES
             .iter()
             .filter_map(|&(text, keys)| {
-                let (expected, actual) = (neovim(text, keys), ours(text, keys));
+                let (expected, actual) = (vim(text, keys), ours(text, keys));
                 (expected != actual).then(|| {
-                    format!("{keys:?} on {text:?}\n  nvim: {expected:?}\n  ours: {actual:?}")
+                    format!("{keys:?} on {text:?}\n  vim:  {expected:?}\n  ours: {actual:?}")
                 })
             })
             .collect();

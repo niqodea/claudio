@@ -87,7 +87,7 @@ const PAID_TIMEOUT: Duration = Duration::from_secs(180);
 /// Read in Claude Code 2.1.316 and seen with it: with `CLAUDE_CODE_SDK_READS_SESSION_STATE`
 /// set, Claude Code sends `session_state_changed` as a turn starts and ends, and without it,
 /// never. The SDK's types type the message, but name no variable.
-pub fn session_state_comes_with_its_variable(program: &Path) -> Result<(), String> {
+pub(crate) fn session_state_comes_with_its_variable(program: &Path) -> Result<(), String> {
     let with = Run::start(program, &[], &[], &[])?.clear_once()?;
     compare(&["state"], &with, &session_states_of_a_turn())?;
     let without =
@@ -96,13 +96,15 @@ pub fn session_state_comes_with_its_variable(program: &Path) -> Result<(), Strin
 }
 
 /// The session states of a turn, as Claude Code sends them.
+#[must_use]
 pub fn session_states_of_a_turn() -> Vec<String> {
-    ["running", "idle"]
-        .map(|state| {
-            json!({"type": "system", "subtype": "session_state_changed", "state": state})
-                .to_string()
-        })
-        .to_vec()
+    ["running", "idle"].map(session_state).to_vec()
+}
+
+/// A change of the session's state to `state`, like `running`.
+#[must_use]
+pub fn session_state(state: &str) -> String {
+    json!({"type": "system", "subtype": "session_state_changed", "state": state}).to_string()
 }
 
 /// From Claude Code's changelog and seen with 2.1.322: the fields of a send-now interrupt are
@@ -111,7 +113,7 @@ pub fn session_states_of_a_turn() -> Vec<String> {
 /// as a plain interrupt.
 /// Ref: <https://code.claude.com/docs/en/changelog>, on send now moving running tools to the
 /// background
-pub fn send_now_is_announced(program: &Path) -> Result<(), String> {
+pub(crate) fn send_now_is_announced(program: &Path) -> Result<(), String> {
     // A clear starts a session, whose init comes without a call
     let lines = Run::start(program, &[], &[], &[])?.clear_once()?;
     let announces = lines.iter().any(|line| {
@@ -132,7 +134,7 @@ pub fn send_now_is_announced(program: &Path) -> Result<(), String> {
 /// `apiKeySource` with its name, `ANTHROPIC_AUTH_TOKEN` fills `tokenSource` with its name, and
 /// the subscription's login leaves `apiKeySource` out and `tokenSource` out or `claude.ai`. The
 /// check needs a login to the subscription, and no settings file that sets either variable.
-pub fn the_paying_key_is_named_by_its_source(program: &Path) -> Result<(), String> {
+pub(crate) fn the_paying_key_is_named_by_its_source(program: &Path) -> Result<(), String> {
     const KEYS: [&str; 2] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
     let cases = [
         (None, subscription_account()),
@@ -156,19 +158,23 @@ pub fn the_paying_key_is_named_by_its_source(program: &Path) -> Result<(), Strin
     Ok(())
 }
 
+#[must_use]
 pub fn subscription_account() -> Value {
     json!({"subscriptionType": "Claude Team", "apiProvider": "firstParty"})
 }
 
+#[must_use]
 pub fn api_key_account() -> Value {
     json!({"tokenSource": "claude.ai", "apiKeySource": "ANTHROPIC_API_KEY", "apiProvider": "firstParty"})
 }
 
+#[must_use]
 pub fn auth_token_account() -> Value {
     json!({"tokenSource": "ANTHROPIC_AUTH_TOKEN", "apiProvider": "firstParty"})
 }
 
 /// The answer to `initialize` for `account`.
+#[must_use]
 pub fn initialize_response(account: &Value) -> String {
     let line = json!({
         "type": "control_response",
@@ -183,7 +189,7 @@ pub fn initialize_response(account: &Value) -> String {
 /// Seen with Claude Code 2.1.322: `/clear` sends `conversation_reset`, whose `session_id` is
 /// the cleared session's, then the new session's init, then a result that ends a turn of no
 /// calls.
-pub fn a_clear_resets_the_session(program: &Path) -> Result<(), String> {
+pub(crate) fn a_clear_resets_the_session(program: &Path) -> Result<(), String> {
     let mut run = Run::start(program, &[], &[], &[])?;
     run.send(&protocol::Command::Clear)?;
     run.send(&protocol::Command::Clear)?;
@@ -195,30 +201,43 @@ pub fn a_clear_resets_the_session(program: &Path) -> Result<(), String> {
 
 /// What Claude Code writes for two `/clear`s in a row, of which the second one clears the
 /// session that the first one started.
+#[must_use]
 pub fn two_clears() -> Vec<String> {
-    let clear = |cleared: &str, new: &str| {
-        [
-            json!({"type": "conversation_reset", "trigger": "clear", "session_id": cleared}),
-            json!({
-                "type": "system",
-                "subtype": "init",
-                "session_id": new,
-                "claude_code_version": claude_code::VERSION,
-            }),
-            json!({"type": "result", "subtype": "success"}),
-        ]
-    };
     clear("first", "second")
         .into_iter()
         .chain(clear("second", "third"))
-        .map(|line| line.to_string())
         .collect()
+}
+
+/// What Claude Code writes for a `/clear` that clears the session `cleared` and starts `new`.
+#[must_use]
+pub fn clear(cleared: &str, new: &str) -> [String; 3] {
+    [
+        json!({"type": "conversation_reset", "trigger": "clear", "session_id": cleared})
+            .to_string(),
+        init(new),
+        json!({"type": "result", "subtype": "success"}).to_string(),
+    ]
+}
+
+/// The init of the session `session`, which Claude Code sends as the session starts, with the
+/// interrupts it takes.
+#[must_use]
+pub fn init(session: &str) -> String {
+    let line = json!({
+        "type": "system",
+        "subtype": "init",
+        "session_id": session,
+        "claude_code_version": claude_code::VERSION,
+        "capabilities": ["interrupt_send_now_v1"],
+    });
+    line.to_string()
 }
 
 /// Read in the schema of Claude Code 2.1.316, which marks it internal: only `unifiedWindows`
 /// holds every limit of the plan, where the documented fields describe only the limit that
 /// applies now. The check needs a login to the subscription, whose plan has the limits.
-pub fn a_rate_limit_event_has_every_window(program: &Path) -> Result<(), String> {
+pub(crate) fn a_rate_limit_event_has_every_window(program: &Path) -> Result<(), String> {
     let mut run = Run::start(program, &["--model", MODEL], &[], &[])?;
     run.send_message("Reply with the single word ok.")?;
     run.close_input();
@@ -230,6 +249,7 @@ pub fn a_rate_limit_event_has_every_window(program: &Path) -> Result<(), String>
 }
 
 /// A rate limit event, as Claude Code 2.1.316 sent it.
+#[must_use]
 pub fn rate_limit_event() -> String {
     let line = json!({
         "type": "rate_limit_event",
@@ -253,7 +273,7 @@ pub fn rate_limit_event() -> String {
 
 /// Seen with Claude Code 2.1.316: once its input closed, Claude Code fails each permission it
 /// would ask for, with "Stream closed" in the tool's result.
-pub fn a_permission_after_the_input_closes_fails(program: &Path) -> Result<(), String> {
+pub(crate) fn a_permission_after_the_input_closes_fails(program: &Path) -> Result<(), String> {
     let mut run = Run::start(
         program,
         &["--model", MODEL, "--permission-mode", "default"],
@@ -282,7 +302,9 @@ pub fn a_permission_after_the_input_closes_fails(program: &Path) -> Result<(), S
 /// Seen with Claude Code 2.1.316: SIGINT stops Claude's turn and its background tasks, as
 /// Ctrl-C does a program's work in the terminal, and Claude Code then exits, since its input
 /// closed.
-pub fn sigint_stops_claude_code_after_its_input_closes(program: &Path) -> Result<(), String> {
+pub(crate) fn sigint_stops_claude_code_after_its_input_closes(
+    program: &Path,
+) -> Result<(), String> {
     let mut run = Run::start(
         program,
         &["--model", MODEL, "--allowedTools", "Bash(sleep:*)"],
@@ -306,7 +328,7 @@ pub fn sigint_stops_claude_code_after_its_input_closes(program: &Path) -> Result
 
 /// Seen with Claude Code 2.1.316: the processes Claude Code starts write to files of their own,
 /// so its output closes as it exits, even while a process it started still runs.
-pub fn the_output_closes_as_claude_code_exits(program: &Path) -> Result<(), String> {
+pub(crate) fn the_output_closes_as_claude_code_exits(program: &Path) -> Result<(), String> {
     let mut run = Run::start(
         program,
         &["--model", MODEL, "--allowedTools", "Bash(sleep:*)"],

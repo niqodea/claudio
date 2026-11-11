@@ -5,7 +5,7 @@ Claude Code without the TUI: just input and output.
 ## Install
 
 ```sh
-cargo install --path .
+cargo install --path . --bin claudio
 claudio install-claude-code
 ```
 

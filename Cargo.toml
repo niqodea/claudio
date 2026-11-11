@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[[bin]]
+name = "claudio"
+path = "src/main.rs"
+# The library of the same name has the docs, which this one would overwrite
+doc = false
+
 [dependencies]
 crossterm = "0.29"
 # Only to read timestamps, so without the time zone database

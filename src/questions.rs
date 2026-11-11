@@ -15,7 +15,7 @@ use serde_json::{Map, Value};
 use crate::keys::View;
 use crate::picker::{Choice, Cursor, Draft, Form, Move, Pick};
 use crate::protocol::{Answer, Ask, AskKind, Question};
-use crate::render::{BOLD, RESET};
+use crate::style::{BOLD, RESET};
 
 #[derive(Default)]
 pub struct Questions {

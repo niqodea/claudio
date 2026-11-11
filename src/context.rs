@@ -7,7 +7,7 @@
 use std::time::{Duration, Instant};
 
 use crate::protocol::{Ceiling, Usage};
-use crate::render::ORANGE;
+use crate::style::ORANGE;
 
 /// The color of a cold cache: a warning's, since a call on it costs more and fails nothing.
 pub const COLD_COLOR: &str = ORANGE;

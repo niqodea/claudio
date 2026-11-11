@@ -15,11 +15,8 @@
 use crate::code;
 use crate::table::Table;
 
-const RESET: &str = "\x1b[0m";
-const BOLD: &str = "\x1b[1m";
-// For the marks that structure the text, which are not part of what it says
-const DIM: &str = "\x1b[2m";
-const CODE: &str = "\x1b[36m";
+use crate::style::{BOLD, CODE, DIM, RESET};
+
 // Opens a code block, and closes it
 const FENCE: &str = "```";
 

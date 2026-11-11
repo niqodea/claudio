@@ -9,14 +9,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::context::{COLD_COLOR, Context};
 use crate::limits::{Limits, level, limit_level};
 use crate::protocol::{Ceiling, Limit};
-use crate::render::STATUS_COLOR;
+use crate::style::{RESET, STATUS_COLOR, YELLOW};
 
 /// How long before the cache turns cold its cold-at time shows in yellow.
 const NEAR_COLD: Duration = Duration::from_mins(5);
-
-// A cache about to turn cold
-const YELLOW: &str = "\x1b[33m";
-const RESET: &str = "\x1b[0m";
 
 const LABEL_WIDTH: usize = 9;
 // Fits a million tokens, as 1,000,000

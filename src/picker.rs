@@ -13,7 +13,8 @@ use std::collections::BTreeSet;
 
 use crossterm::event::{KeyCode, KeyEvent};
 
-use crate::render::{DIM, GREEN, LIGHT_CYAN, RESET, markdown_lines};
+use crate::render::markdown_lines;
+use crate::style::{DIM, GREEN, LIGHT_CYAN, RESET};
 
 /// The key of the user's own answer, and its mark, the same on every question.
 pub const OWN_KEY: char = '>';

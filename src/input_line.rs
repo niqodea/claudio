@@ -29,17 +29,13 @@ use crate::context::COLD_COLOR;
 use crate::keys::{self, Action, Phase, SessionKey, View};
 use crate::limits::{Level, limit_level};
 use crate::picker::{self, Cursor, Draft, Form, InputBox, Move, Pick, question_name};
-use crate::render::{
-    GREEN, LIGHT_CYAN, ORANGE, Output, STATUS_COLOR, Status, YELLOW, colors_at, cut, marks,
-    session_line, start_bar_row,
-};
+use crate::render::{Output, Status, colors_at, cut, marks, session_line, start_bar_row};
 use crate::status;
+use crate::style::{GREEN, LIGHT_CYAN, ORANGE, RESET, REVERSE, STATUS_COLOR, UNREVERSE, YELLOW};
 use crate::terminal::{Settings, run_in_terminal};
 use crate::vi::{Editor, Mode};
 use crate::wrap;
 use crate::{Shared, lock};
-
-const RESET: &str = "\x1b[0m";
 
 /// The rows the conversation keeps at least, since tmux ignores a scroll region of one row.
 const MIN_CONVERSATION_ROWS: u16 = 2;
@@ -1237,7 +1233,7 @@ fn names(done: &[bool], shown: usize, name: fn(usize) -> char) -> Option<String>
     let names = done.iter().enumerate().map(|(index, &is_done)| {
         let color = if is_done { GREEN } else { STATUS_COLOR };
         let (on, off) = if index == shown {
-            ("\x1b[7m", "\x1b[27m")
+            (REVERSE, UNREVERSE)
         } else {
             ("", "")
         };
@@ -1358,10 +1354,10 @@ mod tests {
         assert_eq!(names(&[false], 0, question_name), None);
         let two = names(&[true, false], 1, question_name).expect("names");
         assert!(two.contains(&format!("{GREEN}a")));
-        assert!(two.contains("\x1b[7ms"));
+        assert!(two.contains(&format!("{REVERSE}s")));
     }
 
-    const BOLD: &str = "\x1b[1m";
+    use crate::style::BOLD;
 
     #[test]
     fn the_last_row_of_a_line_that_fits_is_the_line() {

@@ -12,10 +12,7 @@ const LEVEL_BOUNDS: [f64; 3] = [0.5, 0.75, 0.9];
 /// The number of bounds passed from which a level is near its end.
 const NEAR_BOUNDS_PASSED: usize = 2;
 
-// A level near its end
-const ORANGE: &str = "\x1b[38;5;208m";
-// A level reached
-const RED: &str = "\x1b[31m";
+use crate::style::{ORANGE, RED};
 
 /// How much of a limit the account used.
 #[derive(Clone, Copy, Debug, PartialEq)]

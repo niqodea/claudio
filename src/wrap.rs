@@ -3,9 +3,7 @@
 
 use unicode_width::UnicodeWidthChar;
 
-// Swaps the colors of the selected text, and swaps them back after it
-const REVERSE: &str = "\x1b[7m";
-const UNREVERSE: &str = "\x1b[27m";
+use crate::style::{REVERSE, UNREVERSE};
 
 #[derive(Default)]
 pub struct Row {

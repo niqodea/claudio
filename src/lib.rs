@@ -24,6 +24,7 @@ mod questions;
 mod render;
 mod session;
 mod status;
+mod style;
 mod table;
 mod terminal;
 mod vi;

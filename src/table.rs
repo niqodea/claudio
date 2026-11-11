@@ -3,10 +3,8 @@
 
 use unicode_width::UnicodeWidthStr;
 
-const RESET: &str = "\x1b[0m";
-const BOLD: &str = "\x1b[1m";
-// For the marks that structure the table, which are not part of what it says
-const DIM: &str = "\x1b[2m";
+use crate::style::{BOLD, DIM, RESET};
+
 // The narrowest divider cell Markdown reads as one
 const MIN_COLUMN_WIDTH: usize = 3;
 

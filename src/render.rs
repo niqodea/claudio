@@ -17,23 +17,8 @@ use unicode_width::UnicodeWidthChar;
 use crate::markdown::{Highlighter, code_span};
 use crate::protocol::{Ask, AskKind, Question, SettingsError, State, ToolResult, ToolUse};
 
-// For what was added, and what the user submitted
-pub const GREEN: &str = "\x1b[32m";
-// The marks of the user's lines
-pub const LIGHT_CYAN: &str = "\x1b[96m";
-pub const YELLOW: &str = "\x1b[33m";
-// For a warning
-pub const ORANGE: &str = "\x1b[38;5;208m";
-// Only for failures, since red reads as an error
-const RED: &str = "\x1b[31m";
-// For what Claude did, which supports what Claude wrote
-pub const DIM: &str = "\x1b[2m";
-pub const BOLD: &str = "\x1b[1m";
-pub const RESET: &str = "\x1b[0m";
-/// The background of the user's lines, which sets them apart from Claude's.
-pub const BAR_COLOR: u8 = 236;
-/// The color of text that stays in the background.
-pub const STATUS_COLOR: &str = "\x1b[38;5;244m";
+use crate::style::{BAR, BOLD, DIM, GREEN, LIGHT_CYAN, ORANGE, RED, RESET, STATUS_COLOR, YELLOW};
+
 // Erases to the end of the row in the background color that is set, which fills the row's
 // rest with the bar without writing spaces into the text. Written after the text too, it fills
 // the rest of the last row the terminal wraps the text onto
@@ -608,7 +593,7 @@ pub fn session_line(how: &str, session_id: Option<&str>) -> String {
 
 /// The start of a row on the bar, which fills the whole row.
 pub fn start_bar_row() -> String {
-    format!("\x1b[48;5;{BAR_COLOR}m{FILL_ROW}")
+    format!("{BAR}{FILL_ROW}")
 }
 
 /// The marks in front of a message, on a row of their own.

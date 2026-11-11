@@ -187,7 +187,9 @@ impl InputLine {
     pub fn read(&mut self, phase: Phase, draft: &str) -> Result<Outcome<String>, String> {
         // A command typed for another line has nothing left to act on
         self.editor.cancel();
-        if self.text() != draft {
+        // The box held an answer in the question view, whose mode and cursor are the answer's,
+        // and else keeps the message as the user left it
+        if self.in_view || self.text() != draft {
             self.editor.replace(draft);
         }
         let outcome = self.run(phase)?;

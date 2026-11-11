@@ -92,7 +92,8 @@ fn context_row(context: &Context, now: Instant, wall_now: SystemTime) -> String 
                 Some(&cold_at),
             )
         }
-        None if context.is_cold(now) => row(
+        // The status says what is known, and a context whose size is unknown has no known cache
+        None if context.tokens().is_some() && context.is_cold(now) => row(
             "Context",
             &tokens,
             Some(&Cell::new("cold", Some(COLD_COLOR))),

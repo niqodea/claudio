@@ -6,9 +6,11 @@ use std::process::{Child, ChildStdin};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use uuid::Uuid;
 
+use crate::context::Held;
 use crate::input_line::{InputLine, Outcome};
 use crate::keys::Phase;
 use crate::picker::Draft;
@@ -26,6 +28,9 @@ pub enum Input {
     },
     /// Claude Code ended.
     Closed,
+    /// Claude Code works in a way claudio was not made for, as this error says, which ends the
+    /// session.
+    Incompatible(String),
 }
 
 /// The session while the user talks with Claude, through Claude Code's input.
@@ -102,6 +107,7 @@ impl<'a> Conversation<'a> {
                     self.session.close_line()?;
                     return Ok(None);
                 }
+                Some(Input::Incompatible(error)) => return Err(error),
                 None => {}
             }
             match shown {
@@ -141,13 +147,9 @@ impl<'a> Conversation<'a> {
         questions: &mut Questions,
     ) -> Result<(String, Option<usize>), String> {
         Ok(match outcome {
-            // A message stays on the input line until Claude Code tells whether the session had a
-            // call, which tells whether the cache is cold
             Outcome::Send(text) => {
                 if text.trim().is_empty() {
                     (String::new(), None)
-                } else if lock(&self.session.shared).context.is_starting() {
-                    (text, None)
                 } else {
                     for ask in questions.remove_all() {
                         self.reply(&ask, Answer::Deny)?;
@@ -182,7 +184,7 @@ impl<'a> Conversation<'a> {
     /// they are refused, and another one is stopped. A context that holds nothing yet has
     /// nothing to clear. The conversation marks the clear once Claude Code tells it.
     fn clear(&mut self, questions: &mut Questions) -> Result<(), String> {
-        if !lock(&self.session.shared).context.has_conversation() {
+        if lock(&self.session.shared).context.held(Instant::now()) == Held::Nothing {
             return Ok(());
         }
         if questions.is_empty() {
@@ -356,7 +358,8 @@ impl Ending<'_> {
                 Some(Input::Closed) => return self.session.close_line(),
                 // Undocumented, seen with Claude Code 2.1.316: once its input closed, Claude Code
                 // fails each permission request, with "Stream closed" as the tool's result
-                Some(Input::Ask(_) | Input::Unsupported { .. }) | None => {}
+                Some(Input::Ask(_) | Input::Unsupported { .. } | Input::Incompatible(_)) | None => {
+                }
             }
             match self.session.input.read(Phase::Ending, "")? {
                 Outcome::Stop(_) => self.interrupt()?,

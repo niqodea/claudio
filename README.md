@@ -64,13 +64,13 @@ Keys come in two kinds.
 
 **Every other key works on your text.** Enter sends it, and the rest edit it with vi keys, where `:` in normal mode opens the text in your editor. While a vi command is half typed, its keys show at the right end of the label row. Enter and the session keys still do their usual job then, and cancel the half-typed command. To clear the input, use vi, like `S` or `ggdG` in normal mode; `u` brings it back.
 
-A key that loses what no key brings back waits for a second press in a row, and the label row names the loss in orange, like `enter again refuses 2 questions and sends on the cold cache`.
+A key that loses what no key brings back waits for a second press in a row, and the label row names the loss in orange, like `enter again refuses 2 questions and sends on a possibly cold cache`.
 These keys are:
 
 - Ctrl-D
 - Ctrl-L, once the session had a call, which also refuses the questions that wait, or else stops Claude's turn
 - Ctrl-C on questions, and while the session ends, where it stops Claude's background tasks too
-- Enter on a message while questions wait, which refuses them, or on a cold cache, where the call writes the whole context to the cache again, at a price above that of new input
+- Enter on a message while questions wait, which refuses them, or when the cache may be cold, where the call writes the whole context to the cache again, at a price above that of new input: once its time to live passed, and while its age is unknown, as in a resumed session, or before Claude Code tells at startup whether the session is new
 - a key that answers a question and leaves out your own text
 
 Ctrl-C stops Claude's turn at once, since a message tells Claude to go on.

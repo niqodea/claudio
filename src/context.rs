@@ -31,8 +31,19 @@ pub struct Context {
     ceiling: Option<Ceiling>,
 }
 
+/// What the context holds, which a clear loses, and whether the prompt cache still keeps it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Held {
+    Nothing,
+    Warm,
+    /// The cache may be cold, so the next call may write the whole context again, at a price
+    /// above that of new input: its TTL passed, or its age is unknown.
+    Cold,
+}
+
 enum Cache {
-    /// The cache before Claude Code tells whether the session had a call.
+    /// The cache before Claude Code tells whether the session had a call, which may be a
+    /// resumed session's.
     Starting,
     /// The cache of a new session, which holds nothing yet to lose.
     Empty,
@@ -124,29 +135,25 @@ impl Context {
         Some(level)
     }
 
-    pub fn is_cold(&self, now: Instant) -> bool {
+    /// What the context holds at `now`. A cache of unknown age may be cold, as before Claude
+    /// Code tells whether the session had a call, so a message waits for a second press until
+    /// Claude Code tells it.
+    pub fn held(&self, now: Instant) -> Held {
         match self.cache {
-            Cache::Starting | Cache::Empty => false,
-            Cache::WarmUntil(cold_at) => now >= cold_at,
-            Cache::Unknown => true,
+            Cache::Empty => Held::Nothing,
+            Cache::WarmUntil(cold_at) if now < cold_at => Held::Warm,
+            Cache::Starting | Cache::WarmUntil(_) | Cache::Unknown => Held::Cold,
         }
     }
 
-    /// Whether the context holds a conversation, which a session that had a call does.
-    pub fn has_conversation(&self) -> bool {
-        matches!(self.cache, Cache::WarmUntil(_) | Cache::Unknown)
+    pub fn is_cold(&self, now: Instant) -> bool {
+        self.held(now) == Held::Cold
     }
 
     /// Starts over for a cleared context, which holds nothing yet, as a new session's.
     pub fn reset(&mut self) {
         self.tokens = 0;
         self.cache = Cache::Empty;
-    }
-
-    /// Whether Claude Code has yet to tell whether the session had a call, which decides
-    /// whether the cache is cold, so a message waits.
-    pub fn is_starting(&self) -> bool {
-        matches!(self.cache, Cache::Starting)
     }
 }
 
@@ -166,8 +173,7 @@ mod tests {
         context.note_last_call(None);
         let now = Instant::now();
         assert_eq!(context.level(), Some(0));
-        assert!(!context.is_starting());
-        assert!(!context.is_cold(now + HOUR));
+        assert_eq!(context.held(now + HOUR), Held::Nothing);
     }
 
     #[test]
@@ -200,12 +206,13 @@ mod tests {
     }
 
     #[test]
-    fn a_message_waits_until_claude_code_tells_whether_the_session_is_new() {
-        let context = Context::new();
+    fn the_cache_may_be_cold_until_claude_code_tells_whether_the_session_is_new() {
+        let mut context = Context::new();
         let now = Instant::now();
         assert_eq!(context.level(), None);
-        assert!(!context.is_cold(now));
-        assert!(context.is_starting());
+        assert_eq!(context.held(now), Held::Cold);
+        context.note_last_call(None);
+        assert_eq!(context.held(now), Held::Nothing);
     }
 
     #[test]
@@ -213,10 +220,9 @@ mod tests {
         let mut context = Context::new();
         let now = Instant::now();
         let cold_at = context.note_call(&usage(90_000, Some(HOUR)), now);
-        assert!(context.has_conversation());
+        assert_eq!(context.held(now), Held::Warm);
         context.reset();
-        assert!(!context.has_conversation());
-        assert!(!context.is_cold(cold_at));
+        assert_eq!(context.held(cold_at), Held::Nothing);
         assert_eq!(context.level(), Some(0));
     }
 

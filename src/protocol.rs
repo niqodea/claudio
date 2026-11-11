@@ -63,6 +63,9 @@ pub enum Event {
     Model(String),
     /// What the context can grow to as Claude Code starts the session.
     Ceiling(Ceiling),
+    /// A sign that Claude Code works in a way claudio was not made for, as this error says, which
+    /// ends the session as it starts.
+    Incompatible(String),
     /// A request this client has no answer for. Claude Code waits on it until it is refused.
     Unsupported {
         request_id: String,
@@ -394,6 +397,13 @@ pub fn read_events(line: &str) -> Result<Vec<Event>, String> {
                     response,
                 },
         } => read_response(&request_id, response)?,
+        // The context's usage tells whether the cache may be cold, and claudio has nothing to
+        // tell it by otherwise
+        Message::ControlResponse {
+            response: Reply::Error { request_id, error },
+        } if request_id == CONTEXT_REQUEST_ID => vec![Event::Incompatible(format!(
+            "Claude Code refused the context's usage: {error}"
+        ))],
         Message::ControlResponse {
             response: Reply::Error { request_id, error },
         } => return Err(format!("Claude Code refused request {request_id}: {error}")),
@@ -436,7 +446,10 @@ fn read_response(request_id: &str, response: Option<Value>) -> Result<Vec<Event>
     match request_id {
         INITIALIZE_REQUEST_ID => read_account(response),
         SETTINGS_REQUEST_ID => read_settings(response),
-        CONTEXT_REQUEST_ID => read_context_usage(response),
+        CONTEXT_REQUEST_ID => {
+            Ok(read_context_usage(response)
+                .unwrap_or_else(|error| vec![Event::Incompatible(error)]))
+        }
         USAGE_REQUEST_ID => read_plan_usage(response),
         // The other requests sent are interrupts, whose success needs no word
         _ => Ok(vec![]),
@@ -866,7 +879,10 @@ struct Settings {
 
 #[derive(Deserialize)]
 struct ContextUsage {
-    #[serde(rename = "apiUsage")]
+    /// The last call's usage, null in a new session. The key is required, so a renamed key
+    /// shows as an error, where a missing key would read as a new session's.
+    /// Ref: `SDKControlGetContextUsageResponse` in `sdk.d.ts`, whose `apiUsage` is `{…} | null`
+    #[serde(rename = "apiUsage", deserialize_with = "Option::deserialize")]
     api_usage: Option<ApiUsage>,
     model: String,
     /// The window the context fits in.
@@ -1176,6 +1192,39 @@ mod tests {
         let line: Value = serde_json::from_str(&Command::Clear.to_line()).expect("JSON");
         assert_eq!(line["message"]["content"], "/clear");
         assert!(line.get("client_composed").is_none());
+    }
+
+    #[test]
+    fn a_new_session_tells_no_last_call() {
+        let line = context_response(&Value::Null, 1_000_000, None);
+        let events = read_events(&line).expect("a readable line");
+        assert!(matches!(events.as_slice(), [Event::LastCall(None), ..]));
+    }
+
+    #[test]
+    fn a_context_usage_without_its_last_call_is_incompatible() {
+        let mut line: Value =
+            serde_json::from_str(&context_response(&Value::Null, 1_000_000, None)).expect("JSON");
+        line["response"]["response"]
+            .as_object_mut()
+            .expect("an object")
+            .remove("apiUsage");
+        let events = read_events(&line.to_string()).expect("a readable line");
+        assert!(matches!(
+            events.as_slice(),
+            [Event::Incompatible(error)] if error.contains("apiUsage")
+        ));
+    }
+
+    #[test]
+    fn a_refused_context_usage_is_incompatible() {
+        let line = json!({
+            "type": "control_response",
+            "response": {"subtype": "error", "request_id": CONTEXT_REQUEST_ID, "error": "unknown request"},
+        })
+        .to_string();
+        let events = read_events(&line).expect("a readable line");
+        assert!(matches!(events.as_slice(), [Event::Incompatible(_)]));
     }
 
     #[test]

@@ -261,6 +261,7 @@ fn read_claude(from_claude: ChildStdout, shared: &Mutex<Shared>, forward: &dyn F
                 Event::Model(model) => shared.model = Some(model),
                 Event::Ceiling(ceiling) => shared.context.note_ceiling(ceiling),
                 Event::Ask(ask) => forward(Input::Ask(ask)),
+                Event::Incompatible(error) => forward(Input::Incompatible(error)),
                 Event::Unsupported {
                     request_id,
                     subtype,

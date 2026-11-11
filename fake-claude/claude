@@ -70,6 +70,7 @@ for line in sys.stdin:
                         "maxTokens": 1_000_000,
                         "isAutoCompactEnabled": True,
                         "autoCompactThreshold": 967_000,
+                        "apiUsage": None,
                     },
                 },
             }

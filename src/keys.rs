@@ -5,6 +5,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::context::Held;
 use crate::picker::{Choice, Form};
 
 /// What the user does on the input line.
@@ -113,16 +114,6 @@ pub struct Stakes {
     pub is_working: bool,
 }
 
-/// What the context holds, which a clear loses, and whether the prompt cache still keeps it.
-#[derive(Clone, Copy, PartialEq)]
-pub enum Held {
-    Nothing,
-    Warm,
-    /// The cache is cold, so the next call writes the whole context again, at a price above
-    /// that of new input.
-    Cold,
-}
-
 /// What `action` loses in `phase` that no key brings back, with `stakes` telling what the
 /// session holds. Such a press waits for the same key again in a row, which the input line carries out
 /// and the label row names the loss for, as Codex and Claude Code do for their exit keys. The
@@ -148,7 +139,7 @@ pub fn loss(phase: &Phase, action: Action, stakes: Stakes) -> Option<String> {
         (Phase::Ending, Action::Session(SessionKey::Stop)) => Some("stops claude".to_string()),
         (Phase::Writing { waiting }, Action::Send) if stakes.has_text => {
             let refusal = (*waiting > 0).then(|| format!("refuses {} and ", questions(*waiting)));
-            let cache = (stakes.held == Held::Cold).then_some(" on the cold cache");
+            let cache = (stakes.held == Held::Cold).then_some(" on a possibly cold cache");
             (refusal.is_some() || cache.is_some()).then(|| {
                 format!(
                     "{}sends{}",
@@ -371,11 +362,11 @@ mod tests {
             Action::Send,
             vec![
                 (writing(2), WARM, Some("refuses 2 questions and sends")),
-                (writing(0), COLD, Some("sends on the cold cache")),
+                (writing(0), COLD, Some("sends on a possibly cold cache")),
                 (
                     writing(1),
                     COLD,
-                    Some("refuses the question and sends on the cold cache"),
+                    Some("refuses the question and sends on a possibly cold cache"),
                 ),
                 (writing(0), WARM, None),
                 (writing(2), empty, None),

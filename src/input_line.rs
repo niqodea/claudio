@@ -26,7 +26,7 @@ use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlt
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::context::COLD_COLOR;
-use crate::keys::{self, Action, Held, Phase, SessionKey, View};
+use crate::keys::{self, Action, Phase, SessionKey, View};
 use crate::limits::{Level, limit_level};
 use crate::picker::{self, Cursor, Draft, Form, InputBox, Move, Pick, question_name};
 use crate::render::{
@@ -227,6 +227,7 @@ impl InputLine {
                 return Ok(Outcome::Break(()));
             }
             self.print_output()?;
+            self.drop_lost_confirmation();
             if self.make_label() != self.label {
                 self.draw()?;
             }
@@ -312,23 +313,8 @@ impl InputLine {
         if action != Action::Edit {
             self.editor.cancel();
         }
-        let stakes = {
-            let shared = lock(&self.shared);
-            let held = if !shared.context.has_conversation() {
-                Held::Nothing
-            } else if shared.context.is_cold(Instant::now()) {
-                Held::Cold
-            } else {
-                Held::Warm
-            };
-            keys::Stakes {
-                has_text: !self.text().trim().is_empty(),
-                held,
-                is_working: shared.output.status() != Status::Idle,
-            }
-        };
-        let loss = keys::loss(&phase, action, stakes);
-        if !self.goes_ahead(&key, confirming.as_ref(), loss) {
+        let loss = keys::loss(&phase, action, self.stakes());
+        if !self.goes_ahead(&key, confirming.as_ref(), loss, Some(action)) {
             return Ok(None);
         }
         match action {
@@ -375,6 +361,7 @@ impl InputLine {
         key: &KeyEvent,
         confirming: Option<&Confirming>,
         loss: Option<String>,
+        action: Option<Action>,
     ) -> bool {
         let Some(loss) = loss else {
             return true;
@@ -383,9 +370,35 @@ impl InputLine {
             first.key.code == key.code && first.key.modifiers == key.modifiers && first.loss == loss
         });
         if !is_second {
-            self.confirming = Some(Confirming { key: *key, loss });
+            self.confirming = Some(Confirming {
+                key: *key,
+                loss,
+                action,
+            });
         }
         is_second
+    }
+
+    /// What the session holds that a press can lose.
+    fn stakes(&self) -> keys::Stakes {
+        let shared = lock(&self.shared);
+        keys::Stakes {
+            has_text: !self.text().trim().is_empty(),
+            held: shared.context.held(Instant::now()),
+            is_working: shared.output.status() != Status::Idle,
+        }
+    }
+
+    /// Ends the wait of a key whose loss went away, so the label row never asks for a press
+    /// that loses nothing. A loss that changed instead waits for the press, which names it.
+    fn drop_lost_confirmation(&mut self) {
+        let Some(action) = self.confirming.as_ref().and_then(|first| first.action) else {
+            return;
+        };
+        let phase = lock(&self.shared).phase.clone();
+        if keys::loss(&phase, action, self.stakes()).is_none() {
+            self.confirming = None;
+        }
     }
 
     /// Acts on a key of the question view's that is not a session key, Enter among them. An
@@ -413,7 +426,7 @@ impl InputLine {
                 .pick
                 .leaves_out(view.form, &text)
                 .then(|| "leaves out your own answer".to_string());
-            if is_empty || !self.goes_ahead(key, confirming, loss) {
+            if is_empty || !self.goes_ahead(key, confirming, loss, None) {
                 self.pick = before;
                 self.is_empty_warned = is_empty;
                 return Ok(None);
@@ -985,6 +998,9 @@ impl InputLine {
 struct Confirming {
     key: KeyEvent,
     loss: String,
+    /// The key's action, whose loss the session's state can take away meanwhile, as when Claude
+    /// Code tells the cache is new. None for an answer's key, whose loss only keys change.
+    action: Option<Action>,
 }
 
 impl Drop for InputLine {

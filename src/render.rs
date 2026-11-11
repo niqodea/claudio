@@ -431,6 +431,16 @@ impl Output {
         }
     }
 
+    /// Warns that claudio runs a Claude Code other than the one it was checked against, whose
+    /// changes may break what claudio assumes, like the shape of what it writes.
+    pub fn show_unchecked_version(&mut self, version: &str) {
+        self.begin(Section::Notice);
+        self.push_detail(&format!(
+            "{ORANGE}Claude Code {version} runs, and claudio was checked against {}{RESET}",
+            crate::claude_code::VERSION
+        ));
+    }
+
     pub fn show_paying_key(&mut self, key: &str) {
         self.begin(Section::Notice);
         self.push_detail(&format!(

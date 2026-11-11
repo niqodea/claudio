@@ -52,7 +52,7 @@ def state(name):
 
 
 sessions = 1
-send({"type": "system", "subtype": "init", "session_id": "fake-session"})
+send({"type": "system", "subtype": "init", "session_id": "fake-session", "claude_code_version": "2.1.322"})
 state("idle")
 for line in sys.stdin:
     message = json.loads(line)
@@ -108,7 +108,7 @@ for line in sys.stdin:
         previous = "fake-session" if sessions == 1 else f"fake-session-{sessions}"
         sessions += 1
         send({"type": "conversation_reset", "trigger": "clear", "session_id": previous})
-        send({"type": "system", "subtype": "init", "session_id": f"fake-session-{sessions}"})
+        send({"type": "system", "subtype": "init", "session_id": f"fake-session-{sessions}", "claude_code_version": "2.1.322"})
         send({"type": "result", "subtype": "success"})
         continue
     state("running")

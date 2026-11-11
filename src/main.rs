@@ -2,12 +2,14 @@
 //! an input line that stays open for each message, and for each answer when a tool asks for
 //! one.
 //!
-//! Arguments are passed on to `claude`, like `--resume <session>`.
+//! Arguments are passed on to `claude`, like `--resume <session>`, except for `claudio
+//! install-claude-code`, which installs the Claude Code that claudio runs.
 //!
 //! The `claude -p` the client starts is all it knows of Claude Code: what it writes, its error
 //! output and its exit. The client reads nothing else of Claude Code's, like its transcript
 //! files, which keeps the client small and its assumptions on how Claude Code works few.
 
+mod claude_code;
 mod code;
 mod config;
 mod context;
@@ -57,6 +59,8 @@ struct Shared {
     session_id: Option<String>,
     /// The session's model, once Claude Code tells it.
     model: Option<String>,
+    /// The version of Claude Code, once it tells it.
+    claude_code_version: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -70,13 +74,25 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<ExitCode, String> {
+    let mut args = env::args().skip(1).peekable();
+    if args.peek().map(String::as_str) == Some(claude_code::INSTALL_COMMAND) {
+        if args.nth(1).is_some() {
+            return Err(format!(
+                "claudio {} takes no arguments",
+                claude_code::INSTALL_COMMAND
+            ));
+        }
+        claude_code::install()?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    let program = claude_code::program()?;
     let config = Config::read()?;
     // vi when EDITOR is unset or empty, since POSIX requires a vi on every system it covers
     let editor_command = env::var("EDITOR")
         .ok()
         .filter(|editor| !editor.is_empty())
         .unwrap_or_else(|| "vi".to_string());
-    let mut claude = process::Command::new("claude")
+    let mut claude = process::Command::new(&program)
         .args([
             "--print",
             "--input-format",
@@ -89,7 +105,10 @@ fn run() -> Result<ExitCode, String> {
             "--permission-prompt-tool",
             "stdio",
         ])
-        .args(env::args().skip(1))
+        .args(args)
+        // The copy keeps the version claudio was checked against
+        // Ref: <https://code.claude.com/docs/en/settings#environment-variables>
+        .env("DISABLE_AUTOUPDATER", "1")
         // Undocumented, read in Claude Code 2.1.316: makes it send its session state
         .env("CLAUDE_CODE_SDK_READS_SESSION_STATE", "1")
         .stdin(Stdio::piped())
@@ -99,7 +118,7 @@ fn run() -> Result<ExitCode, String> {
         // Keys reach only this process, which turns Ctrl-C into an interrupt of the turn
         .process_group(0)
         .spawn()
-        .map_err(|error| format!("Cannot start claude: {error}"))?;
+        .map_err(|error| format!("Cannot start {}: {error}", program.display()))?;
     let to_claude = claude.stdin.take().expect("stdin is piped");
     let from_claude = claude.stdout.take().expect("stdout is piped");
     let errors_from_claude = claude.stderr.take().expect("stderr is piped");
@@ -122,6 +141,7 @@ fn run() -> Result<ExitCode, String> {
         limits: Limits::new(),
         session_id: None,
         model: None,
+        claude_code_version: None,
     }));
     let break_signal = Arc::new(AtomicBool::new(false));
     let (input_sender, inputs) = mpsc::channel();
@@ -247,6 +267,14 @@ fn read_claude(from_claude: ChildStdout, shared: &Mutex<Shared>, forward: &dyn F
                 Event::SettingsErrors(errors) => shared.output.show_settings_errors(&errors),
                 Event::PayingKey(key) => shared.output.show_paying_key(&key),
                 Event::SessionId(id) => shared.session_id = Some(id),
+                // Each session tells it, which a clear starts anew
+                Event::Version(version) if shared.claude_code_version.is_none() => {
+                    if version != claude_code::VERSION {
+                        shared.output.show_unchecked_version(&version);
+                    }
+                    shared.claude_code_version = Some(version);
+                }
+                Event::Version(_) => {}
                 Event::Reset { previous_session } => {
                     shared.output.show_reset(&previous_session);
                     shared.context.reset();

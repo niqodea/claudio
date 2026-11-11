@@ -50,6 +50,8 @@ pub enum Event {
     PayingKey(String),
     /// The id of the session, which `--resume` takes.
     SessionId(String),
+    /// The version of Claude Code.
+    Version(String),
     /// The context was cleared, which ends the session with this id, the one `--resume` takes
     /// to go back to it. A new session follows, whose id arrives next.
     Reset {
@@ -414,17 +416,30 @@ pub fn read_events(line: &str) -> Result<Vec<Event>, String> {
             failure: Some(subtype),
         }],
         Message::RateLimitEvent { rate_limit_info } => vec![read_limits(rate_limit_info)],
-        Message::System(System::Init { session_id }) => vec![Event::SessionId(session_id)],
         Message::ConversationReset { session_id } => vec![Event::Reset {
             previous_session: session_id,
         }],
-        Message::System(System::SessionStateChanged { state }) => vec![Event::State(state)],
-        Message::System(System::BackgroundTasksChanged { tasks }) => vec![Event::BackgroundTasks(
-            tasks.into_iter().map(|task| task.description).collect(),
-        )],
-        Message::StreamEvent { .. } | Message::System(System::Other) | Message::Other => vec![],
+        Message::System(system) => read_system(system),
+        Message::StreamEvent { .. } | Message::Other => vec![],
     };
     Ok(events)
+}
+
+fn read_system(system: System) -> Vec<Event> {
+    match system {
+        System::Init {
+            session_id,
+            claude_code_version,
+        } => vec![
+            Event::SessionId(session_id),
+            Event::Version(claude_code_version),
+        ],
+        System::SessionStateChanged { state } => vec![Event::State(state)],
+        System::BackgroundTasksChanged { tasks } => vec![Event::BackgroundTasks(
+            tasks.into_iter().map(|task| task.description).collect(),
+        )],
+        System::Other => vec![],
+    }
 }
 
 /// Whether a line of Claude Code's error output repeats what one of its messages shows.
@@ -650,9 +665,10 @@ impl From<Window> for Limit {
 #[derive(Deserialize)]
 #[serde(tag = "subtype", rename_all = "snake_case")]
 enum System {
-    /// Carries the id of the session Claude Code runs.
+    /// Carries the id of the session Claude Code runs, and Claude Code's version.
     Init {
         session_id: String,
+        claude_code_version: String,
     },
     // Undocumented, read in Claude Code 2.1.316 and seen with it: sent only when
     // CLAUDE_CODE_SDK_READS_SESSION_STATE is set, which the SDK's types do not name, though they
@@ -1075,9 +1091,18 @@ mod tests {
 
     #[test]
     fn claude_code_tells_the_session() {
-        let line = json!({"type": "system", "subtype": "init", "session_id": "a1", "tools": []});
+        let line = json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "a1",
+            "claude_code_version": "2.1.322",
+            "tools": [],
+        });
         let events = read_events(&line.to_string()).expect("a readable line");
-        assert!(matches!(events.as_slice(), [Event::SessionId(id)] if id == "a1"));
+        assert!(matches!(
+            events.as_slice(),
+            [Event::SessionId(id), Event::Version(version)] if id == "a1" && version == "2.1.322"
+        ));
     }
 
     /// A reply about the context's usage, from Claude Code that compacts the context at

@@ -6,11 +6,20 @@ Claude Code without the TUI: just input and output.
 
 ```sh
 cargo install --path .
+claudio install-claude-code
 ```
 
 ## Claude Code
 
 claudio drives `claude -p`, and passes its arguments on to `claude`.
+
+claudio runs its own copy of Claude Code, of the one version it was checked against, since it relies on behaviour of Claude Code's that is undocumented.
+`claudio install-claude-code` downloads that copy into `claudio/claude-code` in `$XDG_DATA_HOME`, or in `~/.local/share` when that is unset, checks its sha256, and removes the copies of other versions.
+The copy never updates itself, and a `claude` you run apart from claudio keeps its own version.
+
+To try another Claude Code, name it in `CLAUDIO_CLAUDE`, like `CLAUDIO_CLAUDE=claude claudio`.
+When its version is not the one claudio was checked against, claudio warns in orange as it starts.
+When Claude Code refuses claudio's request for the context's usage, or answers it in a shape claudio cannot read, claudio stops as it starts, and says why.
 
 claudio supports only auto mode for now: it refuses every permission Claude Code asks for, and says so in red.
 It has no key to switch modes either, so set auto mode in `~/.claude/settings.json`:

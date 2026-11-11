@@ -21,6 +21,9 @@ To try another Claude Code, name it in `CLAUDIO_CLAUDE`, like `CLAUDIO_CLAUDE=cl
 When its version is not the one claudio was checked against, claudio warns in orange as it starts.
 When Claude Code refuses claudio's request for the context's usage, or answers it in a shape claudio cannot read, claudio stops as it starts, and says why.
 
+`claudio check-claude-code` checks each of those behaviours against the Claude Code that claudio runs, the one `CLAUDIO_CLAUDE` names too, so it tells whether a newer Claude Code still works with claudio.
+The checks that call the API run only with `--paid`, on the cheapest model, at a few cents in all.
+
 claudio supports only auto mode for now: it refuses every permission Claude Code asks for, and says so in red.
 It has no key to switch modes either, so set auto mode in `~/.claude/settings.json`:
 

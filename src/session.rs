@@ -351,13 +351,14 @@ pub struct Ending<'a> {
 
 impl Ending<'_> {
     /// Shows Claude finish its work, until Claude Code exits once its turn and its background
-    /// tasks end. Ctrl-C stops them.
+    /// tasks end. Ctrl-C stops them. Claude Code fails what it asks once its input closed, so
+    /// nothing it asks waits for an answer.
+    ///
+    /// Undocumented: [`crate::contract::a_permission_after_the_input_closes_fails`]
     pub fn run(mut self) -> Result<(), String> {
         loop {
             match self.session.next_input() {
                 Some(Input::Closed) => return self.session.close_line(),
-                // Undocumented, seen with Claude Code 2.1.316: once its input closed, Claude Code
-                // fails each permission request, with "Stream closed" as the tool's result
                 Some(Input::Ask(_) | Input::Unsupported { .. } | Input::Incompatible(_)) | None => {
                 }
             }
@@ -375,9 +376,10 @@ impl Ending<'_> {
         }
     }
 
-    /// Undocumented, seen with Claude Code 2.1.316: SIGINT stops Claude's turn and background
-    /// tasks, as Ctrl-C does a program's work in the terminal, and Claude Code then exits, since
-    /// its input closed.
+    /// Stops Claude's turn and its background tasks with SIGINT, as Ctrl-C does a program's
+    /// work in the terminal, after which Claude Code exits, its input closed.
+    ///
+    /// Undocumented: [`crate::contract::sigint_stops_claude_code_after_its_input_closes`]
     fn interrupt(&self) -> Result<(), String> {
         lock(&self.session.shared)
             .output

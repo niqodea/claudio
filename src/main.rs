@@ -13,6 +13,7 @@ mod claude_code;
 mod code;
 mod config;
 mod context;
+mod contract;
 mod input_line;
 mod keys;
 mod limits;
@@ -85,6 +86,14 @@ fn run() -> Result<ExitCode, String> {
         claude_code::install()?;
         return Ok(ExitCode::SUCCESS);
     }
+    if args.peek().map(String::as_str) == Some(CHECK_COMMAND) {
+        let is_paid = match args.nth(1).as_deref() {
+            None => false,
+            Some("--paid") if args.next().is_none() => true,
+            Some(_) => return Err(format!("Usage: claudio {CHECK_COMMAND} [--paid]")),
+        };
+        return check_claude_code(is_paid);
+    }
     let program = claude_code::program()?;
     let config = Config::read()?;
     // vi when EDITOR is unset or empty, since POSIX requires a vi on every system it covers
@@ -92,25 +101,8 @@ fn run() -> Result<ExitCode, String> {
         .ok()
         .filter(|editor| !editor.is_empty())
         .unwrap_or_else(|| "vi".to_string());
-    let mut claude = process::Command::new(&program)
-        .args([
-            "--print",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            // stream-json output needs it
-            "--verbose",
-            "--include-partial-messages",
-            "--permission-prompt-tool",
-            "stdio",
-        ])
+    let mut claude = claude_code::command(&program)
         .args(args)
-        // The copy keeps the version claudio was checked against
-        // Ref: <https://code.claude.com/docs/en/settings#environment-variables>
-        .env("DISABLE_AUTOUPDATER", "1")
-        // Undocumented, read in Claude Code 2.1.316: makes it send its session state
-        .env("CLAUDE_CODE_SDK_READS_SESSION_STATE", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         // Its error output reaches the terminal through the output, above the input line
@@ -183,6 +175,41 @@ fn run() -> Result<ExitCode, String> {
     end(claude, [reader, errors_reader], &shared, result)
 }
 
+/// The subcommand that checks what claudio assumes of Claude Code.
+const CHECK_COMMAND: &str = "check-claude-code";
+
+/// Runs the checks of what claudio assumes of Claude Code against the Claude Code it runs, the
+/// paid ones only when `is_paid`, and fails when one fails.
+fn check_claude_code(is_paid: bool) -> Result<ExitCode, String> {
+    let program = claude_code::program()?;
+    println!("Checking {}", program.display());
+    if is_paid {
+        println!(
+            "The paid checks call the API with {}, a few cents in all",
+            contract::MODEL
+        );
+    }
+    let mut failed = 0;
+    for check in &contract::CHECKS {
+        if check.is_paid && !is_paid {
+            println!("skip  {} (paid, --paid runs it)", check.name);
+            continue;
+        }
+        match (check.run)(&program) {
+            Ok(()) => println!("ok    {}", check.name),
+            Err(error) => {
+                failed += 1;
+                println!("FAIL  {}: {error}", check.name);
+            }
+        }
+    }
+    Ok(if failed == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
 /// Ends the session the user or Claude Code ended, or that failed with `result`'s error, and
 /// shows the rest of the output: all Claude Code wrote, how it ended, and the final line. The
 /// session is over, so Claude Code's input closed, and Claude Code exits once its work is done.
@@ -195,13 +222,7 @@ fn end(
     let status = claude
         .wait()
         .map_err(|error| format!("Cannot wait for claude: {error}"))?;
-    // Undocumented, seen with Claude Code 2.1.316: the processes it starts in the background
-    // write to files of their own, so its output closes as it exits, and each reader ends then.
-    // Every line Claude Code wrote thus comes before its end. A reader that panicked already said
-    // why
-    for reader in readers {
-        let _ = reader.join();
-    }
+    join(readers);
     let shared = &mut lock(shared);
     let output = &mut shared.output;
     let code = match result {
@@ -216,6 +237,16 @@ fn end(
     print!("{}", output.take_text());
     println!("{}", final_line(shared.session_id.as_deref()));
     Ok(code)
+}
+
+/// Waits for the readers of Claude Code's output, which end as it exits, once they took every
+/// line it wrote. A reader that panicked already said why.
+///
+/// Undocumented: [`crate::contract::the_output_closes_as_claude_code_exits`]
+fn join(readers: [JoinHandle<()>; 2]) {
+    for reader in readers {
+        let _ = reader.join();
+    }
 }
 
 /// How Claude Code exited, none when with status 0.

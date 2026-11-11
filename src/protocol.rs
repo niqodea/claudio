@@ -1,8 +1,9 @@
 //! Claude Code's side of the conversation, as `claude -p` carries it in its stream-json format:
 //! the events read from what it writes, and the commands written back.
 //! Ref: sdk.d.ts in the npm package @anthropic-ai/claude-agent-sdk, which types every message
-//! Claude Code documents. Anywhere in the client, what relies on more than those types says so in
-//! a comment that starts with "Undocumented", followed by how it was learned.
+//! Claude Code documents. Anywhere in the client, the smallest item that relies on more than
+//! those types is a function, type or field of its own, whose doc links to the check of what it
+//! assumes, as [`crate::contract`] explains.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -11,7 +12,7 @@ use serde::de::IgnoredAny;
 use serde_json::{Map, Value, json};
 
 /// The ids of the requests sent before the first message
-const INITIALIZE_REQUEST_ID: &str = "initialize";
+pub const INITIALIZE_REQUEST_ID: &str = "initialize";
 const SETTINGS_REQUEST_ID: &str = "settings";
 const CONTEXT_REQUEST_ID: &str = "context";
 const USAGE_REQUEST_ID: &str = "usage";
@@ -76,7 +77,7 @@ pub enum Event {
 }
 
 /// Whether Claude works, waits for a message, or waits for the answer to an ask.
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum State {
     Idle,
@@ -198,12 +199,7 @@ pub enum Command<'a> {
     /// runs or the running turn already took the message in, so it never stops the turn that
     /// answers the message.
     ///
-    /// Undocumented, from Claude Code's changelog: its fields are Claude Code's own, absent from
-    /// the SDK's types. Claude Code announces them
-    /// as `interrupt_send_now_v1` when it starts, and one without them takes the request as a
-    /// plain interrupt.
-    /// Ref: <https://code.claude.com/docs/en/changelog>, on send now moving running tools to the
-    /// background
+    /// Undocumented: [`crate::contract::send_now_is_announced`]
     SendNow {
         request_id: String,
         message_id: &'a str,
@@ -472,13 +468,12 @@ fn read_response(request_id: &str, response: Option<Value>) -> Result<Vec<Event>
 }
 
 /// The key that pays for the session, none when the subscription does.
+///
+/// Undocumented: [`crate::contract::the_paying_key_is_named_by_its_source`]
 fn read_account(response: Option<Value>) -> Result<Vec<Event>, String> {
     let initialize: Initialize = serde_json::from_value(response.unwrap_or_default())
         .map_err(|error| format!("Unreadable account from Claude Code: {error}"))?;
     let account = initialize.account;
-    // Undocumented, seen with Claude Code 2.1.319: ANTHROPIC_API_KEY fills apiKeySource with its
-    // name, ANTHROPIC_AUTH_TOKEN fills tokenSource with its name, and the subscription's login
-    // leaves apiKeySource out and tokenSource out or claude.ai
     let key = account.api_key_source.or(account
         .token_source
         .filter(|source| source == "ANTHROPIC_AUTH_TOKEN"));
@@ -609,9 +604,9 @@ enum Message {
         rate_limit_info: RateLimitInfo,
     },
     System(System),
-    /// Undocumented, seen with Claude Code 2.1.322: `/clear` sends this, then the new
-    /// session's init, then a result that ends a turn of no calls. Its `session_id` is the
-    /// cleared session's.
+    /// Sent as `/clear` starts a new session, with the id of the session it cleared.
+    ///
+    /// Undocumented: [`crate::contract::a_clear_resets_the_session`]
     ConversationReset {
         session_id: String,
     },
@@ -622,8 +617,9 @@ enum Message {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RateLimitInfo {
-    // Undocumented, read in the schema of Claude Code 2.1.316, which marks it internal. Only this
-    // field has every limit: the documented fields describe only the limit that applies now
+    /// Every limit of the plan.
+    ///
+    /// Undocumented: [`crate::contract::a_rate_limit_event_has_every_window`]
     #[serde(default)]
     unified_windows: UnifiedWindows,
 }
@@ -670,16 +666,12 @@ enum System {
         session_id: String,
         claude_code_version: String,
     },
-    // Undocumented, read in Claude Code 2.1.316 and seen with it: sent only when
-    // CLAUDE_CODE_SDK_READS_SESSION_STATE is set, which the SDK's types do not name, though they
-    // type the message
-    SessionStateChanged {
-        state: State,
-    },
+    /// Sent as a turn starts and ends.
+    ///
+    /// Undocumented: [`crate::contract::session_state_comes_with_its_variable`]
+    SessionStateChanged { state: State },
     /// Sent each time a task starts or ends, with every task that still runs.
-    BackgroundTasksChanged {
-        tasks: Vec<BackgroundTask>,
-    },
+    BackgroundTasksChanged { tasks: Vec<BackgroundTask> },
     #[serde(other)]
     Other,
 }
@@ -946,6 +938,7 @@ struct QuestionsInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contract;
 
     fn message_start(parent_tool_use_id: &Value) -> String {
         json!({
@@ -994,25 +987,7 @@ mod tests {
 
     #[test]
     fn a_rate_limit_event_tells_how_much_of_each_limit_was_used() {
-        // As Claude Code 2.1.316 sent it
-        let line = json!({
-            "type": "rate_limit_event",
-            "rate_limit_info": {
-                "status": "allowed",
-                "resetsAt": 1_794_088_800,
-                "rateLimitType": "five_hour",
-                "overageStatus": "rejected",
-                "overageDisabledReason": "out_of_credits",
-                "isUsingOverage": false,
-                "unifiedWindows": {
-                    "five_hour": {"utilization": 0.39, "resetsAt": 1_794_088_800, "status": "allowed"},
-                    "seven_day": {"utilization": 1.0, "resetsAt": 1_794_492_000, "status": "rejected"},
-                },
-            },
-            "uuid": "a",
-            "session_id": "b",
-        })
-        .to_string();
+        let line = contract::rate_limit_event();
         let events = read_events(&line).expect("a readable line");
         let [Event::Limits { session, week }] = events.as_slice() else {
             panic!("limits");
@@ -1045,19 +1020,8 @@ mod tests {
         assert!(events.is_empty());
     }
 
-    fn initialize_response(account: &Value) -> String {
-        json!({
-            "type": "control_response",
-            "response": {"subtype": "success", "request_id": INITIALIZE_REQUEST_ID, "response": {
-                "commands": [],
-                "account": account,
-            }},
-        })
-        .to_string()
-    }
-
     fn paying_key(account: &Value) -> Option<String> {
-        let events = read_events(&initialize_response(account)).expect("a readable line");
+        let events = read_events(&contract::initialize_response(account)).expect("a readable line");
         match events.as_slice() {
             [] => None,
             [Event::PayingKey(key)] => Some(key.clone()),
@@ -1067,22 +1031,18 @@ mod tests {
 
     #[test]
     fn the_subscription_pays_with_no_key() {
-        assert_eq!(
-            paying_key(&json!({"subscriptionType": "Claude Team"})),
-            None
-        );
-        assert_eq!(paying_key(&json!({"tokenSource": "claude.ai"})), None);
+        assert_eq!(paying_key(&contract::subscription_account()), None);
     }
 
     #[test]
     fn an_api_key_pays() {
-        let account = json!({"tokenSource": "claude.ai", "apiKeySource": "ANTHROPIC_API_KEY"});
+        let account = contract::api_key_account();
         assert_eq!(paying_key(&account).as_deref(), Some("ANTHROPIC_API_KEY"));
     }
 
     #[test]
     fn an_auth_token_pays() {
-        let account = json!({"tokenSource": "ANTHROPIC_AUTH_TOKEN"});
+        let account = contract::auth_token_account();
         assert_eq!(
             paying_key(&account).as_deref(),
             Some("ANTHROPIC_AUTH_TOKEN")
@@ -1198,17 +1158,23 @@ mod tests {
 
     #[test]
     fn a_cleared_context_tells_the_session_it_ends() {
-        let line = json!({
-            "type": "conversation_reset",
-            "new_conversation_id": "c2",
-            "trigger": "clear",
-            "session_id": "a1",
-        })
-        .to_string();
-        let events = read_events(&line).expect("a readable line");
+        let line = &contract::two_clears()[0];
+        let events = read_events(line).expect("a readable line");
         assert!(matches!(
             events.as_slice(),
-            [Event::Reset { previous_session }] if previous_session == "a1"
+            [Event::Reset { previous_session }] if previous_session == "first"
+        ));
+    }
+
+    #[test]
+    fn a_turn_tells_its_session_states() {
+        let states: Vec<_> = contract::session_states_of_a_turn()
+            .iter()
+            .flat_map(|line| read_events(line).expect("a readable line"))
+            .collect();
+        assert!(matches!(
+            states.as_slice(),
+            [Event::State(State::Running), Event::State(State::Idle)]
         ));
     }
 

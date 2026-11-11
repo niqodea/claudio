@@ -15,8 +15,8 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
-/// The version claudio runs and was checked against: each comment marked "Undocumented" holds
-/// for it.
+/// The version claudio runs and was checked against: each check of [`crate::contract`] passes
+/// with it.
 pub const VERSION: &str = "2.1.322";
 
 /// The sha256 of the binary of each platform, from the manifest of the release, next to its
@@ -60,6 +60,36 @@ pub fn program() -> Result<PathBuf, String> {
         ));
     }
     Ok(path)
+}
+
+/// The command that runs `program` as claudio talks to it, in stream-json both ways.
+pub fn command(program: &Path) -> Command {
+    let mut command = Command::new(program);
+    command
+        .args([
+            "--print",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            // stream-json output needs it
+            "--verbose",
+            "--include-partial-messages",
+            "--permission-prompt-tool",
+            "stdio",
+        ])
+        // The copy keeps the version claudio was checked against
+        // Ref: <https://code.claude.com/docs/en/settings#environment-variables>
+        .env("DISABLE_AUTOUPDATER", "1");
+    send_session_state(&mut command);
+    command
+}
+
+/// Makes Claude Code send its session state, which tells when Claude works.
+///
+/// Undocumented: [`crate::contract::session_state_comes_with_its_variable`]
+fn send_session_state(command: &mut Command) {
+    command.env("CLAUDE_CODE_SDK_READS_SESSION_STATE", "1");
 }
 
 /// Downloads claudio's copy and checks it against its sha256, then removes the copies of other

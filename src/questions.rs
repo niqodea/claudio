@@ -186,6 +186,7 @@ impl Questions {
                 index,
                 progress,
                 is_submitted: false,
+                sends_at_once: false,
             };
         };
         let question = &batch.questions()[index];
@@ -211,6 +212,7 @@ impl Questions {
             form,
             full_view_line: entry.full_view_line,
             index,
+            sends_at_once: progress.len() == 1,
             progress,
             is_submitted: entry.is_submitted,
         }
@@ -218,8 +220,9 @@ impl Questions {
 
     /// Acts on Enter at `index` with `draft`. Enter submits a question and moves on, or opens a
     /// submitted one again, and keeps a question that `draft` answers nothing on, like the user's
-    /// own answer left empty. On the review, it answers the batch once every answer is ticked,
-    /// and else opens the unticked ones.
+    /// own answer left empty. A batch of one question has nothing to review, so its answer goes
+    /// at once. On the review, it answers the batch once every answer is ticked, and else opens
+    /// the unticked ones.
     pub fn send(&mut self, index: usize, draft: Draft) -> Sent {
         let batch = self.batch_mut();
         let count = batch.entries.len();
@@ -240,6 +243,9 @@ impl Questions {
             return Sent::Show(index);
         }
         entry.is_submitted = true;
+        if count == 1 {
+            return self.answer();
+        }
         Sent::Show(batch.next_open(index))
     }
 
@@ -480,6 +486,18 @@ mod tests {
         assert_eq!(choose(checks, &unticked).as_deref(), Some("Tests"));
         // With nothing ticked, nothing, whatever the cursor is on
         assert!(choose(checks, &draft(Cursor::Option(2), "")).is_none());
+    }
+
+    #[test]
+    fn a_single_question_sends_its_answer_at_once() {
+        let mut questions = Questions::default();
+        questions.add(one_question("a"), vec![1]);
+        assert!(questions.view(0).sends_at_once);
+        let Sent::Answered { answers, .. } = questions.send(0, draft(Cursor::Option(1), "")) else {
+            panic!("the answer, with no review");
+        };
+        assert_eq!(answers.len(), 1);
+        assert!(questions.is_empty());
     }
 
     #[test]

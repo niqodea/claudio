@@ -6,7 +6,7 @@
 //! It answers each message with a tool call of several lines and its result, then two text
 //! blocks in a row, and the message `ask` with two questions of `AskUserQuestion`'s, whose turn
 //! ends once they are answered: one of one choice whose options have previews, and one of
-//! several choices. `/clear` starts a new session. `FAKE_DELAY` is how many seconds each answer
+//! several choices. The message `ask one` asks only the first. `/clear` starts a new session. `FAKE_DELAY` is how many seconds each answer
 //! waits before it starts, none when unset.
 
 use std::env;
@@ -80,9 +80,10 @@ impl Fake {
             self.has_started = true;
             send(&contract::init(&self.session_id()));
         }
-        if text.trim() == "ask" {
-            send(&ask().to_string());
-            return;
+        match text.trim() {
+            "ask" => return send(&ask(2).to_string()),
+            "ask one" => return send(&ask(1).to_string()),
+            _ => {}
         }
         let delay = env::var("FAKE_DELAY")
             .ok()
@@ -166,11 +167,35 @@ fn now() -> SystemTime {
     SystemTime::now()
 }
 
-/// The questions of the message `ask`.
-fn ask() -> Value {
+/// The first `count` questions of the message `ask`.
+fn ask(count: usize) -> Value {
     let option =
         |label: &str, description: &str| json!({"label": label, "description": description});
     let with_preview = |label: &str, description: &str, preview: &str| json!({"label": label, "description": description, "preview": preview});
+    let questions = [
+        json!({
+            "question": "Which greeting function style do you prefer?",
+            "header": "Code style",
+            "options": [
+                with_preview(
+                    "Arrow function",
+                    "Short one-liner.",
+                    "```js\nconst greet = (name) => `Hello, ${name}!`;\n```",
+                ),
+                with_preview(
+                    "Classic function",
+                    "Named function declaration.",
+                    "```js\nfunction greet(name) {\n  return `Hello, ${name}!`;\n}\n```",
+                ),
+            ],
+        }),
+        json!({
+            "question": "Which checks should CI run?",
+            "header": "Checks",
+            "multiSelect": true,
+            "options": [option("Lint", ""), option("Tests", ""), option("Types", "")],
+        }),
+    ];
     json!({
         "type": "control_request",
         "request_id": ASK_REQUEST_ID,
@@ -178,30 +203,7 @@ fn ask() -> Value {
             "subtype": "can_use_tool",
             "tool_name": "AskUserQuestion",
             "tool_use_id": "fake-ask-call",
-            "input": {"questions": [
-                {
-                    "question": "Which greeting function style do you prefer?",
-                    "header": "Code style",
-                    "options": [
-                        with_preview(
-                            "Arrow function",
-                            "Short one-liner.",
-                            "```js\nconst greet = (name) => `Hello, ${name}!`;\n```",
-                        ),
-                        with_preview(
-                            "Classic function",
-                            "Named function declaration.",
-                            "```js\nfunction greet(name) {\n  return `Hello, ${name}!`;\n}\n```",
-                        ),
-                    ],
-                },
-                {
-                    "question": "Which checks should CI run?",
-                    "header": "Checks",
-                    "multiSelect": true,
-                    "options": [option("Lint", ""), option("Tests", ""), option("Types", "")],
-                },
-            ]},
+            "input": {"questions": &questions[..count]},
         },
     })
 }

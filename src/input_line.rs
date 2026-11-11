@@ -963,7 +963,12 @@ impl InputLine {
                 } else if view.is_submitted {
                     format!("{GREEN}submitted{STATUS_COLOR}, enter edits it")
                 } else {
-                    picker::hint(view.form, &self.pick, view.choices.len())
+                    picker::hint(
+                        view.form,
+                        &self.pick,
+                        view.choices.len(),
+                        view.sends_at_once,
+                    )
                 };
                 format!("{} {YELLOW}{} {STATUS_COLOR}│ {hint}", marks(), view.label)
             }

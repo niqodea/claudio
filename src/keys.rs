@@ -56,6 +56,9 @@ pub struct View {
     pub progress: Vec<bool>,
     /// Whether the question is submitted, which keeps its answer until Enter opens it again.
     pub is_submitted: bool,
+    /// Whether Enter sends the answer at once, as on a batch of one question, which has nothing
+    /// to review.
+    pub sends_at_once: bool,
 }
 
 /// What a session key does. Only `Edit` changes the text, through the user's editor.
@@ -252,6 +255,7 @@ mod tests {
             index: 0,
             progress: vec![false, false],
             is_submitted: false,
+            sends_at_once: false,
         })
     }
 

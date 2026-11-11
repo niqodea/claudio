@@ -129,6 +129,7 @@ Ctrl-N/Ctrl-P move between the options from anywhere, the box too.
 Claude Code takes the answers to a call's questions together, so Enter submits a question and moves on to the next one not submitted.
 A submitted question shows its answer in green and takes no keys but Enter, which opens it again, and the keys that leave it.
 Once all are submitted, the review lists the answers by their questions' names, all ticked: Enter sends them, or with some unticked, opens those again, as the label row says.
+A call of one question has nothing to review, so Enter sends its answer at once, and the label row says `enter sends`.
 `]` and `[` reach the review too, after the last question.
 Claude gets the options' labels and your words, never the numbers, and the conversation shows the answers once sent.
 Each question keeps what you picked and typed on it until the call is answered.

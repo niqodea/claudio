@@ -175,7 +175,7 @@ impl<'a> Conversation<'a> {
                 (text, None)
             }
             // Claude Code asked something, which the next round of the loop shows
-            Outcome::Break(text) | Outcome::Next(text) | Outcome::Previous(text) => (text, None),
+            Outcome::Break(text) | Outcome::Go(text, _) => (text, None),
             Outcome::End => unreachable!("the session ends before"),
         })
     }
@@ -209,13 +209,9 @@ impl<'a> Conversation<'a> {
                 questions.keep_draft(index, draft);
                 None
             }
-            Outcome::Next(draft) => {
+            Outcome::Go(draft, to) => {
                 questions.keep_draft(index, draft);
-                Some(questions.step(index, true))
-            }
-            Outcome::Previous(draft) => {
-                questions.keep_draft(index, draft);
-                Some(questions.step(index, false))
+                Some(questions.go(index, to))
             }
             // Claude Code asked something more, which the next round of the loop adds
             Outcome::Break(draft) => {
@@ -351,8 +347,7 @@ impl Ending<'_> {
                 Outcome::Break(_)
                 | Outcome::Send(_)
                 | Outcome::Questions(_)
-                | Outcome::Next(_)
-                | Outcome::Previous(_)
+                | Outcome::Go(..)
                 | Outcome::End => {}
             }
         }

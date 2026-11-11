@@ -69,7 +69,7 @@ Claude's questions, the choices of `AskUserQuestion`, wait until you open them, 
 `Y` on the label row counts them, up to 9 and then `+`, in orange while any waits.
 Meanwhile, the first Enter on a message keeps it in the box, and the label says how many questions a second Enter refuses before sending the message.
 Ctrl-Y shows them one at a time, and Ctrl-Y goes back to the message, as Esc does on the list.
-The right end of the label row numbers the call's questions, green once submitted, with the one shown in reverse.
+The right end of the label row names the call's questions `a`, `s`, `d` and `f`, green once submitted, with the one shown in reverse.
 A question longer than the screen ends in `… Ctrl-O shows it whole`: Ctrl-O there opens the whole conversation at the question, to read with less's keys, and `q` brings you back to answer.
 
 Each question shows its options as numbered lines between the label row and the input box, and last, an item marked `>` for your own answer, which you write in the box.
@@ -83,6 +83,7 @@ The cursor starts on the first option.
 | Enter                | submit the option, or the ticked ones on several choices       |
 | `>`                  | write your own answer in the box                               |
 | `]`/`[`              | go to the next or previous question                            |
+| `a` `s` `d` `f`      | go to that question                                            |
 | Esc                  | go back to the message                                         |
 
 The keys that pick an option pick the `>` item too: Enter, or Space on several choices.
@@ -96,8 +97,8 @@ Claude Code instead lets a question go unanswered, which Claude can't tell from 
 Ctrl-N/Ctrl-P move between the options from anywhere, the box too.
 
 Claude Code takes the answers to a call's questions together, so Enter submits a question and moves on to the next one not submitted.
-A submitted question shows its answer in green and takes no keys but Enter, which opens it again, and Esc, `]` and `[`.
-Once all are submitted, the review lists the answers, all ticked: Enter sends them, or with some unticked, opens those again, as the label row says.
+A submitted question shows its answer in green and takes no keys but Enter, which opens it again, and the keys that leave it.
+Once all are submitted, the review lists the answers by their questions' names, all ticked: Enter sends them, or with some unticked, opens those again, as the label row says.
 `]` and `[` reach the review too, after the last question.
 Claude gets the options' labels and your words, never the numbers, and the conversation shows the answers once sent.
 Each question keeps what you picked and typed on it until the call is answered.

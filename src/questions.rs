@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 use serde_json::{Map, Value};
 
 use crate::keys::View;
-use crate::picker::{Choice, Cursor, Draft, Form, Pick};
+use crate::picker::{Choice, Cursor, Draft, Form, Move, Pick};
 use crate::protocol::{Answer, Ask, AskKind, Question};
 use crate::render::{BOLD, RESET};
 
@@ -137,15 +137,17 @@ impl Questions {
         Some(batch.next_open(batch.entries.len() - 1))
     }
 
-    /// The question next to the one at `index`, round the batch, where the review comes
-    /// after the last question once all are submitted.
-    pub fn step(&self, index: usize, is_forward: bool) -> usize {
+    /// Where `to` moves from the question at `index`: next and previous go round the batch, where
+    /// the review comes after the last question once all are submitted, and a question the batch
+    /// lacks keeps the one at `index`.
+    pub fn go(&self, index: usize, to: Move) -> usize {
         let batch = self.batch();
         let stops = batch.entries.len() + usize::from(batch.is_submitted());
-        if is_forward {
-            (index + 1) % stops
-        } else {
-            (index + stops - 1) % stops
+        match to {
+            Move::Next => (index + 1) % stops,
+            Move::Previous => (index + stops - 1) % stops,
+            Move::To(question) if question < batch.entries.len() => question,
+            Move::To(_) => index,
         }
     }
 
@@ -409,7 +411,7 @@ mod tests {
         questions.add(two_questions("a"), vec![1, 2]);
         assert_eq!(shown(&questions.send(1, with_ticks(2, &[2]))), 0);
         assert_eq!(questions.view(0).progress, [false, true]);
-        assert_eq!(questions.step(0, true), 1);
+        assert_eq!(questions.go(0, Move::Next), 1);
         assert!(questions.view(1).is_submitted);
         assert_eq!(shown(&questions.send(1, questions.draft(1))), 1);
         assert!(!questions.view(1).is_submitted);
@@ -427,8 +429,10 @@ mod tests {
         let mut ticked = Draft::new();
         ticked.pick.ticked = BTreeSet::from([2, 0]);
         assert_eq!(shown(&questions.send(1, ticked)), 2);
-        assert_eq!(questions.step(1, true), 2);
-        assert_eq!(questions.step(0, false), 2);
+        assert_eq!(questions.go(1, Move::Next), 2);
+        assert_eq!(questions.go(0, Move::Previous), 2);
+        assert_eq!(questions.go(2, Move::To(1)), 1);
+        assert_eq!(questions.go(2, Move::To(3)), 2);
         let review = questions.view(2);
         assert_eq!(review.form, Form::Review);
         assert_eq!(review.choices[1].label, "Checks: Lint, Types");

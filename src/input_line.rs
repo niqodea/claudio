@@ -28,7 +28,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::context::COLD_COLOR;
 use crate::keys::{self, Action, Phase, SessionKey, View};
 use crate::limits::{Level, limit_level};
-use crate::picker::{self, Cursor, Draft, Form, InputBox, Pick};
+use crate::picker::{self, Cursor, Draft, Form, InputBox, Move, Pick, question_name};
 use crate::render::{
     GREEN, LIGHT_CYAN, ORANGE, Output, STATUS_COLOR, Status, YELLOW, colors_at, cut, marks,
     start_bar_row,
@@ -73,10 +73,8 @@ pub enum Outcome<D> {
     /// The user opens the questions that wait, or goes back from them to the message, with the
     /// draft of what the user leaves.
     Questions(D),
-    /// The user moves to the next question, with the draft of the question left.
-    Next(D),
-    /// The user moves to the previous question, like `Next`.
-    Previous(D),
+    /// The user moves to another question, with the draft of the question left.
+    Go(D, Move),
     /// The user ends the session.
     End,
     /// Claude Code asked something, which the main thread acts on first, with the draft.
@@ -90,8 +88,7 @@ impl Outcome<()> {
             Outcome::Send(()) => Outcome::Send(draft),
             Outcome::Stop(()) => Outcome::Stop(draft),
             Outcome::Questions(()) => Outcome::Questions(draft),
-            Outcome::Next(()) => Outcome::Next(draft),
-            Outcome::Previous(()) => Outcome::Previous(draft),
+            Outcome::Go((), to) => Outcome::Go(draft, to),
             Outcome::End => Outcome::End,
             Outcome::Break(()) => Outcome::Break(draft),
         }
@@ -399,8 +396,7 @@ impl InputLine {
             }
             picker::Effect::Submit => Some(Outcome::Send(())),
             picker::Effect::Back => Some(Outcome::Questions(())),
-            picker::Effect::Next => Some(Outcome::Next(())),
-            picker::Effect::Previous => Some(Outcome::Previous(())),
+            picker::Effect::Go(to) => Some(Outcome::Go((), to)),
         })
     }
 
@@ -1157,12 +1153,10 @@ fn limit_indicator(letter: char, level: Option<Level>) -> String {
     format!("{color}{letter}{}", show_level(level.map(Level::to_number)))
 }
 
-/// Y and how many questions wait, up to 9 and + for more, which keeps one character for the
-/// count, in the color of a warning while any waits, since only the user moves them on.
-/// The batch's progress in the question view: each question's number, green once submitted,
-/// with the one shown in reverse video, which ends without a reset, so the bar stays behind
-/// them. Numbers keep the marks the same size, and match the
-/// review's rows.
+/// The batch's progress in the question view: each question's name, which is its key, green
+/// once submitted, with the one shown in reverse video, which ends without a reset, so the bar
+/// stays behind them. Letters keep the marks the same size, and set them apart from the
+/// options' numbers.
 fn progress(view: &View) -> String {
     view.progress
         .iter()
@@ -1174,12 +1168,14 @@ fn progress(view: &View) -> String {
             } else {
                 ("", "")
             };
-            format!("{color}{on}{}{off}", index + 1)
+            format!("{color}{on}{}{off}", question_name(index))
         })
         .collect::<Vec<_>>()
         .join(" ")
 }
 
+/// Y and how many questions wait, up to 9 and + for more, which keeps one character for the
+/// count, in the color of a warning while any waits, since only the user moves them on.
 fn waiting_indicator(waiting: usize) -> String {
     let (color, count) = match waiting {
         0 => (STATUS_COLOR, "0".to_string()),

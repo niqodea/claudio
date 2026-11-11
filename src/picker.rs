@@ -4,7 +4,9 @@
 //! pick that item too, which takes the cursor into the box. There, Enter finishes the answer, or
 //! on a question of several options ticks it as one more, and Esc in normal mode leaves the box.
 //!
-//! `]` and `[` move to the next and previous question, as they move between tabs in lazygit.
+//! `]` and `[` move to the next and previous question, as they move between tabs in lazygit, and
+//! the home row's `a`, `s`, `d` and `f` go straight to the first four, which letters name apart
+//! from the options' numbers.
 //! Ref: <https://coreyt.github.io/monospace-design-tui/standard/keyboard/>, on `[`/`]` for tabs
 
 use std::collections::BTreeSet;
@@ -15,6 +17,16 @@ use crate::render::{DIM, GREEN, LIGHT_CYAN, RESET, markdown_lines};
 
 /// The key of the user's own answer, and its mark, the same on every question.
 pub const OWN_KEY: char = '>';
+
+/// The keys that go to a batch's questions, which also name them. Claude Code asks at most four
+/// questions in a call, as of Claude Code 2.1.322, so a fifth would have no key, and its name
+/// would show as `·`.
+pub const QUESTION_KEYS: [char; 4] = ['a', 's', 'd', 'f'];
+
+/// The name of the batch's question at `index`.
+pub fn question_name(index: usize) -> char {
+    QUESTION_KEYS.get(index).copied().unwrap_or('·')
+}
 
 /// The most options Claude Code allows on a question, as of Claude Code 2.1.321, which checks a
 /// question's options against `.min(2).max(4)`. The options take as many rows on every question,
@@ -91,17 +103,37 @@ pub enum Effect {
     Submit,
     /// The user goes back to the message.
     Back,
-    /// The user moves to the next question.
+    /// The user moves to another question.
+    Go(Move),
+}
+
+/// Where the user moves among a batch's questions.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Move {
     Next,
-    /// The user moves to the previous question.
     Previous,
+    /// To the question at this index, from 0.
+    To(usize),
+}
+
+/// Where `key` moves among the questions: `]` and `[`, and the questions' own keys.
+fn move_of(key: &KeyEvent) -> Option<Move> {
+    match key.code {
+        KeyCode::Char(']') => Some(Move::Next),
+        KeyCode::Char('[') => Some(Move::Previous),
+        KeyCode::Char(name) => QUESTION_KEYS
+            .iter()
+            .position(|&key| key == name)
+            .map(Move::To),
+        _ => None,
+    }
 }
 
 /// What the keys depend on in the input box.
 #[derive(Clone, Copy)]
 pub struct InputBox {
     /// Whether the box is in normal mode with no command half typed, where Esc, `]` and `[`
-    /// leave it instead of acting as vi keys.
+    /// leave it instead of acting as vi keys. The questions' own keys stay vi keys there.
     pub is_idle: bool,
     pub is_empty: bool,
 }
@@ -201,6 +233,9 @@ impl Pick {
     }
 
     fn press_on_list(&mut self, key: &KeyEvent, choices: usize, form: Form) -> Effect {
+        if let Some(to) = move_of(key) {
+            return Effect::Go(to);
+        }
         let ticks = form != Form::One;
         match (key.code, self.cursor, form) {
             (KeyCode::Down | KeyCode::Char('j'), _, _) => self.move_down(choices, form),
@@ -221,6 +256,8 @@ impl Pick {
                 Effect::Stay
             }
             (KeyCode::Char(' '), Cursor::Own, Form::Several) => self.start_writing(),
+            // The review's rows are named by the questions' keys, which go to them
+            (KeyCode::Char('1'..='9'), _, Form::Review) => Effect::Stay,
             (KeyCode::Char(digit @ '1'..='9'), _, _) => {
                 let index = usize::from(digit as u8 - b'1');
                 if index >= choices {
@@ -236,8 +273,6 @@ impl Pick {
                 Effect::Stay
             }
             (KeyCode::Esc, _, _) => Effect::Back,
-            (KeyCode::Char(']'), _, _) => Effect::Next,
-            (KeyCode::Char('['), _, _) => Effect::Previous,
             _ => Effect::Stay,
         }
     }
@@ -251,19 +286,18 @@ impl Pick {
                 self.leave_box()
             }
             (KeyCode::Esc, _) if input.is_idle => self.leave_box(),
-            (KeyCode::Char(']'), _) if input.is_idle => Effect::Next,
-            (KeyCode::Char('['), _) if input.is_idle => Effect::Previous,
+            (KeyCode::Char(']'), _) if input.is_idle => Effect::Go(Move::Next),
+            (KeyCode::Char('['), _) if input.is_idle => Effect::Go(Move::Previous),
             _ => Effect::Type,
         }
     }
 
     /// Acts on `key` on a submitted question, whose answer stays as it is until Enter opens it.
     pub fn press_submitted(key: &KeyEvent) -> Effect {
-        match key.code {
-            KeyCode::Enter => Effect::Submit,
-            KeyCode::Esc => Effect::Back,
-            KeyCode::Char(']') => Effect::Next,
-            KeyCode::Char('[') => Effect::Previous,
+        match (key.code, move_of(key)) {
+            (_, Some(to)) => Effect::Go(to),
+            (KeyCode::Enter, _) => Effect::Submit,
+            (KeyCode::Esc, _) => Effect::Back,
             _ => Effect::Stay,
         }
     }
@@ -292,7 +326,8 @@ impl Chosen {
 
 /// The lines of `choices`, and of the item of the user's own answer, which says `own_label`. The
 /// pointer marks the item the cursor is on, dimmed while the cursor is in the box, and each item's
-/// key takes the width of a number's, `1.`, so the items line up. A submitted question shows its
+/// key takes the width of a number's, `1.`, so the items line up. The review's rows go by the
+/// names of their questions instead. A submitted question shows its
 /// answer, `submitted`, in green, marked as a tick marks an option, and dims the rest.
 pub fn lines(
     choices: &[Choice],
@@ -333,8 +368,13 @@ pub fn lines(
         .iter()
         .enumerate()
         .map(|(index, choice)| {
+            let key = if form == Form::Review {
+                question_name(index).to_string()
+            } else {
+                (index + 1).to_string()
+            };
             let start = start(
-                &format!("{}.", index + 1),
+                &format!("{key}."),
                 Cursor::Option(index),
                 pick.ticked.contains(&index),
             );
@@ -534,9 +574,9 @@ mod tests {
         pick.ticked = BTreeSet::from([0, 1, 2]);
         assert_eq!(press(&mut pick, Form::Review, "jjj>"), [Effect::Stay; 4]);
         assert_eq!(pick.cursor, Cursor::Option(2));
-        press(&mut pick, Form::Review, " 1");
-        assert_eq!(pick.ticked, BTreeSet::from([1]));
-        assert_eq!(hint(Form::Review, &pick, 3), "enter edits 2");
+        assert_eq!(press(&mut pick, Form::Review, " 1"), [Effect::Stay; 2]);
+        assert_eq!(pick.ticked, BTreeSet::from([0, 1]));
+        assert_eq!(hint(Form::Review, &pick, 3), "enter edits 1");
     }
 
     #[test]
@@ -546,7 +586,7 @@ mod tests {
         assert_eq!(Pick::press_submitted(&key(KeyCode::Esc)), Effect::Back);
         assert_eq!(
             Pick::press_submitted(&key(KeyCode::Char(']'))),
-            Effect::Next
+            Effect::Go(Move::Next)
         );
         for code in [KeyCode::Char('j'), KeyCode::Char('1'), KeyCode::Char(' ')] {
             assert_eq!(Pick::press_submitted(&key(code)), Effect::Stay);
@@ -554,16 +594,24 @@ mod tests {
     }
 
     #[test]
-    fn esc_goes_back_and_brackets_move_between_questions() {
+    fn esc_goes_back_and_brackets_and_asdf_move_between_questions() {
         let mut pick = pick(Cursor::Option(0));
         assert_eq!(
             press_code(&mut pick, Form::One, KeyCode::Esc, IDLE),
             Effect::Back
         );
         assert_eq!(
-            press(&mut pick, Form::One, "]["),
-            [Effect::Next, Effect::Previous]
+            press(&mut pick, Form::One, "][f"),
+            [
+                Effect::Go(Move::Next),
+                Effect::Go(Move::Previous),
+                Effect::Go(Move::To(3))
+            ]
         );
+        // In the box, they are vi keys
+        let mut writing = pick.clone();
+        writing.cursor = Cursor::Writing;
+        assert_eq!(press(&mut writing, Form::One, "a"), [Effect::Type]);
     }
 
     #[test]

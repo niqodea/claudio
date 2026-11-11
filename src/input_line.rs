@@ -110,8 +110,11 @@ pub struct InputLine {
     editor: Editor,
     /// What the user picks on the question the question view shows.
     pick: Pick,
-    /// What the label row warns of after the last key, an answer it held back.
-    warning: Option<Warning>,
+    /// Whether the last key's answer answered nothing, so the question view held it back, which
+    /// the label row says.
+    is_empty_warned: bool,
+    /// The key pressed once that waits for its second press in a row, which the label row says.
+    confirming: Option<Confirming>,
     layout: Layout,
     /// The first row of the text the box shows.
     scroll: u16,
@@ -163,7 +166,8 @@ impl InputLine {
             input_rows,
             editor: Editor::new(""),
             pick: Draft::new().pick,
-            warning: None,
+            is_empty_warned: false,
+            confirming: None,
             layout,
             scroll: 0,
             end: End::Before(row.min(lowest)),
@@ -208,6 +212,8 @@ impl InputLine {
     fn run(&mut self, phase: Phase) -> Result<Outcome<()>, String> {
         let answers = matches!(phase, Phase::Answering(_));
         lock(&self.shared).phase = phase;
+        // What a waiting key loses can change between readings, as with a question that arrives
+        self.confirming = None;
         if answers != self.in_view {
             self.switch_screen()?;
         }
@@ -296,11 +302,20 @@ impl InputLine {
     /// Acts on a key, with an outcome for one that ends the reading.
     fn key(&mut self, key: KeyEvent) -> Result<Option<Outcome<()>>, String> {
         let phase = lock(&self.shared).phase.clone();
-        let was_drop_warned = self.warning.take() == Some(Warning::LeavesOut);
+        self.is_empty_warned = false;
+        let confirming = self.confirming.take();
         let action = keys::action(&phase, &key, self.editor.is_empty());
         // Any key other than an edit cancels the half-typed vi command
         if action != Action::Edit {
             self.editor.cancel();
+        }
+        let message = keys::Message {
+            has_text: !self.text().trim().is_empty(),
+            is_cold: lock(&self.shared).context.is_cold(Instant::now()),
+        };
+        let loss = keys::loss(&phase, action, message);
+        if !self.goes_ahead(&key, confirming.as_ref(), loss) {
+            return Ok(None);
         }
         match action {
             Action::Session(SessionKey::Stop) => return Ok(Some(Outcome::Stop(()))),
@@ -324,7 +339,7 @@ impl InputLine {
             // The question view answers to Enter and the other keys on its own
             Action::Send | Action::Edit => {
                 if let Phase::Answering(view) = &phase {
-                    return self.answer_key(view, &key, was_drop_warned);
+                    return self.answer_key(view, &key, confirming.as_ref());
                 }
                 if action == Action::Send {
                     return Ok(Some(Outcome::Send(())));
@@ -336,14 +351,36 @@ impl InputLine {
         Ok(None)
     }
 
+    /// Whether `key` goes ahead: at once when it loses nothing, and else on its second press in
+    /// a row, which `confirming` holds the first of, with the same loss. A loss that changed
+    /// between the presses waits for a press more, so the user always saw what a key loses
+    /// before it goes ahead. Meanwhile the label row names the loss.
+    fn goes_ahead(
+        &mut self,
+        key: &KeyEvent,
+        confirming: Option<&Confirming>,
+        loss: Option<String>,
+    ) -> bool {
+        let Some(loss) = loss else {
+            return true;
+        };
+        let is_second = confirming.is_some_and(|first| {
+            first.key.code == key.code && first.key.modifiers == key.modifiers && first.loss == loss
+        });
+        if !is_second {
+            self.confirming = Some(Confirming { key: *key, loss });
+        }
+        is_second
+    }
+
     /// Acts on a key of the question view's that is not a session key, Enter among them. An
-    /// answer that leaves out the user's own text waits for the same key again, which the label
-    /// row asks for, and `was_drop_warned` says whether it did.
+    /// answer that leaves out the user's own text waits for the same key again, after
+    /// `confirming`, the key before.
     fn answer_key(
         &mut self,
         view: &View,
         key: &KeyEvent,
-        was_drop_warned: bool,
+        confirming: Option<&Confirming>,
     ) -> Result<Option<Outcome<()>>, String> {
         if view.is_submitted {
             return self.carry_out(Pick::press_submitted(key), key);
@@ -356,16 +393,14 @@ impl InputLine {
         let before = self.pick.clone();
         let effect = self.pick.press(key, view.choices.len(), view.form, input);
         if effect == picker::Effect::Submit && view.form != Form::Review {
-            let warning = if self.pick.chosen(view.form, &text).is_empty() {
-                Some(Warning::Empty)
-            } else if self.pick.leaves_out(view.form, &text) && !was_drop_warned {
-                Some(Warning::LeavesOut)
-            } else {
-                None
-            };
-            if warning.is_some() {
+            let is_empty = self.pick.chosen(view.form, &text).is_empty();
+            let loss = self
+                .pick
+                .leaves_out(view.form, &text)
+                .then(|| "leaves out your own answer".to_string());
+            if is_empty || !self.goes_ahead(key, confirming, loss) {
                 self.pick = before;
-                self.warning = warning;
+                self.is_empty_warned = is_empty;
                 return Ok(None);
             }
         }
@@ -415,6 +450,7 @@ impl InputLine {
     /// Pastes `text` into the box, which the question view takes the cursor into first, on a
     /// question open to answers.
     fn paste(&mut self, text: &str) {
+        self.confirming = None;
         let view = match &lock(&self.shared).phase {
             Phase::Answering(view) => Some(view.clone()),
             _ => None,
@@ -850,6 +886,14 @@ impl InputLine {
         write_out(&out)
     }
 
+    /// What the label row says while a key waits for its second press, in the color of a
+    /// warning.
+    fn confirmation(&self) -> Option<String> {
+        self.confirming
+            .as_ref()
+            .map(|first| format!("{ORANGE}{} again {}", keys::name(&first.key), first.loss))
+    }
+
     /// The label row: for a message, `››` with the context's level, marked and red on a cold
     /// cache, the levels of the plan's usage limits, and after them the questions that wait, in
     /// the color of a warning since only the user moves them on, or else what Claude does; for
@@ -857,10 +901,7 @@ impl InputLine {
     fn make_label(&self) -> String {
         let shared = lock(&self.shared);
         match &shared.phase {
-            Phase::Writing {
-                waiting,
-                refusal_confirmed,
-            } => {
+            Phase::Writing { waiting } => {
                 let now = Instant::now();
                 let level = shared.context.level();
                 let is_cold = shared.context.is_cold(now);
@@ -879,30 +920,20 @@ impl InputLine {
                     limit_indicator('W', shared.limits.week().map(limit_level)),
                     waiting_indicator(*waiting),
                 );
-                let state = if shared.context.is_cold_confirmed(now) {
-                    Some(format!("{COLD_COLOR}cold, enter sends"))
-                } else if *refusal_confirmed {
-                    let (questions, them) = if *waiting == 1 {
-                        ("question", "it")
-                    } else {
-                        ("questions", "them")
-                    };
-                    Some(format!(
-                        "{ORANGE}{waiting} {questions} waiting, enter refuses {them} and sends"
-                    ))
-                } else {
-                    describe_work(&shared.output)
-                };
+                let state = self
+                    .confirmation()
+                    .or_else(|| describe_work(&shared.output));
                 let state =
                     state.map_or_else(String::new, |state| format!(" {STATUS_COLOR}│ {state}"));
                 format!("{indicators}{state}")
             }
             Phase::Answering(view) => {
-                let hint = if let Some(warning) = self.warning {
-                    let text = match (warning, view.form) {
-                        (Warning::LeavesOut, _) => "press again to leave out your own answer",
-                        (Warning::Empty, Form::One) => "write your answer, or esc goes back",
-                        (Warning::Empty, _) => "tick one or more with space",
+                let hint = if let Some(confirmation) = self.confirmation() {
+                    confirmation
+                } else if self.is_empty_warned {
+                    let text = match view.form {
+                        Form::One => "write your answer, or esc goes back",
+                        _ => "tick one or more with space",
                     };
                     format!("{ORANGE}{text}")
                 } else if view.is_submitted {
@@ -922,19 +953,23 @@ impl InputLine {
                     .chain(describe_work(output))
                     .chain(background)
                     .collect();
-                format!("{} {STATUS_COLOR}{}", marks(), parts.join(" │ "))
+                let confirmation = self
+                    .confirmation()
+                    .map_or_else(String::new, |confirmation| format!(" │ {confirmation}"));
+                format!(
+                    "{} {STATUS_COLOR}{}{confirmation}",
+                    marks(),
+                    parts.join(" │ ")
+                )
             }
         }
     }
 }
 
-/// Why the question view held back an answer, which the label row says.
-#[derive(Clone, Copy, PartialEq)]
-enum Warning {
-    /// It would leave out the user's own text, so the same key again answers.
-    LeavesOut,
-    /// It answers nothing, so it waits for an option or the user's words.
-    Empty,
+/// A key pressed once that waits for its second press in a row, with what it loses.
+struct Confirming {
+    key: KeyEvent,
+    loss: String,
 }
 
 impl Drop for InputLine {

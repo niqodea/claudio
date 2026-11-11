@@ -1,8 +1,8 @@
 //! The conversation's context as the API holds it: how many tokens it has, and whether the API
 //! still keeps them in its prompt cache. Each call of Claude's reads the whole context, from the
 //! cache when it is warm. A call on a cold cache writes the whole context to the cache again, at
-//! a price above that of new input, so a message on a cold cache waits for the user to send it
-//! a second time.
+//! a price above that of new input, so a message on a cold cache is a press that `keys::loss`
+//! names.
 
 use std::time::{Duration, Instant};
 
@@ -26,9 +26,6 @@ pub struct Context {
     cache: Cache,
     /// The TTL of the cache entry, which the last call that wrote one told.
     ttl: Duration,
-    /// Whether the user sent the message on the input line once on the cold cache, so it goes
-    /// the next time.
-    is_cold_confirmed: bool,
     /// What the context can grow to, as Claude Code told it when the session started. It holds
     /// until the model or the settings change during the session, which leaves it out of date.
     ceiling: Option<Ceiling>,
@@ -51,7 +48,6 @@ impl Context {
             tokens: 0,
             cache: Cache::Starting,
             ttl: SHORTEST_TTL,
-            is_cold_confirmed: false,
             ceiling: None,
         }
     }
@@ -98,7 +94,6 @@ impl Context {
         }
         let cold_at = now + self.ttl;
         self.cache = Cache::WarmUntil(cold_at);
-        self.is_cold_confirmed = false;
         cold_at
     }
 
@@ -137,21 +132,10 @@ impl Context {
         }
     }
 
-    /// Whether the next message goes on the cold cache, as the user confirmed.
-    pub fn is_cold_confirmed(&self, now: Instant) -> bool {
-        self.is_cold(now) && self.is_cold_confirmed
-    }
-
-    /// Whether a message the user sends at `now` waits, which it does each time before Claude
-    /// Code tells whether the session had a call, and the first time on a cold cache. Each
-    /// message on a cold cache waits once, since a call that failed leaves the cache cold.
-    pub fn holds_message(&mut self, now: Instant) -> bool {
-        if let Cache::Starting = self.cache {
-            return true;
-        }
-        let holds = self.is_cold(now) && !self.is_cold_confirmed;
-        self.is_cold_confirmed = holds;
-        holds
+    /// Whether Claude Code has yet to tell whether the session had a call, which decides
+    /// whether the cache is cold, so a message waits.
+    pub fn is_starting(&self) -> bool {
+        matches!(self.cache, Cache::Starting)
     }
 }
 
@@ -171,7 +155,8 @@ mod tests {
         context.note_last_call(None);
         let now = Instant::now();
         assert_eq!(context.level(), Some(0));
-        assert!(!context.holds_message(now + HOUR));
+        assert!(!context.is_starting());
+        assert!(!context.is_cold(now + HOUR));
     }
 
     #[test]
@@ -204,44 +189,12 @@ mod tests {
     }
 
     #[test]
-    fn a_message_on_a_cold_cache_goes_the_second_time() {
-        let mut context = Context::new();
-        let now = Instant::now();
-        let cold_at = context.note_call(&usage(40_000, Some(HOUR)), now);
-        assert!(context.holds_message(cold_at));
-        assert!(context.is_cold_confirmed(cold_at));
-        assert!(!context.holds_message(cold_at));
-        assert!(!context.is_cold_confirmed(cold_at));
-    }
-
-    #[test]
-    fn the_next_message_on_a_cold_cache_waits_again() {
-        let mut context = Context::new();
-        let now = Instant::now();
-        let cold_at = context.note_call(&usage(40_000, Some(HOUR)), now);
-        context.holds_message(cold_at);
-        context.holds_message(cold_at);
-        assert!(context.holds_message(cold_at));
-    }
-
-    #[test]
-    fn a_call_ends_the_confirmation_of_the_cold_cache() {
-        let mut context = Context::new();
-        let now = Instant::now();
-        let cold_at = context.note_call(&usage(40_000, Some(HOUR)), now);
-        context.holds_message(cold_at);
-        let cold_again_at = context.note_call(&usage(40_000, Some(HOUR)), cold_at);
-        assert!(context.holds_message(cold_again_at));
-    }
-
-    #[test]
     fn a_message_waits_until_claude_code_tells_whether_the_session_is_new() {
-        let mut context = Context::new();
+        let context = Context::new();
         let now = Instant::now();
         assert_eq!(context.level(), None);
         assert!(!context.is_cold(now));
-        assert!(context.holds_message(now));
-        assert!(context.holds_message(now));
+        assert!(context.is_starting());
     }
 
     #[test]
@@ -251,7 +204,6 @@ mod tests {
         let now = Instant::now();
         assert_eq!(context.level(), Some(2));
         assert!(context.is_cold(now));
-        assert!(context.holds_message(now));
     }
 
     #[test]

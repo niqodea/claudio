@@ -6,7 +6,6 @@ use std::process::{Child, ChildStdin};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use uuid::Uuid;
 
@@ -109,7 +108,6 @@ impl<'a> Conversation<'a> {
                 None => {
                     let phase = Phase::Writing {
                         waiting: questions.count(),
-                        refusal_confirmed: questions.is_refusal_confirmed(),
                     };
                     match self.session.input.read(phase, &draft)? {
                         Outcome::End => return self.end_input(&mut questions),
@@ -143,16 +141,12 @@ impl<'a> Conversation<'a> {
         questions: &mut Questions,
     ) -> Result<(String, Option<usize>), String> {
         Ok(match outcome {
-            // A message while questions wait, or on a cold cache, stays on the input line the
-            // first time, and the label says what the next Enter does
+            // A message stays on the input line until Claude Code tells whether the session had a
+            // call, which tells whether the cache is cold
             Outcome::Send(text) => {
                 if text.trim().is_empty() {
                     (String::new(), None)
-                } else if questions.holds_message()
-                    || lock(&self.session.shared)
-                        .context
-                        .holds_message(Instant::now())
-                {
+                } else if lock(&self.session.shared).context.is_starting() {
                     (text, None)
                 } else {
                     for ask in questions.remove_all() {

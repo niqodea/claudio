@@ -14,19 +14,14 @@ pub enum Phase {
     /// for Ctrl-Y rather than taking the input box as it arrives, since a key typed just then
     /// would answer it. Claude Code's own interface instead puts a question in place of the
     /// input box, where typing only answers it, and refusing it ends the turn before the user
-    /// writes again. So the first Enter on a message keeps it in the box and sets
-    /// `refusal_confirmed`, and the second Enter refuses the waiting questions and sends it. A
-    /// question that arrives in between clears `refusal_confirmed`, so Enter never refuses a
-    /// question the user has not seen.
+    /// writes again. So Enter on a message refuses the waiting questions, which makes it a press
+    /// that `loss` names.
     ///
     /// Claude Code 2.1.321 also accepts a plain message while a question waits, though its
     /// interface never sends one: the message queues behind the question, and Claude reads it
     /// right after the answer, in the same turn. A message sent with send now cancels the
     /// question instead.
-    Writing {
-        waiting: usize,
-        refusal_confirmed: bool,
-    },
+    Writing { waiting: usize },
     /// Answers the question the question view shows.
     Answering(View),
     /// Has nothing more to say, while Claude finishes its work, which only Ctrl-C stops.
@@ -103,6 +98,77 @@ impl SessionKey {
     }
 }
 
+/// What sending the message loses besides itself.
+#[derive(Clone, Copy)]
+pub struct Message {
+    /// Whether the input has text, which Enter sends.
+    pub has_text: bool,
+    /// Whether the prompt cache is cold, so the call writes the whole context again, at a price
+    /// above that of new input.
+    pub is_cold: bool,
+}
+
+/// What `action` loses in `phase` that no key brings back, with `message` telling what sending
+/// loses. Such a press waits for the same key again in a row, which the input line carries out
+/// and the label row names the loss for, as Codex and Claude Code do for their exit keys. The
+/// label names the loss, since a confirmation guards only when it says what is about to happen,
+/// and it shows only for a loss, so the second press never becomes a habit. Stopping Claude's
+/// turn takes one press, as in every agent's interface: a message tells Claude to go on, and a
+/// stop delayed costs more than one made by mistake.
+/// Ref: <https://www.saasui.design/blog/saas-destructive-actions-confirmation-ux-patterns>, on
+/// a confirmation's text naming the outcome
+pub fn loss(phase: &Phase, action: Action, message: Message) -> Option<String> {
+    match (phase, action) {
+        (Phase::Writing { .. } | Phase::Answering(_), Action::Session(SessionKey::End)) => {
+            Some("ends the session".to_string())
+        }
+        (Phase::Writing { waiting }, Action::Session(SessionKey::Stop)) if *waiting > 0 => {
+            Some(format!("refuses {}", questions(*waiting)))
+        }
+        // The question view refuses the call it shows, with each of its questions
+        (Phase::Answering(view), Action::Session(SessionKey::Stop)) => {
+            Some(format!("refuses {}", questions(view.progress.len())))
+        }
+        // Claude Code stops its background tasks too, and exits
+        (Phase::Ending, Action::Session(SessionKey::Stop)) => Some("stops claude".to_string()),
+        (Phase::Writing { waiting }, Action::Send) if message.has_text => {
+            let refusal = (*waiting > 0).then(|| format!("refuses {} and ", questions(*waiting)));
+            let cache = message.is_cold.then_some(" on the cold cache");
+            (refusal.is_some() || cache.is_some()).then(|| {
+                format!(
+                    "{}sends{}",
+                    refusal.unwrap_or_default(),
+                    cache.unwrap_or_default()
+                )
+            })
+        }
+        _ => None,
+    }
+}
+
+fn questions(count: usize) -> String {
+    if count == 1 {
+        "the question".to_string()
+    } else {
+        format!("{count} questions")
+    }
+}
+
+/// The name of `key` on the label row, as the user knows it from the keyboard.
+pub fn name(key: &KeyEvent) -> String {
+    let base = match key.code {
+        KeyCode::Enter => "enter".to_string(),
+        KeyCode::Char(' ') => "space".to_string(),
+        KeyCode::Char(character) => character.to_string(),
+        code => code.to_string().to_lowercase(),
+    };
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        format!("ctrl-{base}")
+    } else {
+        base
+    }
+}
+
 /// What a key does.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
@@ -146,10 +212,7 @@ mod tests {
     }
 
     fn writing(waiting: usize) -> Phase {
-        Phase::Writing {
-            waiting,
-            refusal_confirmed: false,
-        }
+        Phase::Writing { waiting }
     }
 
     fn answering() -> Phase {
@@ -218,6 +281,97 @@ mod tests {
         for (key, expected) in cases {
             assert_eq!(action(&answering(), &key, false), expected);
         }
+    }
+
+    #[test]
+    fn a_press_that_loses_something_names_the_loss() {
+        let session = |key| Action::Session(key);
+        let warm = Message {
+            has_text: true,
+            is_cold: false,
+        };
+        let cold = Message {
+            has_text: true,
+            is_cold: true,
+        };
+        let empty = Message {
+            has_text: false,
+            is_cold: true,
+        };
+        let cases = [
+            (
+                writing(0),
+                session(SessionKey::End),
+                warm,
+                Some("ends the session"),
+            ),
+            (
+                answering(),
+                session(SessionKey::End),
+                warm,
+                Some("ends the session"),
+            ),
+            (
+                writing(1),
+                session(SessionKey::Stop),
+                warm,
+                Some("refuses the question"),
+            ),
+            (
+                writing(3),
+                session(SessionKey::Stop),
+                warm,
+                Some("refuses 3 questions"),
+            ),
+            (
+                answering(),
+                session(SessionKey::Stop),
+                warm,
+                Some("refuses 2 questions"),
+            ),
+            (
+                Phase::Ending,
+                session(SessionKey::Stop),
+                warm,
+                Some("stops claude"),
+            ),
+            (
+                writing(2),
+                Action::Send,
+                warm,
+                Some("refuses 2 questions and sends"),
+            ),
+            (
+                writing(0),
+                Action::Send,
+                cold,
+                Some("sends on the cold cache"),
+            ),
+            (
+                writing(1),
+                Action::Send,
+                cold,
+                Some("refuses the question and sends on the cold cache"),
+            ),
+            // Stopping Claude's turn, a warm message, an empty input and the rest lose nothing
+            (writing(0), session(SessionKey::Stop), warm, None),
+            (writing(0), Action::Send, warm, None),
+            (writing(2), Action::Send, empty, None),
+            (answering(), Action::Send, cold, None),
+            (writing(2), session(SessionKey::Questions), warm, None),
+            (writing(0), Action::Edit, cold, None),
+        ];
+        for (phase, action, message, expected) in cases {
+            assert_eq!(loss(&phase, action, message).as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn keys_go_by_their_keyboard_names() {
+        assert_eq!(name(&control('c')), "ctrl-c");
+        assert_eq!(name(&plain(KeyCode::Enter)), "enter");
+        assert_eq!(name(&plain(KeyCode::Char(' '))), "space");
+        assert_eq!(name(&plain(KeyCode::Char('2'))), "2");
     }
 
     #[test]

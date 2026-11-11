@@ -63,11 +63,22 @@ Keys come in two kinds.
 
 **Every other key works on your text.** Enter sends it, and the rest edit it with vi keys, where `:` in normal mode opens the text in your editor. While a vi command is half typed, its keys show at the right end of the label row. Enter and the session keys still do their usual job then, and cancel the half-typed command. To clear the input, use vi, like `S` or `ggdG` in normal mode; `u` brings it back.
 
+A key that loses what no key brings back waits for a second press in a row, and the label row names the loss in orange, like `enter again refuses 2 questions and sends on the cold cache`.
+These keys are:
+
+- Ctrl-D
+- Ctrl-C on questions, and while the session ends, where it stops Claude's background tasks too
+- Enter on a message while questions wait, which refuses them, or on a cold cache, where the call writes the whole context to the cache again, at a price above that of new input
+- a key that answers a question and leaves out your own text
+
+Ctrl-C stops Claude's turn at once, since a message tells Claude to go on.
+Any other key, or a paste, cancels the wait, however long it lasted, and a loss that changes in between waits for one press more.
+
 ## Questions
 
 Claude's questions, the choices of `AskUserQuestion`, wait until you open them, so no key meant for your message answers one.
 `Y` on the label row counts them, up to 9 and then `+`, in orange while any waits.
-Meanwhile, the first Enter on a message keeps it in the box, and the label says how many questions a second Enter refuses before sending the message.
+Meanwhile, Enter on a message refuses them, so it waits for a second press.
 Ctrl-Y shows them one at a time, and Ctrl-Y goes back to the message, as Esc does on the list.
 The right end of the label row names the call's questions `a`, `s`, `d` and `f`, green once submitted, with the one shown in reverse.
 A question longer than the screen ends in `… Ctrl-O shows it whole`: Ctrl-O there opens the whole conversation at the question, to read with less's keys, and `q` brings you back to answer.
@@ -91,7 +102,7 @@ Either takes you into the box, at the end of your text, in insert mode, where th
 There, Enter submits your answer, or on several choices, ticks it as one more item and takes you back to the list.
 Esc in normal mode takes you back to the list too, keeping the text without ticking it, and `]`/`[` in normal mode go to another question.
 Space on your own ticked answer unticks it, keeping the text.
-An answer that leaves out the text you wrote waits for the same key again, and the label row says so in orange.
+An answer that leaves out the text you wrote waits for the same key again.
 Every question needs an answer, so Enter on several choices with none ticked waits too, and to answer none, you write it.
 Claude Code instead lets a question go unanswered, which Claude can't tell from a choice of none.
 Ctrl-N/Ctrl-P move between the options from anywhere, the box too.

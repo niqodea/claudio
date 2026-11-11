@@ -22,9 +22,6 @@ pub struct Questions {
     /// The calls that ask, oldest first, of which the question view shows the first. Claude asks
     /// in one call at a time in practice, and calls asked together wait in line.
     batches: VecDeque<Batch>,
-    /// Whether the user pressed Enter on a message once while these questions wait, so the next
-    /// Enter refuses them.
-    is_refusal_confirmed: bool,
 }
 
 /// A call that asks, with each of its questions.
@@ -96,7 +93,6 @@ impl Questions {
         let AskKind::Questions(questions) = &ask.kind else {
             return;
         };
-        self.is_refusal_confirmed = false;
         let entries = full_view_lines
             .into_iter()
             .take(questions.len())
@@ -107,19 +103,6 @@ impl Questions {
             })
             .collect();
         self.batches.push_back(Batch { ask, entries });
-    }
-
-    pub fn is_refusal_confirmed(&self) -> bool {
-        self.is_refusal_confirmed && !self.is_empty()
-    }
-
-    /// Whether a message the user sends stays in the input box, which it does the first time
-    /// while questions wait. The confirmation lasts until the questions are refused or a new
-    /// question arrives.
-    pub fn holds_message(&mut self) -> bool {
-        let holds = !self.is_empty() && !self.is_refusal_confirmed;
-        self.is_refusal_confirmed |= holds;
-        holds
     }
 
     pub fn count(&self) -> usize {
@@ -268,7 +251,6 @@ impl Questions {
 
     /// Takes away every call, and returns what they asked, to refuse.
     pub fn remove_all(&mut self) -> Vec<Ask> {
-        self.is_refusal_confirmed = false;
         self.batches.drain(..).map(|batch| batch.ask).collect()
     }
 
@@ -498,21 +480,6 @@ mod tests {
         assert_eq!(choose(checks, &unticked).as_deref(), Some("Tests"));
         // With nothing ticked, nothing, whatever the cursor is on
         assert!(choose(checks, &draft(Cursor::Option(2), "")).is_none());
-    }
-
-    #[test]
-    fn a_message_refuses_the_questions_only_the_second_time_and_none_unseen() {
-        let mut questions = Questions::default();
-        assert!(!questions.holds_message());
-        questions.add(one_question("a"), vec![1]);
-        assert!(questions.holds_message());
-        assert!(questions.is_refusal_confirmed());
-        questions.add(one_question("b"), vec![2]);
-        assert!(!questions.is_refusal_confirmed());
-        assert!(questions.holds_message());
-        assert!(!questions.holds_message());
-        questions.remove_all();
-        assert!(!questions.is_refusal_confirmed());
     }
 
     #[test]

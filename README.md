@@ -99,7 +99,7 @@ Claude's questions, the choices of `AskUserQuestion`, wait until you open them, 
 `Y` on the label row counts them, up to 9 and then `+`, in orange while any waits.
 Meanwhile, Enter on a message refuses them, so it waits for a second press.
 Ctrl-Y shows them one at a time, and Ctrl-Y goes back to the message, as Esc does on the list.
-The right end of the label row names the call's questions `a`, `s`, `d` and `f`, green once submitted, with the one shown in reverse.
+The right end of the label row names the call's questions `a`, `s`, `d` and `f`, green once submitted, with the one shown in reverse, when the call has more than one.
 A question longer than the screen ends in `… Ctrl-O shows it whole`: Ctrl-O there opens the whole conversation at the question, to read with less's keys, and `q` brings you back to answer.
 
 Each question shows its options as numbered lines between the label row and the input box, and last, an item marked `>` for your own answer, which you write in the box.

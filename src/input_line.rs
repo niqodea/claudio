@@ -778,7 +778,7 @@ impl InputLine {
         put_bar_line(out, label_row, &self.label);
         let pending = self.editor.pending();
         let pending = (!pending.is_empty()).then(|| format!("{STATUS_COLOR}{pending}"));
-        let right: Vec<String> = [pending, view.map(progress)]
+        let right: Vec<String> = [pending, view.and_then(progress)]
             .into_iter()
             .flatten()
             .collect();
@@ -1217,25 +1217,30 @@ fn limit_indicator(letter: char, level: Option<Level>) -> String {
     format!("{color}{letter}{}", show_level(level.map(Level::to_number)))
 }
 
-/// The batch's progress in the question view: each question's name, which is its key, green
-/// once submitted, with the one shown in reverse video, which ends without a reset, so the bar
-/// stays behind them. Letters keep the marks the same size, and set them apart from the
-/// options' numbers.
-fn progress(view: &View) -> String {
-    view.progress
-        .iter()
-        .enumerate()
-        .map(|(index, &is_submitted)| {
-            let color = if is_submitted { GREEN } else { STATUS_COLOR };
-            let (on, off) = if index == view.index {
-                ("\x1b[7m", "\x1b[27m")
-            } else {
-                ("", "")
-            };
-            format!("{color}{on}{}{off}", question_name(index))
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+/// The batch's progress in the question view: the names of its questions.
+fn progress(view: &View) -> Option<String> {
+    names(&view.progress, view.index, question_name)
+}
+
+/// The names of the items of one level of the question view, like the questions of a batch:
+/// each item's name, which is its key, green once `done`, with the one `shown` in reverse video,
+/// which ends without a reset, so the bar stays behind them. Letters keep the marks the same
+/// size, and set them apart from the options' numbers. A level of one item has nothing to move
+/// to, so it shows no names.
+fn names(done: &[bool], shown: usize, name: fn(usize) -> char) -> Option<String> {
+    if done.len() < 2 {
+        return None;
+    }
+    let names = done.iter().enumerate().map(|(index, &is_done)| {
+        let color = if is_done { GREEN } else { STATUS_COLOR };
+        let (on, off) = if index == shown {
+            ("\x1b[7m", "\x1b[27m")
+        } else {
+            ("", "")
+        };
+        format!("{color}{on}{}{off}", name(index))
+    });
+    Some(names.collect::<Vec<_>>().join(" "))
 }
 
 /// Y and how many questions wait, up to 9 and + for more, which keeps one character for the
@@ -1344,6 +1349,14 @@ fn describe_work(output: &Output) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_level_names_its_items_only_when_it_has_several() {
+        assert_eq!(names(&[false], 0, question_name), None);
+        let two = names(&[true, false], 1, question_name).expect("names");
+        assert!(two.contains(&format!("{GREEN}a")));
+        assert!(two.contains("\x1b[7ms"));
+    }
 
     const BOLD: &str = "\x1b[1m";
 

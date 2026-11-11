@@ -64,6 +64,10 @@ pub enum SessionKey {
     Stop,
     /// Ctrl-D: ends the session, refusing what Claude asks.
     End,
+    /// Ctrl-L: clears the context, refusing what Claude asks and stopping Claude's turn, and
+    /// keeps the text, which can be the new context's first message. Ctrl-L clears the screen
+    /// in a shell, and starts a new session here, whose start a line marks in the conversation.
+    Clear,
     /// Ctrl-O: shows the whole conversation, from the question the question view shows.
     ShowFullView,
     /// Ctrl-S: shows the status.
@@ -88,6 +92,7 @@ impl SessionKey {
         match key.code {
             KeyCode::Char('c') => Some(SessionKey::Stop),
             KeyCode::Char('d') => Some(SessionKey::End),
+            KeyCode::Char('l') => Some(SessionKey::Clear),
             KeyCode::Char('o') => Some(SessionKey::ShowFullView),
             KeyCode::Char('s') => Some(SessionKey::ShowStatus),
             KeyCode::Char('y') => Some(SessionKey::Questions),
@@ -98,18 +103,28 @@ impl SessionKey {
     }
 }
 
-/// What sending the message loses besides itself.
+/// What the session holds that a press can lose.
 #[derive(Clone, Copy)]
-pub struct Message {
+pub struct Stakes {
     /// Whether the input has text, which Enter sends.
     pub has_text: bool,
-    /// Whether the prompt cache is cold, so the call writes the whole context again, at a price
-    /// above that of new input.
-    pub is_cold: bool,
+    pub held: Held,
+    /// Whether Claude works on a turn.
+    pub is_working: bool,
 }
 
-/// What `action` loses in `phase` that no key brings back, with `message` telling what sending
-/// loses. Such a press waits for the same key again in a row, which the input line carries out
+/// What the context holds, which a clear loses, and whether the prompt cache still keeps it.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Held {
+    Nothing,
+    Warm,
+    /// The cache is cold, so the next call writes the whole context again, at a price above
+    /// that of new input.
+    Cold,
+}
+
+/// What `action` loses in `phase` that no key brings back, with `stakes` telling what the
+/// session holds. Such a press waits for the same key again in a row, which the input line carries out
 /// and the label row names the loss for, as Codex and Claude Code do for their exit keys. The
 /// label names the loss, since a confirmation guards only when it says what is about to happen,
 /// and it shows only for a loss, so the second press never becomes a habit. Stopping Claude's
@@ -117,7 +132,7 @@ pub struct Message {
 /// stop delayed costs more than one made by mistake.
 /// Ref: <https://www.saasui.design/blog/saas-destructive-actions-confirmation-ux-patterns>, on
 /// a confirmation's text naming the outcome
-pub fn loss(phase: &Phase, action: Action, message: Message) -> Option<String> {
+pub fn loss(phase: &Phase, action: Action, stakes: Stakes) -> Option<String> {
     match (phase, action) {
         (Phase::Writing { .. } | Phase::Answering(_), Action::Session(SessionKey::End)) => {
             Some("ends the session".to_string())
@@ -131,9 +146,9 @@ pub fn loss(phase: &Phase, action: Action, message: Message) -> Option<String> {
         }
         // Claude Code stops its background tasks too, and exits
         (Phase::Ending, Action::Session(SessionKey::Stop)) => Some("stops claude".to_string()),
-        (Phase::Writing { waiting }, Action::Send) if message.has_text => {
+        (Phase::Writing { waiting }, Action::Send) if stakes.has_text => {
             let refusal = (*waiting > 0).then(|| format!("refuses {} and ", questions(*waiting)));
-            let cache = message.is_cold.then_some(" on the cold cache");
+            let cache = (stakes.held == Held::Cold).then_some(" on the cold cache");
             (refusal.is_some() || cache.is_some()).then(|| {
                 format!(
                     "{}sends{}",
@@ -141,6 +156,21 @@ pub fn loss(phase: &Phase, action: Action, message: Message) -> Option<String> {
                     cache.unwrap_or_default()
                 )
             })
+        }
+        // The session goes on in a new one, but the clear loses the cache, and with questions
+        // waiting or Claude working, what the turn would have done. Refusing a question stops
+        // the turn too
+        (Phase::Writing { waiting }, Action::Session(SessionKey::Clear))
+            if stakes.held != Held::Nothing =>
+        {
+            let turn = if *waiting > 0 {
+                format!("refuses {} and ", questions(*waiting))
+            } else if stakes.is_working {
+                "stops claude and ".to_string()
+            } else {
+                String::new()
+            };
+            Some(format!("{turn}clears the context"))
         }
         _ => None,
     }
@@ -190,6 +220,7 @@ pub fn action(phase: &Phase, key: &KeyEvent, is_empty: bool) -> Action {
     match (phase, SessionKey::of(key)) {
         (Phase::Ending, Some(SessionKey::Stop)) => Action::Session(SessionKey::Stop),
         (Phase::Ending, _)
+        | (Phase::Answering(_), Some(SessionKey::Clear))
         | (Phase::Writing { waiting: 0, .. }, Some(SessionKey::Questions))
         | (Phase::Writing { .. }, Some(SessionKey::Down | SessionKey::Up)) => Action::Ignore,
         (_, Some(SessionKey::End)) if !is_empty => Action::Ignore,
@@ -283,87 +314,105 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_press_that_loses_something_names_the_loss() {
-        let session = |key| Action::Session(key);
-        let warm = Message {
-            has_text: true,
-            is_cold: false,
-        };
-        let cold = Message {
-            has_text: true,
-            is_cold: true,
-        };
-        let empty = Message {
-            has_text: false,
-            is_cold: true,
-        };
-        let cases = [
-            (
-                writing(0),
-                session(SessionKey::End),
-                warm,
-                Some("ends the session"),
-            ),
-            (
-                answering(),
-                session(SessionKey::End),
-                warm,
-                Some("ends the session"),
-            ),
-            (
-                writing(1),
-                session(SessionKey::Stop),
-                warm,
-                Some("refuses the question"),
-            ),
-            (
-                writing(3),
-                session(SessionKey::Stop),
-                warm,
-                Some("refuses 3 questions"),
-            ),
-            (
-                answering(),
-                session(SessionKey::Stop),
-                warm,
-                Some("refuses 2 questions"),
-            ),
-            (
-                Phase::Ending,
-                session(SessionKey::Stop),
-                warm,
-                Some("stops claude"),
-            ),
-            (
-                writing(2),
-                Action::Send,
-                warm,
-                Some("refuses 2 questions and sends"),
-            ),
-            (
-                writing(0),
-                Action::Send,
-                cold,
-                Some("sends on the cold cache"),
-            ),
-            (
-                writing(1),
-                Action::Send,
-                cold,
-                Some("refuses the question and sends on the cold cache"),
-            ),
-            // Stopping Claude's turn, a warm message, an empty input and the rest lose nothing
-            (writing(0), session(SessionKey::Stop), warm, None),
-            (writing(0), Action::Send, warm, None),
-            (writing(2), Action::Send, empty, None),
-            (answering(), Action::Send, cold, None),
-            (writing(2), session(SessionKey::Questions), warm, None),
-            (writing(0), Action::Edit, cold, None),
-        ];
-        for (phase, action, message, expected) in cases {
-            assert_eq!(loss(&phase, action, message).as_deref(), expected);
+    const WARM: Stakes = Stakes {
+        has_text: true,
+        held: Held::Warm,
+        is_working: false,
+    };
+
+    const COLD: Stakes = Stakes {
+        held: Held::Cold,
+        ..WARM
+    };
+
+    fn assert_losses(action: Action, cases: Vec<(Phase, Stakes, Option<&str>)>) {
+        for (phase, stakes, expected) in cases {
+            assert_eq!(loss(&phase, action, stakes).as_deref(), expected);
         }
+    }
+
+    #[test]
+    fn ctrl_c_and_ctrl_d_name_what_they_end_and_a_stopped_turn_takes_one_press() {
+        let end = Action::Session(SessionKey::End);
+        assert_losses(
+            end,
+            vec![
+                (writing(0), WARM, Some("ends the session")),
+                (answering(), WARM, Some("ends the session")),
+            ],
+        );
+        let stop = Action::Session(SessionKey::Stop);
+        let working = Stakes {
+            is_working: true,
+            ..WARM
+        };
+        assert_losses(
+            stop,
+            vec![
+                (writing(1), WARM, Some("refuses the question")),
+                (writing(3), WARM, Some("refuses 3 questions")),
+                (answering(), WARM, Some("refuses 2 questions")),
+                (Phase::Ending, WARM, Some("stops claude")),
+                (writing(0), working, None),
+            ],
+        );
+        let questions = Action::Session(SessionKey::Questions);
+        assert_losses(questions, vec![(writing(2), WARM, None)]);
+        assert_losses(Action::Edit, vec![(writing(0), COLD, None)]);
+    }
+
+    #[test]
+    fn a_message_names_the_questions_it_refuses_and_the_cold_cache() {
+        let empty = Stakes {
+            has_text: false,
+            ..COLD
+        };
+        assert_losses(
+            Action::Send,
+            vec![
+                (writing(2), WARM, Some("refuses 2 questions and sends")),
+                (writing(0), COLD, Some("sends on the cold cache")),
+                (
+                    writing(1),
+                    COLD,
+                    Some("refuses the question and sends on the cold cache"),
+                ),
+                (writing(0), WARM, None),
+                (writing(2), empty, None),
+                // The question view holds back an answer on its own
+                (answering(), COLD, None),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_clear_names_the_turn_it_ends_and_an_empty_context_has_nothing_to_lose() {
+        let working = Stakes {
+            is_working: true,
+            ..WARM
+        };
+        let empty = Stakes {
+            has_text: false,
+            held: Held::Nothing,
+            ..WARM
+        };
+        assert_losses(
+            Action::Session(SessionKey::Clear),
+            vec![
+                (writing(0), WARM, Some("clears the context")),
+                (
+                    writing(0),
+                    working,
+                    Some("stops claude and clears the context"),
+                ),
+                (
+                    writing(2),
+                    working,
+                    Some("refuses 2 questions and clears the context"),
+                ),
+                (writing(0), empty, None),
+            ],
+        );
     }
 
     #[test]
@@ -372,6 +421,17 @@ mod tests {
         assert_eq!(name(&plain(KeyCode::Enter)), "enter");
         assert_eq!(name(&plain(KeyCode::Char(' '))), "space");
         assert_eq!(name(&plain(KeyCode::Char('2'))), "2");
+    }
+
+    #[test]
+    fn ctrl_l_clears_from_the_message_with_text_too() {
+        for is_empty in [false, true] {
+            assert_eq!(
+                action(&writing(2), &control('l'), is_empty),
+                Action::Session(SessionKey::Clear)
+            );
+        }
+        assert_eq!(action(&answering(), &control('l'), true), Action::Ignore);
     }
 
     #[test]

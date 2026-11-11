@@ -26,12 +26,12 @@ use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlt
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::context::COLD_COLOR;
-use crate::keys::{self, Action, Phase, SessionKey, View};
+use crate::keys::{self, Action, Held, Phase, SessionKey, View};
 use crate::limits::{Level, limit_level};
 use crate::picker::{self, Cursor, Draft, Form, InputBox, Move, Pick, question_name};
 use crate::render::{
     GREEN, LIGHT_CYAN, ORANGE, Output, STATUS_COLOR, Status, YELLOW, colors_at, cut, marks,
-    start_bar_row,
+    session_line, start_bar_row,
 };
 use crate::status;
 use crate::terminal::{Settings, run_in_terminal};
@@ -77,6 +77,8 @@ pub enum Outcome<D> {
     Go(D, Move),
     /// The user ends the session.
     End,
+    /// The user clears the context, with the draft, which stays.
+    Clear(D),
     /// Claude Code asked something, which the main thread acts on first, with the draft.
     Break(D),
 }
@@ -90,6 +92,7 @@ impl Outcome<()> {
             Outcome::Questions(()) => Outcome::Questions(draft),
             Outcome::Go((), to) => Outcome::Go(draft, to),
             Outcome::End => Outcome::End,
+            Outcome::Clear(()) => Outcome::Clear(draft),
             Outcome::Break(()) => Outcome::Break(draft),
         }
     }
@@ -309,17 +312,29 @@ impl InputLine {
         if action != Action::Edit {
             self.editor.cancel();
         }
-        let message = keys::Message {
-            has_text: !self.text().trim().is_empty(),
-            is_cold: lock(&self.shared).context.is_cold(Instant::now()),
+        let stakes = {
+            let shared = lock(&self.shared);
+            let held = if !shared.context.has_conversation() {
+                Held::Nothing
+            } else if shared.context.is_cold(Instant::now()) {
+                Held::Cold
+            } else {
+                Held::Warm
+            };
+            keys::Stakes {
+                has_text: !self.text().trim().is_empty(),
+                held,
+                is_working: shared.output.status() != Status::Idle,
+            }
         };
-        let loss = keys::loss(&phase, action, message);
+        let loss = keys::loss(&phase, action, stakes);
         if !self.goes_ahead(&key, confirming.as_ref(), loss) {
             return Ok(None);
         }
         match action {
             Action::Session(SessionKey::Stop) => return Ok(Some(Outcome::Stop(()))),
             Action::Session(SessionKey::End) => return Ok(Some(Outcome::End)),
+            Action::Session(SessionKey::Clear) => return Ok(Some(Outcome::Clear(()))),
             Action::Session(SessionKey::Questions) => return Ok(Some(Outcome::Questions(()))),
             Action::Session(direction @ (SessionKey::Down | SessionKey::Up)) => {
                 if let Phase::Answering(view) = &phase
@@ -1168,12 +1183,7 @@ fn cannot_read_terminal(error: &io::Error) -> String {
 
 /// The last line of the session, on the bar, with the session's id once Claude Code told it.
 pub fn final_line(session_id: Option<&str>) -> String {
-    let session = session_id.map_or_else(String::new, |id| format!(" │ session {id}"));
-    format!(
-        "{}{} {STATUS_COLOR}ended{session}{RESET}",
-        start_bar_row(),
-        marks()
-    )
+    session_line("ended", session_id)
 }
 
 /// A level, with ? for one not known yet.

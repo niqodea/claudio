@@ -220,6 +220,16 @@ impl Output {
         self.interruption = None;
     }
 
+    /// Marks where the context was cleared, which ended the session with `previous_session`, so
+    /// the conversation reads as a new one from there.
+    pub fn show_reset(&mut self, previous_session: &str) {
+        self.end_text();
+        // The line follows the one before, as the user's message does
+        self.pending_break = None;
+        self.emit(&session_line("cleared", Some(previous_session)));
+        self.position = Position::Start;
+    }
+
     /// Shows the user's answer to what a tool asks, after the question.
     pub fn show_answer(&mut self, question: &str, text: &str) {
         self.push(&format!(
@@ -565,6 +575,17 @@ impl Output {
         }
         first
     }
+}
+
+/// A line on the bar, as the label row shows its state, that marks the end of the session with
+/// `session_id`, by how it ended, as `--resume` takes the id to go back to it.
+pub fn session_line(how: &str, session_id: Option<&str>) -> String {
+    let session = session_id.map_or_else(String::new, |id| format!(" │ session {id}"));
+    format!(
+        "{}{} {STATUS_COLOR}{how}{session}{RESET}",
+        start_bar_row(),
+        marks()
+    )
 }
 
 /// The start of a row on the bar, which fills the whole row.

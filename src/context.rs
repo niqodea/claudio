@@ -132,6 +132,17 @@ impl Context {
         }
     }
 
+    /// Whether the context holds a conversation, which a session that had a call does.
+    pub fn has_conversation(&self) -> bool {
+        matches!(self.cache, Cache::WarmUntil(_) | Cache::Unknown)
+    }
+
+    /// Starts over for a cleared context, which holds nothing yet, as a new session's.
+    pub fn reset(&mut self) {
+        self.tokens = 0;
+        self.cache = Cache::Empty;
+    }
+
     /// Whether Claude Code has yet to tell whether the session had a call, which decides
     /// whether the cache is cold, so a message waits.
     pub fn is_starting(&self) -> bool {
@@ -195,6 +206,18 @@ mod tests {
         assert_eq!(context.level(), None);
         assert!(!context.is_cold(now));
         assert!(context.is_starting());
+    }
+
+    #[test]
+    fn a_cleared_context_holds_nothing_and_sends_at_once() {
+        let mut context = Context::new();
+        let now = Instant::now();
+        let cold_at = context.note_call(&usage(90_000, Some(HOUR)), now);
+        assert!(context.has_conversation());
+        context.reset();
+        assert!(!context.has_conversation());
+        assert!(!context.is_cold(cold_at));
+        assert_eq!(context.level(), Some(0));
     }
 
     #[test]

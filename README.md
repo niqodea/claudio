@@ -55,6 +55,7 @@ Keys come in two kinds.
 | ------ | -------------------------------------------------------- |
 | Ctrl-C | stops Claude's turn, or refuses what Claude asks         |
 | Ctrl-D | ends the session, when the input is empty                |
+| Ctrl-L | clears the context with a new session, keeping your text |
 | Ctrl-O | shows the whole conversation                             |
 | Ctrl-S | shows the status                                         |
 | Ctrl-Y | opens the questions Claude asks, or goes back from them  |
@@ -67,12 +68,17 @@ A key that loses what no key brings back waits for a second press in a row, and 
 These keys are:
 
 - Ctrl-D
+- Ctrl-L, once the session had a call, which also refuses the questions that wait, or else stops Claude's turn
 - Ctrl-C on questions, and while the session ends, where it stops Claude's background tasks too
 - Enter on a message while questions wait, which refuses them, or on a cold cache, where the call writes the whole context to the cache again, at a price above that of new input
 - a key that answers a question and leaves out your own text
 
 Ctrl-C stops Claude's turn at once, since a message tells Claude to go on.
 Any other key, or a paste, cancels the wait, however long it lasted, and a loss that changes in between waits for one press more.
+
+Ctrl-L starts a new session, as Claude Code's `/clear` does, and keeps your text in the box, ready to be the new session's first message.
+The conversation marks the new start with a line like `›› cleared │ session <id>`, which names the session it ended, and `claude --resume <id>` goes back to.
+Text you send that starts with `/` reaches Claude as written, so a `/clear` you type is a message like any other.
 
 ## Questions
 

@@ -50,6 +50,11 @@ pub enum Event {
     PayingKey(String),
     /// The id of the session, which `--resume` takes.
     SessionId(String),
+    /// The context was cleared, which ends the session with this id, the one `--resume` takes
+    /// to go back to it. A new session follows, whose id arrives next.
+    Reset {
+        previous_session: String,
+    },
     /// A call of Claude's to the API, whose reply starts.
     Call(Usage),
     /// The last call of the session as Claude Code starts it, none in a new session.
@@ -175,6 +180,9 @@ pub enum Command<'a> {
         id: &'a str,
         text: &'a str,
     },
+    /// Clears the context, as Claude Code's `/clear` does, which starts a new session. Claude
+    /// Code runs the command right after a turn it was told to stop.
+    Clear,
     Answer(&'a Ask, Answer),
     Interrupt {
         request_id: String,
@@ -231,6 +239,14 @@ impl Command<'_> {
                 // also holds back the context Claude Code attaches to the turn until Claude's
                 // first tool call, so only such a message carries it.
                 "client_composed": text.starts_with('/'),
+            }),
+            // Claude Code runs a message that starts with / as a command, so this one carries no
+            // mark of a message composed by the client
+            Command::Clear => json!({
+                "type": "user",
+                "session_id": "",
+                "message": {"role": "user", "content": "/clear"},
+                "parent_tool_use_id": null,
             }),
             Command::Answer(ask, answer) => {
                 let result = match answer {
@@ -389,6 +405,9 @@ pub fn read_events(line: &str) -> Result<Vec<Event>, String> {
         }],
         Message::RateLimitEvent { rate_limit_info } => vec![read_limits(rate_limit_info)],
         Message::System(System::Init { session_id }) => vec![Event::SessionId(session_id)],
+        Message::ConversationReset { session_id } => vec![Event::Reset {
+            previous_session: session_id,
+        }],
         Message::System(System::SessionStateChanged { state }) => vec![Event::State(state)],
         Message::System(System::BackgroundTasksChanged { tasks }) => vec![Event::BackgroundTasks(
             tasks.into_iter().map(|task| task.description).collect(),
@@ -562,6 +581,12 @@ enum Message {
         rate_limit_info: RateLimitInfo,
     },
     System(System),
+    /// Undocumented, seen with Claude Code 2.1.322: `/clear` sends this, then the new
+    /// session's init, then a result that ends a turn of no calls. Its `session_id` is the
+    /// cleared session's.
+    ConversationReset {
+        session_id: String,
+    },
     #[serde(other)]
     Other,
 }
@@ -1128,6 +1153,29 @@ mod tests {
             events.as_slice(),
             [.., Event::Ceiling(Ceiling::Window(1_000_000))]
         ));
+    }
+
+    #[test]
+    fn a_cleared_context_tells_the_session_it_ends() {
+        let line = json!({
+            "type": "conversation_reset",
+            "new_conversation_id": "c2",
+            "trigger": "clear",
+            "session_id": "a1",
+        })
+        .to_string();
+        let events = read_events(&line).expect("a readable line");
+        assert!(matches!(
+            events.as_slice(),
+            [Event::Reset { previous_session }] if previous_session == "a1"
+        ));
+    }
+
+    #[test]
+    fn a_clear_runs_as_a_command() {
+        let line: Value = serde_json::from_str(&Command::Clear.to_line()).expect("JSON");
+        assert_eq!(line["message"]["content"], "/clear");
+        assert!(line.get("client_composed").is_none());
     }
 
     #[test]

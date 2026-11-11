@@ -247,6 +247,10 @@ fn read_claude(from_claude: ChildStdout, shared: &Mutex<Shared>, forward: &dyn F
                 Event::SettingsErrors(errors) => shared.output.show_settings_errors(&errors),
                 Event::PayingKey(key) => shared.output.show_paying_key(&key),
                 Event::SessionId(id) => shared.session_id = Some(id),
+                Event::Reset { previous_session } => {
+                    shared.output.show_reset(&previous_session);
+                    shared.context.reset();
+                }
                 Event::State(state) => shared.output.note_state(state),
                 Event::Limits { session, week } => shared.limits.note(session, week),
                 Event::BackgroundTasks(tasks) => shared.output.note_background_tasks(tasks),

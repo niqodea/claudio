@@ -168,10 +168,33 @@ impl<'a> Conversation<'a> {
                 }
                 (text, None)
             }
+            Outcome::Clear(text) => {
+                self.clear(questions)?;
+                (text, None)
+            }
             // Claude Code asked something, which the next round of the loop shows
             Outcome::Break(text) | Outcome::Go(text, _) => (text, None),
             Outcome::End => unreachable!("the session ends before"),
         })
+    }
+
+    /// Clears the context, once Claude's turn ended: the turn that waits on questions ends as
+    /// they are refused, and another one is stopped. A context that holds nothing yet has
+    /// nothing to clear. The conversation marks the clear once Claude Code tells it.
+    fn clear(&mut self, questions: &mut Questions) -> Result<(), String> {
+        if !lock(&self.session.shared).context.has_conversation() {
+            return Ok(());
+        }
+        if questions.is_empty() {
+            if lock(&self.session.shared).output.status() != Status::Idle {
+                self.interrupt(Interruption::Stop)?;
+            }
+        } else {
+            for ask in questions.remove_all() {
+                self.reply(&ask, Answer::Deny)?;
+            }
+        }
+        self.send(&Command::Clear)
     }
 
     /// Acts on how the user left the question at `index` in the question view, and returns the
@@ -219,6 +242,7 @@ impl<'a> Conversation<'a> {
                 questions.first()
             }
             Outcome::End => unreachable!("the session ends before"),
+            Outcome::Clear(_) => unreachable!("the question view takes no Ctrl-L"),
         })
     }
 
@@ -342,7 +366,8 @@ impl Ending<'_> {
                 | Outcome::Send(_)
                 | Outcome::Questions(_)
                 | Outcome::Go(..)
-                | Outcome::End => {}
+                | Outcome::End
+                | Outcome::Clear(_) => {}
             }
         }
     }

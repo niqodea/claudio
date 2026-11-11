@@ -49,20 +49,21 @@ A setting claudio does not know, or a 0, stops claudio with an error that names 
 
 Keys come in two kinds.
 
-**Session keys** act on the session. They work the same in every vi mode, and none of them changes your text:
+**Session keys** act on the session. They work the same in every vi mode, and only Ctrl-E changes your text, through your editor:
 
 | Key    | Action                                                   |
 | ------ | -------------------------------------------------------- |
 | Ctrl-C | stops Claude's turn, or refuses what Claude asks         |
 | Ctrl-D | ends the session, when the input is empty                |
 | Ctrl-L | clears the context with a new session, keeping your text |
+| Ctrl-E | opens your text in `$EDITOR`, or vi when it is unset     |
 | Ctrl-O | shows the whole conversation                             |
 | Ctrl-S | shows the status                                         |
 | Ctrl-Y | opens the questions Claude asks, or goes back from them  |
 | Ctrl-N | moves down the options, among the questions             |
 | Ctrl-P | moves up the options, among the questions                |
 
-**Every other key works on your text.** Enter sends it, and the rest edit it with vi keys, where `:` in normal mode opens the text in your editor. While a vi command is half typed, its keys show at the right end of the label row. Enter and the session keys still do their usual job then, and cancel the half-typed command. To clear the input, use vi, like `S` or `ggdG` in normal mode; `u` brings it back.
+**Every other key works on your text.** Enter sends it, and the rest edit it with vi keys. While a vi command is half typed, its keys show at the right end of the label row. Enter and the session keys still do their usual job then, and cancel the half-typed command. To clear the input, use vi, like `S` or `ggdG` in normal mode; `u` brings it back.
 
 A key that loses what no key brings back waits for a second press in a row, and the label row names the loss in orange, like `enter again refuses 2 questions and sends on a possibly cold cache`.
 These keys are:

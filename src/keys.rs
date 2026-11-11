@@ -58,7 +58,7 @@ pub struct View {
     pub is_submitted: bool,
 }
 
-/// What a session key does. None of them changes the text.
+/// What a session key does. Only `Edit` changes the text, through the user's editor.
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum SessionKey {
     /// Ctrl-C: stops Claude's turn, refusing what Claude asks.
@@ -69,6 +69,9 @@ pub enum SessionKey {
     /// keeps the text, which can be the new context's first message. Ctrl-L clears the screen
     /// in a shell, and starts a new session here, whose start a line marks in the conversation.
     Clear,
+    /// Ctrl-E: opens the text in the user's editor, as readline's Ctrl-X Ctrl-E does, and takes
+    /// back what it saved.
+    Edit,
     /// Ctrl-O: shows the whole conversation, from the question the question view shows.
     ShowFullView,
     /// Ctrl-S: shows the status.
@@ -94,6 +97,7 @@ impl SessionKey {
             KeyCode::Char('c') => Some(SessionKey::Stop),
             KeyCode::Char('d') => Some(SessionKey::End),
             KeyCode::Char('l') => Some(SessionKey::Clear),
+            KeyCode::Char('e') => Some(SessionKey::Edit),
             KeyCode::Char('o') => Some(SessionKey::ShowFullView),
             KeyCode::Char('s') => Some(SessionKey::ShowStatus),
             KeyCode::Char('y') => Some(SessionKey::Questions),
@@ -259,6 +263,7 @@ mod tests {
                 (control('c'), true, Action::Session(SessionKey::Stop)),
                 (control('d'), false, Action::Ignore),
                 (control('d'), true, Action::Session(SessionKey::End)),
+                (control('e'), false, Action::Session(SessionKey::Edit)),
                 (
                     control('o'),
                     false,

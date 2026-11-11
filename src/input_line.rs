@@ -35,7 +35,7 @@ use crate::render::{
 };
 use crate::status;
 use crate::terminal::{Settings, run_in_terminal};
-use crate::vi::{Editor, Effect, Mode};
+use crate::vi::{Editor, Mode};
 use crate::wrap;
 use crate::{Shared, lock};
 
@@ -332,20 +332,27 @@ impl InputLine {
                     } else {
                         self.pick.move_up(choices)
                     };
-                    return self.carry_out(effect, &key);
+                    return Ok(self.carry_out(effect, &key));
                 }
             }
             Action::Session(SessionKey::ShowFullView) => self.show_full_view()?,
             Action::Session(SessionKey::ShowStatus) => self.show_status()?,
+            // The question view's text is the user's own answer, which the box holds only while
+            // the cursor is on it
+            Action::Session(SessionKey::Edit) => match &phase {
+                Phase::Answering(view)
+                    if view.is_submitted || self.pick.cursor != Cursor::Writing => {}
+                _ => self.edit_in_editor()?,
+            },
             // The question view answers to Enter and the other keys on its own
             Action::Send | Action::Edit => {
                 if let Phase::Answering(view) = &phase {
-                    return self.answer_key(view, &key, confirming.as_ref());
+                    return Ok(self.answer_key(view, &key, confirming.as_ref()));
                 }
                 if action == Action::Send {
                     return Ok(Some(Outcome::Send(())));
                 }
-                self.edit(&key)?;
+                self.editor.press(&key);
             }
             Action::Ignore => {}
         }
@@ -409,7 +416,7 @@ impl InputLine {
         view: &View,
         key: &KeyEvent,
         confirming: Option<&Confirming>,
-    ) -> Result<Option<Outcome<()>>, String> {
+    ) -> Option<Outcome<()>> {
         if view.is_submitted {
             return self.carry_out(Pick::press_submitted(key), key);
         }
@@ -429,22 +436,18 @@ impl InputLine {
             if is_empty || !self.goes_ahead(key, confirming, loss, None) {
                 self.pick = before;
                 self.is_empty_warned = is_empty;
-                return Ok(None);
+                return None;
             }
         }
         self.carry_out(effect, key)
     }
 
     /// Carries out what `key` does in the question view besides changing the pick.
-    fn carry_out(
-        &mut self,
-        effect: picker::Effect,
-        key: &KeyEvent,
-    ) -> Result<Option<Outcome<()>>, String> {
-        Ok(match effect {
+    fn carry_out(&mut self, effect: picker::Effect, key: &KeyEvent) -> Option<Outcome<()>> {
+        match effect {
             picker::Effect::Stay => None,
             picker::Effect::Type => {
-                self.edit(key)?;
+                self.editor.press(key);
                 None
             }
             picker::Effect::StartWriting => {
@@ -460,19 +463,12 @@ impl InputLine {
             picker::Effect::Submit => Some(Outcome::Send(())),
             picker::Effect::Back => Some(Outcome::Questions(())),
             picker::Effect::Go(to) => Some(Outcome::Go((), to)),
-        })
+        }
     }
 
     /// Puts the box in insert mode, at the end of its text, as vi's `A` on the last line.
     fn enter_box(&mut self) {
         self.editor.replace(&self.text());
-    }
-
-    fn edit(&mut self, key: &KeyEvent) -> Result<(), String> {
-        if self.editor.press(key) == Effect::OpenEditor {
-            self.edit_in_editor()?;
-        }
-        Ok(())
     }
 
     /// Pastes `text` into the box, which the question view takes the cursor into first, on a

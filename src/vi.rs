@@ -17,14 +17,6 @@ pub enum Mode {
     VisualLine,
 }
 
-/// What a key asks of the host.
-#[derive(Debug, PartialEq)]
-pub enum Effect {
-    None,
-    /// `:` in normal mode.
-    OpenEditor,
-}
-
 pub struct Editor {
     text: Vec<char>,
     /// An index into the text, which in insert mode can be its length.
@@ -108,7 +100,6 @@ enum Command {
     Undo,
     Redo,
     Repeat(Option<usize>),
-    OpenEditor,
     Cancel,
 }
 
@@ -299,24 +290,21 @@ impl Editor {
         }
     }
 
-    pub fn press(&mut self, event: &KeyEvent) -> Effect {
+    pub fn press(&mut self, event: &KeyEvent) {
         let Some(key) = key_of(event) else {
-            return Effect::None;
+            return;
         };
         if self.mode == Mode::Insert {
             self.type_key(key);
-            return Effect::None;
+            return;
         }
         self.keys.push(key);
         match parse(&self.keys, self.is_visual()) {
-            Parse::Incomplete => Effect::None,
-            Parse::Invalid => {
-                self.keys.clear();
-                Effect::None
-            }
+            Parse::Incomplete => {}
+            Parse::Invalid => self.keys.clear(),
             Parse::Command(command) => {
                 self.keys.clear();
-                self.execute(command)
+                self.execute(command);
             }
         }
     }
@@ -325,8 +313,7 @@ impl Editor {
         matches!(self.mode, Mode::Visual | Mode::VisualLine)
     }
 
-    fn execute(&mut self, command: Command) -> Effect {
-        let mut effect = Effect::None;
+    fn execute(&mut self, command: Command) {
         match command {
             Command::Move(motion, count) => {
                 if let Some((to, _)) = self.target(motion, count) {
@@ -398,7 +385,6 @@ impl Editor {
             Command::Undo => self.undo(),
             Command::Redo => self.redo(),
             Command::Repeat(count) => self.repeat(count),
-            Command::OpenEditor => effect = Effect::OpenEditor,
             Command::Cancel => {}
         }
         if !matches!(command, Command::Move(Motion::Down | Motion::Up, _)) {
@@ -419,7 +405,6 @@ impl Editor {
             self.is_changing = false;
             self.clamp();
         }
-        effect
     }
 
     /// Acts on a key in insert mode.
@@ -1305,7 +1290,6 @@ fn parse(keys: &[Key], is_visual: bool) -> Parse {
         (Key::Char('O'), []) => Command::Insert(Insert::LineAbove),
         (Key::Char('v'), []) => Command::Visual(Mode::Visual),
         (Key::Char('V'), []) => Command::Visual(Mode::VisualLine),
-        (Key::Char(':'), []) if count.is_none() => Command::OpenEditor,
         (Key::Escape, []) => Command::Cancel,
         _ => {
             return match parse_motion(keys) {
@@ -1829,12 +1813,5 @@ mod tests {
             })
             .collect();
         assert!(mismatches.is_empty(), "\n{}", mismatches.join("\n"));
-    }
-
-    #[test]
-    fn colon_asks_the_host_to_open_the_editor() {
-        let mut editor = after("abc", "");
-        let event = KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE);
-        assert_eq!(editor.press(&event), Effect::OpenEditor);
     }
 }

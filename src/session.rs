@@ -14,7 +14,7 @@ use crate::input_line::{InputLine, Outcome};
 use crate::keys::Phase;
 use crate::picker::Draft;
 use crate::protocol::{Answer, Ask, AskKind, Command};
-use crate::questions::{Answered, Questions};
+use crate::questions::{Questions, Sent};
 use crate::render::{Interruption, Status};
 use crate::{Shared, lock};
 
@@ -162,7 +162,7 @@ impl<'a> Conversation<'a> {
                     (String::new(), None)
                 }
             }
-            Outcome::Questions(text) => (text, Some(0)),
+            Outcome::Questions(text) => (text, questions.first()),
             // Claude's turn waits on its questions, so stopping it refuses them
             Outcome::Stop(text) => {
                 if !questions.is_empty() {
@@ -188,25 +188,21 @@ impl<'a> Conversation<'a> {
         index: usize,
         questions: &mut Questions,
     ) -> Result<Option<usize>, String> {
-        let count = questions.count();
         Ok(match outcome {
-            Outcome::Send(draft) => match questions.answer(index, &draft) {
-                None => {
-                    questions.keep_draft(index, draft);
-                    Some(index)
-                }
-                Some(Answered {
-                    label,
+            Outcome::Send(draft) => match questions.send(index, draft) {
+                Sent::Show(next) => Some(next),
+                Sent::Answered {
+                    answers,
+                    ask,
                     answer,
-                    reply,
-                }) => {
-                    lock(&self.session.shared)
-                        .output
-                        .show_answer(&label, &answer);
-                    if let Some((ask, answer)) = reply {
-                        self.reply(&ask, answer)?;
+                } => {
+                    let mut shared = lock(&self.session.shared);
+                    for (label, answer) in &answers {
+                        shared.output.show_answer(label, answer);
                     }
-                    next_shown(questions, index)
+                    drop(shared);
+                    self.reply(&ask, answer)?;
+                    questions.first()
                 }
             },
             Outcome::Questions(draft) => {
@@ -215,11 +211,11 @@ impl<'a> Conversation<'a> {
             }
             Outcome::Next(draft) => {
                 questions.keep_draft(index, draft);
-                Some((index + 1) % count)
+                Some(questions.step(index, true))
             }
             Outcome::Previous(draft) => {
                 questions.keep_draft(index, draft);
-                Some((index + count - 1) % count)
+                Some(questions.step(index, false))
             }
             // Claude Code asked something more, which the next round of the loop adds
             Outcome::Break(draft) => {
@@ -228,9 +224,9 @@ impl<'a> Conversation<'a> {
             }
             // Claude Code takes or refuses a call's questions together
             Outcome::Stop(_) => {
-                let ask = questions.remove_call(index);
+                let ask = questions.remove_first();
                 self.reply(&ask, Answer::Deny)?;
-                next_shown(questions, index)
+                questions.first()
             }
             Outcome::End => unreachable!("the session ends before"),
         })
@@ -406,11 +402,4 @@ impl Session {
     fn close_line(&mut self) -> Result<(), String> {
         self.input.close()
     }
-}
-
-/// The question the question view shows once the one at `index` is answered or refused: the
-/// one that took its place, or the new last one, or none once none waits, which takes the user
-/// back to the message.
-fn next_shown(questions: &Questions, index: usize) -> Option<usize> {
-    (!questions.is_empty()).then(|| index.min(questions.count() - 1))
 }

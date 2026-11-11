@@ -54,9 +54,12 @@ pub struct View {
     pub form: Form,
     /// The line of the full view, from 1, that the question starts on.
     pub full_view_line: usize,
-    /// Which question it is, from 0, of how many wait.
+    /// Which question of its batch it is, from 0, where one past the last is the review.
     pub index: usize,
-    pub count: usize,
+    /// Whether each question of the batch is submitted.
+    pub progress: Vec<bool>,
+    /// Whether the question is submitted, which keeps its answer until Enter opens it again.
+    pub is_submitted: bool,
 }
 
 /// What a session key does. None of them changes the text.
@@ -158,7 +161,8 @@ mod tests {
             form: Form::One,
             full_view_line: 1,
             index: 0,
-            count: 2,
+            progress: vec![false, false],
+            is_submitted: false,
         })
     }
 

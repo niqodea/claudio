@@ -68,7 +68,8 @@ Keys come in two kinds.
 Claude's questions, the choices of `AskUserQuestion`, wait until you open them, so no key meant for your message answers one.
 `Y` on the label row counts them, up to 9 and then `+`, in orange while any waits.
 Meanwhile, the first Enter on a message keeps it in the box, and the label says how many questions a second Enter refuses before sending the message.
-Ctrl-Y shows them one at a time, with which one of how many at the right end of the label row, and Ctrl-Y goes back to the message, as Esc does on the list.
+Ctrl-Y shows them one at a time, and Ctrl-Y goes back to the message, as Esc does on the list.
+The right end of the label row numbers the call's questions, green once submitted, with the one shown in reverse.
 A question longer than the screen ends in `… Ctrl-O shows it whole`: Ctrl-O there opens the whole conversation at the question, to read with less's keys, and `q` brings you back to answer.
 
 Each question shows its options as numbered lines between the label row and the input box, and last, an item marked `>` for your own answer, which you write in the box.
@@ -79,21 +80,25 @@ The cursor starts on the first option.
 | `j`/`k`, `↓`/`↑`     | move between the options                                       |
 | `1`–`9`              | pick an option, or tick it on several choices                  |
 | Space                | tick the option, on several choices                            |
-| Enter                | pick the option, or send the ticked ones on several choices    |
+| Enter                | submit the option, or the ticked ones on several choices       |
 | `>`                  | write your own answer in the box                               |
 | `]`/`[`              | go to the next or previous question                            |
 | Esc                  | go back to the message                                         |
 
 The keys that pick an option pick the `>` item too: Enter, or Space on several choices.
 Either takes you into the box, at the end of your text, in insert mode, where the vi keys work as in a message.
-There, Enter sends your answer, or on several choices, ticks it as one more item and takes you back to the list.
+There, Enter submits your answer, or on several choices, ticks it as one more item and takes you back to the list.
 Esc in normal mode takes you back to the list too, keeping the text without ticking it, and `]`/`[` in normal mode go to another question.
 Space on your own ticked answer unticks it, keeping the text.
 An answer that leaves out the text you wrote waits for the same key again, and the label row says so in orange.
 Ctrl-N/Ctrl-P move between the options from anywhere, the box too.
 
-Claude gets the options' labels and your words, never the numbers.
-Each question keeps what you picked and typed on it until it is answered.
+Claude Code takes the answers to a call's questions together, so Enter submits a question and moves on to the next one not submitted.
+A submitted question shows its answer in green and takes no keys but Enter, which opens it again, and Esc, `]` and `[`.
+Once all are submitted, the review lists the answers, all ticked: Enter sends them, or with some unticked, opens those again, as the label row says.
+`]` and `[` reach the review too, after the last question.
+Claude gets the options' labels and your words, never the numbers, and the conversation shows the answers once sent.
+Each question keeps what you picked and typed on it until the call is answered.
 
 ## Design
 

@@ -1,56 +1,92 @@
-//! The questions of Claude's `AskUserQuestion` calls that wait for the user, oldest first. The
-//! question view shows them one at a time, and each keeps what was picked and written on it until
-//! it is answered.
+//! The questions of Claude's `AskUserQuestion` calls that wait for the user. Claude Code takes a
+//! call's answers together, and Claude reads none of them before, so the question view shows a
+//! call's questions as a batch. Enter submits a question and moves on to the next one not
+//! submitted, and a submitted question keeps its answer until Enter opens it again. Once all are
+//! submitted, the review shows the answers, all ticked: Enter sends them, or opens the ones the
+//! user unticked, which keep what was picked and written on them.
+//!
+//! Ref: <https://design-system.service.gov.uk/patterns/check-answers>, on checking answers
+//! before sending them
+
+use std::collections::VecDeque;
 
 use serde_json::{Map, Value};
 
 use crate::keys::View;
-use crate::picker::{Choice, Cursor, Draft, Form};
+use crate::picker::{Choice, Cursor, Draft, Form, Pick};
 use crate::protocol::{Answer, Ask, AskKind, Question};
 use crate::render::{BOLD, RESET};
 
 #[derive(Default)]
 pub struct Questions {
-    calls: Vec<Call>,
-    waiting: Vec<Waiting>,
+    /// The calls that ask, oldest first, of which the question view shows the first. Claude asks
+    /// in one call at a time in practice, and calls asked together wait in line.
+    batches: VecDeque<Batch>,
     /// Whether the user pressed Enter on a message once while these questions wait, so the next
     /// Enter refuses them.
     is_refusal_confirmed: bool,
 }
 
-/// A call that asks, with the answers it has so far, each under its question's text.
-struct Call {
+/// A call that asks, with each of its questions.
+struct Batch {
     ask: Ask,
-    answers: Map<String, Value>,
+    entries: Vec<Entry>,
 }
 
-impl Call {
+/// A question that waits.
+struct Entry {
+    /// The line of the full view, from 1, that it starts on.
+    full_view_line: usize,
+    /// What was picked and written on it so far.
+    draft: Draft,
+    is_submitted: bool,
+}
+
+/// What sending from the question view leads to.
+pub enum Sent {
+    /// The question view shows the question at this index, or the review one past the last.
+    Show(usize),
+    /// The batch is answered: each question's header with its answer, and the reply to its call.
+    Answered {
+        answers: Vec<(String, String)>,
+        ask: Ask,
+        answer: Answer,
+    },
+}
+
+impl Batch {
     fn questions(&self) -> &[Question] {
         match &self.ask.kind {
             AskKind::Questions(questions) => questions,
             AskKind::Permission => unreachable!("only a call with questions waits"),
         }
     }
-}
 
-/// A question that waits.
-struct Waiting {
-    /// The call it belongs to.
-    tool_use_id: String,
-    /// Which question of the call's it is, from 0.
-    number: usize,
-    /// The line of the full view, from 1, that it starts on.
-    full_view_line: usize,
-    /// What was picked and written on it so far.
-    draft: Draft,
-}
+    fn is_submitted(&self) -> bool {
+        self.entries.iter().all(|entry| entry.is_submitted)
+    }
 
-/// A question answered, which the conversation shows as `answer` after `label`. `reply` holds
-/// its call's answer once the call has all of them.
-pub struct Answered {
-    pub label: String,
-    pub answer: String,
-    pub reply: Option<(Ask, Answer)>,
+    /// The first question not submitted after the one at `index`, round from the first, or else
+    /// the review.
+    fn next_open(&self, index: usize) -> usize {
+        let count = self.entries.len();
+        (1..=count)
+            .map(|step| (index + step) % count)
+            .find(|&next| !self.entries[next].is_submitted)
+            .unwrap_or(count)
+    }
+
+    /// Each question's header with what its draft answers.
+    fn answers(&self) -> Vec<(String, String)> {
+        self.questions()
+            .iter()
+            .zip(&self.entries)
+            .map(|(question, entry)| {
+                let answer = choose(question, &entry.draft).expect("a submitted question answers");
+                (question.header.clone(), answer)
+            })
+            .collect()
+    }
 }
 
 impl Questions {
@@ -61,53 +97,113 @@ impl Questions {
             return;
         };
         self.is_refusal_confirmed = false;
-        for (number, full_view_line) in (0..questions.len()).zip(full_view_lines) {
-            self.waiting.push(Waiting {
-                tool_use_id: ask.tool_use_id.clone(),
-                number,
+        let entries = full_view_lines
+            .into_iter()
+            .take(questions.len())
+            .map(|full_view_line| Entry {
                 full_view_line,
                 draft: Draft::new(),
-            });
-        }
-        self.calls.push(Call {
-            ask,
-            answers: Map::new(),
-        });
+                is_submitted: false,
+            })
+            .collect();
+        self.batches.push_back(Batch { ask, entries });
     }
 
     pub fn is_refusal_confirmed(&self) -> bool {
-        self.is_refusal_confirmed && !self.waiting.is_empty()
+        self.is_refusal_confirmed && !self.is_empty()
     }
 
     /// Whether a message the user sends stays in the input box, which it does the first time
     /// while questions wait. The confirmation lasts until the questions are refused or a new
     /// question arrives.
     pub fn holds_message(&mut self) -> bool {
-        let holds = !self.waiting.is_empty() && !self.is_refusal_confirmed;
+        let holds = !self.is_empty() && !self.is_refusal_confirmed;
         self.is_refusal_confirmed |= holds;
         holds
     }
 
     pub fn count(&self) -> usize {
-        self.waiting.len()
+        self.batches.iter().map(|batch| batch.entries.len()).sum()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.waiting.is_empty()
+        self.batches.is_empty()
     }
 
+    /// Where the question view opens: the first question not submitted, or else the review, or
+    /// none when none waits.
+    pub fn first(&self) -> Option<usize> {
+        let batch = self.batches.front()?;
+        Some(batch.next_open(batch.entries.len() - 1))
+    }
+
+    /// The question next to the one at `index`, round the batch, where the review comes
+    /// after the last question once all are submitted.
+    pub fn step(&self, index: usize, is_forward: bool) -> usize {
+        let batch = self.batch();
+        let stops = batch.entries.len() + usize::from(batch.is_submitted());
+        if is_forward {
+            (index + 1) % stops
+        } else {
+            (index + stops - 1) % stops
+        }
+    }
+
+    /// The draft of the question at `index`, or on the review, every answer ticked.
     pub fn draft(&self, index: usize) -> Draft {
-        self.waiting[index].draft.clone()
+        let batch = self.batch();
+        match batch.entries.get(index) {
+            Some(entry) => entry.draft.clone(),
+            None => Draft {
+                pick: Pick {
+                    cursor: Cursor::Option(0),
+                    ticked: (0..batch.entries.len()).collect(),
+                    is_own_ticked: false,
+                },
+                text: String::new(),
+            },
+        }
     }
 
+    /// Keeps `draft` on the question at `index`, which the review has none of.
     pub fn keep_draft(&mut self, index: usize, draft: Draft) {
-        self.waiting[index].draft = draft;
+        if let Some(entry) = self.batch_mut().entries.get_mut(index) {
+            entry.draft = draft;
+        }
     }
 
-    /// What the question view shows of the question at `index`: its text, and its options.
+    /// What the question view shows at `index`: a question's text and its options, or the
+    /// review's answers.
     pub fn view(&self, index: usize) -> View {
-        let waiting = &self.waiting[index];
-        let question = &self.call(&waiting.tool_use_id).questions()[waiting.number];
+        let batch = self.batch();
+        let progress: Vec<bool> = batch
+            .entries
+            .iter()
+            .map(|entry| entry.is_submitted)
+            .collect();
+        let Some(entry) = batch.entries.get(index) else {
+            let choices = batch
+                .answers()
+                .into_iter()
+                .map(|(header, answer)| Choice {
+                    label: format!("{header}: {answer}"),
+                    description: String::new(),
+                    preview: None,
+                })
+                .collect();
+            return View {
+                label: "Review".to_string(),
+                lines: vec![format!("{BOLD}Send these answers?{RESET}")],
+                choices,
+                own_label: String::new(),
+                form: Form::Review,
+                full_view_line: batch.entries[0].full_view_line,
+                index,
+                progress,
+                is_submitted: false,
+            };
+        };
+        let question = &batch.questions()[index];
         let choices = question
             .options
             .iter()
@@ -128,96 +224,96 @@ impl Questions {
             choices,
             own_label: own_label.to_string(),
             form,
-            full_view_line: waiting.full_view_line,
+            full_view_line: entry.full_view_line,
             index,
-            count: self.count(),
+            progress,
+            is_submitted: entry.is_submitted,
         }
     }
 
-    /// Answers the question at `index` with `draft`. Returns none when `draft` answers nothing,
-    /// like the user's own answer left empty, and the question stays.
-    /// TODO: Keep a call's answered questions open to change until its last one is answered,
-    /// since Claude Code takes a call's answers together and Claude reads none of them before
-    pub fn answer(&mut self, index: usize, draft: &Draft) -> Option<Answered> {
-        let waiting = &self.waiting[index];
-        let call_index = self.call_index(&waiting.tool_use_id);
-        let call = &mut self.calls[call_index];
-        let questions = call.questions();
-        let question = &questions[waiting.number];
-        let choice = choose(question, draft)?;
-        let label = question.header.clone();
-        let is_complete = call.answers.len() + 1 == questions.len();
-        call.answers
-            .insert(question.text.clone(), Value::String(choice.clone()));
-        self.waiting.remove(index);
-        // Claude Code takes the answers to a call's questions together
-        let reply = is_complete.then(|| {
-            let call = self.calls.remove(call_index);
-            let mut input = call.ask.input.clone();
-            input.insert("answers".to_string(), Value::Object(call.answers));
-            (call.ask, Answer::Allow { input })
-        });
-        Some(Answered {
-            label,
-            answer: choice,
-            reply,
-        })
+    /// Acts on Enter at `index` with `draft`. Enter submits a question and moves on, or opens a
+    /// submitted one again, and keeps a question that `draft` answers nothing on, like the user's
+    /// own answer left empty. On the review, it answers the batch once every answer is ticked,
+    /// and else opens the unticked ones.
+    pub fn send(&mut self, index: usize, draft: Draft) -> Sent {
+        let batch = self.batch_mut();
+        let count = batch.entries.len();
+        if index == count {
+            if draft.pick.ticked.len() == count {
+                return self.answer();
+            }
+            for (number, entry) in batch.entries.iter_mut().enumerate() {
+                entry.is_submitted = draft.pick.ticked.contains(&number);
+            }
+            return Sent::Show(batch.next_open(count - 1));
+        }
+        let answers = choose(&batch.questions()[index], &draft).is_some();
+        let entry = &mut batch.entries[index];
+        entry.draft = draft;
+        if entry.is_submitted || !answers {
+            entry.is_submitted = false;
+            return Sent::Show(index);
+        }
+        entry.is_submitted = true;
+        Sent::Show(batch.next_open(index))
     }
 
-    /// Takes away the call the question at `index` belongs to, with all its questions, and
-    /// returns what it asked, to refuse, since Claude Code refuses a call's questions together.
-    pub fn remove_call(&mut self, index: usize) -> Ask {
-        let tool_use_id = self.waiting[index].tool_use_id.clone();
-        self.waiting
-            .retain(|waiting| waiting.tool_use_id != tool_use_id);
-        let call_index = self.call_index(&tool_use_id);
-        self.calls.remove(call_index).ask
+    /// Takes away the batch the question view shows, and returns what it asked, to refuse, since
+    /// Claude Code refuses a call's questions together.
+    pub fn remove_first(&mut self) -> Ask {
+        self.batches.pop_front().expect("a batch shows").ask
     }
 
     /// Takes away every call, and returns what they asked, to refuse.
     pub fn remove_all(&mut self) -> Vec<Ask> {
         self.is_refusal_confirmed = false;
-        self.waiting.clear();
-        self.calls.drain(..).map(|call| call.ask).collect()
+        self.batches.drain(..).map(|batch| batch.ask).collect()
     }
 
-    fn call(&self, tool_use_id: &str) -> &Call {
-        &self.calls[self.call_index(tool_use_id)]
-    }
-
-    fn call_index(&self, tool_use_id: &str) -> usize {
-        self.calls
+    /// Takes away the batch the question view shows, answered.
+    fn answer(&mut self) -> Sent {
+        let batch = self.batches.pop_front().expect("a batch shows");
+        let answers = batch.answers();
+        let map: Map<String, Value> = batch
+            .questions()
             .iter()
-            .position(|call| call.ask.tool_use_id == tool_use_id)
-            .expect("a question's call waits while the question does")
+            .zip(&answers)
+            .map(|(question, (_, answer))| (question.text.clone(), Value::String(answer.clone())))
+            .collect();
+        let mut input = batch.ask.input.clone();
+        input.insert("answers".to_string(), Value::Object(map));
+        Sent::Answered {
+            answers,
+            ask: batch.ask,
+            answer: Answer::Allow { input },
+        }
+    }
+
+    fn batch(&self) -> &Batch {
+        self.batches.front().expect("a batch shows")
+    }
+
+    fn batch_mut(&mut self) -> &mut Batch {
+        self.batches.front_mut().expect("a batch shows")
     }
 }
 
 /// What `draft` answers to `question`, none when it answers nothing. Claude gets the options'
 /// labels and the user's words, never the numbers, which only the question view shows.
-///
-/// A question of one option takes the option the cursor is on, or else the user's own answer. A
-/// question of several options takes the options ticked, and the user's own answer when it is
-/// ticked, or with neither, the option the cursor is on.
 fn choose(question: &Question, draft: &Draft) -> Option<String> {
-    let label = |index: usize| question.options[index].label.as_str();
-    let own = draft.text.trim();
-    let pick = &draft.pick;
-    let focused = match pick.cursor {
-        Cursor::Option(index) => Some(label(index)),
-        Cursor::Own | Cursor::Writing => None,
+    let form = if question.is_multi_select {
+        Form::Several
+    } else {
+        Form::One
     };
-    if !question.is_multi_select {
-        return focused
-            .map(str::to_string)
-            .or_else(|| (!own.is_empty()).then(|| own.to_string()));
-    }
-    let mut items: Vec<&str> = pick.ticked.iter().map(|&index| label(index)).collect();
-    if pick.is_own_ticked && !own.is_empty() {
-        items.push(own);
-    }
-    if items.is_empty() {
-        items.extend(focused);
+    let chosen = draft.pick.chosen(form, &draft.text);
+    let mut items: Vec<&str> = chosen
+        .options
+        .iter()
+        .map(|&index| question.options[index].label.as_str())
+        .collect();
+    if chosen.is_own {
+        items.push(draft.text.trim());
     }
     (!items.is_empty()).then(|| items.join(", "))
 }
@@ -275,10 +371,17 @@ mod tests {
         draft
     }
 
-    fn answer(questions: &mut Questions, index: usize, draft: &Draft) -> String {
-        match questions.answer(index, draft) {
-            Some(answered) => answered.answer,
-            None => panic!("{draft:?} answers"),
+    fn questions_of(ask: &Ask) -> &[Question] {
+        match &ask.kind {
+            AskKind::Questions(questions) => questions,
+            AskKind::Permission => panic!("questions"),
+        }
+    }
+
+    fn shown(sent: &Sent) -> usize {
+        match sent {
+            Sent::Show(index) => *index,
+            Sent::Answered { .. } => panic!("a question shows"),
         }
     }
 
@@ -295,22 +398,43 @@ mod tests {
     }
 
     #[test]
-    fn a_call_is_answered_once_all_its_questions_are() {
+    fn enter_submits_and_moves_on_and_opens_a_submitted_question_again() {
         let mut questions = Questions::default();
         questions.add(two_questions("a"), vec![1, 2]);
-        let Some(Answered { reply, .. }) = questions.answer(0, &draft(Cursor::Option(1), ""))
-        else {
-            panic!("an answer");
-        };
-        assert!(reply.is_none());
+        assert_eq!(shown(&questions.send(1, draft(Cursor::Option(2), ""))), 0);
+        assert_eq!(questions.view(0).progress, [false, true]);
+        assert_eq!(questions.step(0, true), 1);
+        assert!(questions.view(1).is_submitted);
+        assert_eq!(shown(&questions.send(1, questions.draft(1))), 1);
+        assert!(!questions.view(1).is_submitted);
+        assert_eq!(questions.draft(1).pick.cursor, Cursor::Option(2));
+        // The user's own answer left empty answers nothing
+        assert_eq!(shown(&questions.send(0, draft(Cursor::Own, ""))), 0);
+        assert!(!questions.view(0).is_submitted);
+    }
+
+    #[test]
+    fn the_review_comes_once_all_are_submitted_and_sends_them_together() {
+        let mut questions = Questions::default();
+        questions.add(two_questions("a"), vec![1, 2]);
+        questions.send(0, draft(Cursor::Option(1), ""));
         let mut ticked = Draft::new();
         ticked.pick.ticked = BTreeSet::from([2, 0]);
-        let Some(Answered { reply, .. }) = questions.answer(0, &ticked) else {
-            panic!("an answer");
+        assert_eq!(shown(&questions.send(1, ticked)), 2);
+        assert_eq!(questions.step(1, true), 2);
+        assert_eq!(questions.step(0, false), 2);
+        let review = questions.view(2);
+        assert_eq!(review.form, Form::Review);
+        assert_eq!(review.choices[1].label, "Checks: Lint, Types");
+        let Sent::Answered {
+            answers,
+            answer: Answer::Allow { input },
+            ..
+        } = questions.send(2, questions.draft(2))
+        else {
+            panic!("the batch's answers");
         };
-        let Some((_, Answer::Allow { input })) = reply else {
-            panic!("the call's answers");
-        };
+        assert_eq!(answers[0], ("Database".to_string(), "SQLite".to_string()));
         assert_eq!(
             input["answers"],
             json!({"Which database?": "SQLite", "Which checks?": "Lint, Types"})
@@ -319,49 +443,51 @@ mod tests {
     }
 
     #[test]
-    fn one_choice_takes_the_option_under_the_cursor_or_the_users_own_words() {
+    fn the_review_opens_the_unticked_answers_keeping_their_drafts() {
         let mut questions = Questions::default();
         questions.add(two_questions("a"), vec![1, 2]);
-        questions.add(two_questions("b"), vec![1, 2]);
+        questions.send(0, draft(Cursor::Option(1), ""));
+        questions.send(1, draft(Cursor::Option(0), ""));
+        let mut review = questions.draft(2);
+        review.pick.ticked.remove(&0);
+        assert_eq!(shown(&questions.send(2, review)), 0);
+        assert_eq!(questions.view(0).progress, [false, true]);
+        assert_eq!(questions.draft(0).pick.cursor, Cursor::Option(1));
+        assert_eq!(questions.first(), Some(0));
+    }
+
+    #[test]
+    fn one_choice_takes_the_option_under_the_cursor_or_the_users_own_words() {
+        let ask = two_questions("a");
+        let database = &questions_of(&ask)[0];
         for empty in [draft(Cursor::Own, ""), draft(Cursor::Writing, "  ")] {
-            assert!(questions.answer(0, &empty).is_none(), "{empty:?}");
+            assert!(choose(database, &empty).is_none(), "{empty:?}");
         }
-        assert_eq!(
-            answer(
-                &mut questions,
-                0,
-                &draft(Cursor::Writing, " DuckDB, in a file ")
-            ),
-            "DuckDB, in a file"
-        );
+        let own = draft(Cursor::Writing, " DuckDB, in a file ");
+        assert_eq!(choose(database, &own).as_deref(), Some("DuckDB, in a file"));
         // An option under the cursor answers over the user's own words
-        assert_eq!(
-            answer(&mut questions, 1, &draft(Cursor::Option(0), "DuckDB")),
-            "Postgres"
-        );
+        let over = draft(Cursor::Option(0), "DuckDB");
+        assert_eq!(choose(database, &over).as_deref(), Some("Postgres"));
     }
 
     #[test]
     fn several_choices_take_the_ticked_options_and_the_users_own_words() {
-        let mut questions = Questions::default();
-        for id in ["a", "b", "c", "d"] {
-            questions.add(two_questions(id), vec![1, 2]);
-        }
-        assert!(questions.answer(1, &draft(Cursor::Own, "")).is_none());
+        let ask = two_questions("a");
+        let checks = &questions_of(&ask)[1];
+        assert!(choose(checks, &draft(Cursor::Own, "")).is_none());
         let mut ticked = draft(Cursor::Option(0), "fuzzing");
         ticked.pick.ticked = BTreeSet::from([1, 0]);
         ticked.pick.is_own_ticked = true;
-        assert_eq!(answer(&mut questions, 1, &ticked), "Lint, Tests, fuzzing");
+        assert_eq!(
+            choose(checks, &ticked).as_deref(),
+            Some("Lint, Tests, fuzzing")
+        );
         // The user's own words stay out while unticked
-        assert_eq!(
-            answer(&mut questions, 2, &draft(Cursor::Option(1), "fuzzing")),
-            "Tests"
-        );
+        let unticked = draft(Cursor::Option(1), "fuzzing");
+        assert_eq!(choose(checks, &unticked).as_deref(), Some("Tests"));
         // With nothing ticked, the option under the cursor
-        assert_eq!(
-            answer(&mut questions, 3, &draft(Cursor::Option(2), "")),
-            "Types"
-        );
+        let focused = draft(Cursor::Option(2), "");
+        assert_eq!(choose(checks, &focused).as_deref(), Some("Types"));
     }
 
     #[test]
@@ -380,13 +506,13 @@ mod tests {
     }
 
     #[test]
-    fn refusing_a_question_takes_away_its_whole_call() {
+    fn calls_asked_together_wait_in_line() {
         let mut questions = Questions::default();
         questions.add(two_questions("a"), vec![1, 2]);
-        questions.add(one_question("b"), vec![1]);
-        let ask = questions.remove_call(1);
-        assert_eq!(ask.tool_use_id, "a");
-        assert_eq!(questions.count(), 1);
+        questions.add(one_question("b"), vec![3]);
+        assert_eq!(questions.count(), 3);
+        assert_eq!(questions.remove_first().tool_use_id, "a");
+        assert_eq!(questions.first(), Some(0));
         assert_eq!(questions.view(0).label, "Cache");
     }
 }

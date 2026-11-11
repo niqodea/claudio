@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 
 use crossterm::event::{KeyCode, KeyEvent};
 
-use crate::render::{DIM, LIGHT_CYAN, RESET, markdown_lines};
+use crate::render::{DIM, GREEN, LIGHT_CYAN, RESET, markdown_lines};
 
 /// The key of the user's own answer, and its mark, the same on every question.
 pub const OWN_KEY: char = '>';
@@ -43,6 +43,9 @@ pub enum Form {
     One,
     /// Takes any options together, and the user's own answer as one more.
     Several,
+    /// The review of a batch's answers, one option each, ticked to send and unticked to edit.
+    /// It has no item of the user's own.
+    Review,
 }
 
 /// Where the cursor is.
@@ -127,11 +130,12 @@ impl Pick {
         }
     }
 
-    /// Moves the cursor one item down the list of `choices` options, from the box too.
-    pub fn move_down(&mut self, choices: usize) -> Effect {
+    /// Moves the cursor one item down the list of `choices` options of `form`, from the box too.
+    pub fn move_down(&mut self, choices: usize, form: Form) -> Effect {
         let effect = self.leave_box();
         self.cursor = match self.cursor {
             Cursor::Option(index) if index + 1 < choices => Cursor::Option(index + 1),
+            Cursor::Option(index) if form == Form::Review => Cursor::Option(index),
             _ => Cursor::Own,
         };
         effect
@@ -159,19 +163,46 @@ impl Pick {
         let is_left_out = match form {
             Form::One => matches!(self.cursor, Cursor::Option(_)),
             Form::Several => !self.is_own_ticked,
+            Form::Review => false,
         };
         is_left_out && !text.trim().is_empty()
     }
 
+    /// What chosen together on a question that takes `form` with `text` as the user's own: the
+    /// options and the user's own answer. One option takes the option the cursor is on, or else
+    /// the user's own answer. Several take the options ticked, and the user's own answer when it
+    /// is ticked, or with neither, the option the cursor is on.
+    pub fn chosen(&self, form: Form, text: &str) -> Chosen {
+        let focused = match self.cursor {
+            Cursor::Option(index) => Some(index),
+            Cursor::Own | Cursor::Writing => None,
+        };
+        let has_text = !text.trim().is_empty();
+        if form != Form::Several {
+            return Chosen {
+                options: focused.into_iter().collect(),
+                is_own: focused.is_none() && has_text,
+            };
+        }
+        let is_own = self.is_own_ticked && has_text;
+        let mut options: Vec<usize> = self.ticked.iter().copied().collect();
+        if options.is_empty() && !is_own {
+            options.extend(focused);
+        }
+        Chosen { options, is_own }
+    }
+
     fn press_on_list(&mut self, key: &KeyEvent, choices: usize, form: Form) -> Effect {
+        let ticks = form != Form::One;
         match (key.code, self.cursor, form) {
-            (KeyCode::Down | KeyCode::Char('j'), _, _) => self.move_down(choices),
+            (KeyCode::Down | KeyCode::Char('j'), _, _) => self.move_down(choices, form),
             (KeyCode::Up | KeyCode::Char('k'), _, _) => self.move_up(choices),
+            (KeyCode::Char(OWN_KEY), _, Form::Review) => Effect::Stay,
             (KeyCode::Enter, Cursor::Own, Form::One) | (KeyCode::Char(OWN_KEY), _, _) => {
                 self.start_writing()
             }
             (KeyCode::Enter, _, _) => Effect::Submit,
-            (KeyCode::Char(' '), Cursor::Option(index), Form::Several) => {
+            (KeyCode::Char(' '), Cursor::Option(index), _) if ticks => {
                 if !self.ticked.remove(&index) {
                     self.ticked.insert(index);
                 }
@@ -188,15 +219,13 @@ impl Pick {
                     return Effect::Stay;
                 }
                 self.cursor = Cursor::Option(index);
-                match form {
-                    Form::One => Effect::Submit,
-                    Form::Several => {
-                        if !self.ticked.remove(&index) {
-                            self.ticked.insert(index);
-                        }
-                        Effect::Stay
-                    }
+                if !ticks {
+                    return Effect::Submit;
                 }
+                if !self.ticked.remove(&index) {
+                    self.ticked.insert(index);
+                }
+                Effect::Stay
             }
             (KeyCode::Esc, _, _) => Effect::Back,
             (KeyCode::Char(']'), _, _) => Effect::Next,
@@ -220,6 +249,17 @@ impl Pick {
         }
     }
 
+    /// Acts on `key` on a submitted question, whose answer stays as it is until Enter opens it.
+    pub fn press_submitted(key: &KeyEvent) -> Effect {
+        match key.code {
+            KeyCode::Enter => Effect::Submit,
+            KeyCode::Esc => Effect::Back,
+            KeyCode::Char(']') => Effect::Next,
+            KeyCode::Char('[') => Effect::Previous,
+            _ => Effect::Stay,
+        }
+    }
+
     /// Takes the cursor out of the box, onto the item of the user's own, when it is in the box.
     fn leave_box(&mut self) -> Effect {
         if self.cursor != Cursor::Writing {
@@ -230,25 +270,48 @@ impl Pick {
     }
 }
 
+/// The options and the user's own answer that a question's answer holds.
+pub struct Chosen {
+    pub options: Vec<usize>,
+    pub is_own: bool,
+}
+
 /// The lines of `choices`, and of the item of the user's own answer, which says `own_label`. The
 /// pointer marks the item the cursor is on, dimmed while the cursor is in the box, and each item's
-/// key takes the width of a number's, `1.`, so the items line up.
+/// key takes the width of a number's, `1.`, so the items line up. A submitted question shows its
+/// answer, `submitted`, in green, marked as a tick marks an option, and dims the rest.
 pub fn lines(
     choices: &[Choice],
     own_label: &str,
     form: Form,
     pick: &Pick,
+    submitted: Option<&Chosen>,
 ) -> (Vec<String>, String) {
     let start = |key: &str, cursor: Cursor, is_ticked: bool| {
-        let (pointer, color) = match (pick.cursor == cursor, pick.cursor) {
-            (true, _) => (format!("{LIGHT_CYAN}❯{RESET}"), LIGHT_CYAN),
-            (false, Cursor::Writing) if cursor == Cursor::Own => (format!("{DIM}❯{RESET}"), ""),
-            (false, _) => (" ".to_string(), ""),
+        let (pointer, color, is_ticked) = match submitted {
+            Some(chosen) => {
+                let is_chosen = match cursor {
+                    Cursor::Option(index) => chosen.options.contains(&index),
+                    Cursor::Own | Cursor::Writing => chosen.is_own,
+                };
+                match (is_chosen, form) {
+                    (true, Form::One) => (format!("{GREEN}✓{RESET}"), GREEN, false),
+                    (true, _) => (" ".to_string(), GREEN, true),
+                    (false, _) => (" ".to_string(), DIM, false),
+                }
+            }
+            None => match (pick.cursor == cursor, pick.cursor) {
+                (true, _) => (format!("{LIGHT_CYAN}❯{RESET}"), LIGHT_CYAN, is_ticked),
+                (false, Cursor::Writing) if cursor == Cursor::Own => {
+                    (format!("{DIM}❯{RESET}"), "", is_ticked)
+                }
+                (false, _) => (" ".to_string(), "", is_ticked),
+            },
         };
         let tick = match (form, is_ticked) {
-            (Form::Several, true) => "[✓] ",
-            (Form::Several, false) => "[ ] ",
             (Form::One, _) => "",
+            (_, true) => "[✓] ",
+            (_, false) => "[ ] ",
         };
         format!("{pointer} {color}{key:<2} {tick}")
     };
@@ -269,8 +332,11 @@ pub fn lines(
             format!("{start}{}{RESET}{description}", choice.label)
         })
         .collect();
+    if form == Form::Review {
+        return (options, String::new());
+    }
     let own = start(&OWN_KEY.to_string(), Cursor::Own, pick.is_own_ticked);
-    (options, format!("{own}{own_label}"))
+    (options, format!("{own}{own_label}{RESET}"))
 }
 
 /// The preview of the option the cursor is on.
@@ -302,13 +368,18 @@ pub fn preview(choices: &[Choice], pick: &Pick) -> Option<Preview> {
     })
 }
 
-/// What the label row says the keys do, after the question's header.
-pub fn hint(form: Form, cursor: Cursor) -> &'static str {
-    match (form, cursor == Cursor::Writing) {
-        (Form::One, false) => "enter picks",
-        (Form::Several, false) => "space ticks, enter sends",
-        (Form::One, true) => "enter sends, esc goes back",
-        (Form::Several, true) => "enter adds it, esc goes back",
+/// What the label row says the keys do, after the question's header, with `pick` on `choices`
+/// options. On the review, Enter sends the answers when all are ticked, and else opens the
+/// unticked ones, which the label says, so Enter never surprises.
+pub fn hint(form: Form, pick: &Pick, choices: usize) -> String {
+    let unticked = choices - pick.ticked.len();
+    match (form, pick.cursor == Cursor::Writing) {
+        (Form::Review, _) if unticked == 0 => "space unticks to edit, enter sends".to_string(),
+        (Form::Review, _) => format!("enter edits {unticked}"),
+        (Form::One, false) => "enter submits".to_string(),
+        (Form::Several, false) => "space ticks, enter submits".to_string(),
+        (Form::One, true) => "enter submits, esc goes back".to_string(),
+        (Form::Several, true) => "enter adds it, esc goes back".to_string(),
     }
 }
 
@@ -441,6 +512,31 @@ mod tests {
         let mut pick = pick(Cursor::Writing);
         assert_eq!(pick.move_up(3), Effect::StopWriting);
         assert_eq!(pick.cursor, Cursor::Option(2));
+    }
+
+    #[test]
+    fn the_review_ticks_its_answers_and_has_no_own() {
+        let mut pick = pick(Cursor::Option(0));
+        pick.ticked = BTreeSet::from([0, 1, 2]);
+        assert_eq!(press(&mut pick, Form::Review, "jjj>"), [Effect::Stay; 4]);
+        assert_eq!(pick.cursor, Cursor::Option(2));
+        press(&mut pick, Form::Review, " 1");
+        assert_eq!(pick.ticked, BTreeSet::from([1]));
+        assert_eq!(hint(Form::Review, &pick, 3), "enter edits 2");
+    }
+
+    #[test]
+    fn a_submitted_question_takes_only_enter_esc_and_brackets() {
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        assert_eq!(Pick::press_submitted(&key(KeyCode::Enter)), Effect::Submit);
+        assert_eq!(Pick::press_submitted(&key(KeyCode::Esc)), Effect::Back);
+        assert_eq!(
+            Pick::press_submitted(&key(KeyCode::Char(']'))),
+            Effect::Next
+        );
+        for code in [KeyCode::Char('j'), KeyCode::Char('1'), KeyCode::Char(' ')] {
+            assert_eq!(Pick::press_submitted(&key(code)), Effect::Stay);
+        }
     }
 
     #[test]

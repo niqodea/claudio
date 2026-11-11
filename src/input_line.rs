@@ -28,9 +28,10 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::context::COLD_COLOR;
 use crate::keys::{self, Action, Phase, SessionKey, View};
 use crate::limits::{Level, limit_level};
-use crate::picker::{self, Cursor, Draft, InputBox, Pick};
+use crate::picker::{self, Cursor, Draft, Form, InputBox, Pick};
 use crate::render::{
-    LIGHT_CYAN, ORANGE, Output, STATUS_COLOR, Status, YELLOW, colors_at, cut, marks, start_bar_row,
+    GREEN, LIGHT_CYAN, ORANGE, Output, STATUS_COLOR, Status, YELLOW, colors_at, cut, marks,
+    start_bar_row,
 };
 use crate::status;
 use crate::terminal::{Settings, run_in_terminal};
@@ -310,10 +311,12 @@ impl InputLine {
             Action::Session(SessionKey::End) => return Ok(Some(Outcome::End)),
             Action::Session(SessionKey::Questions) => return Ok(Some(Outcome::Questions(()))),
             Action::Session(direction @ (SessionKey::Down | SessionKey::Up)) => {
-                if let Phase::Answering(view) = &phase {
+                if let Phase::Answering(view) = &phase
+                    && !view.is_submitted
+                {
                     let choices = view.choices.len();
                     let effect = if direction == SessionKey::Down {
-                        self.pick.move_down(choices)
+                        self.pick.move_down(choices, view.form)
                     } else {
                         self.pick.move_up(choices)
                     };
@@ -346,6 +349,9 @@ impl InputLine {
         key: &KeyEvent,
         was_drop_warned: bool,
     ) -> Result<Option<Outcome<()>>, String> {
+        if view.is_submitted {
+            return self.carry_out(Pick::press_submitted(key), key);
+        }
         let text = self.text();
         let input = InputBox {
             is_idle: self.editor.mode() == Mode::Normal && self.editor.pending().is_empty(),
@@ -405,10 +411,19 @@ impl InputLine {
         Ok(())
     }
 
-    /// Pastes `text` into the box, which the question view takes the cursor into first.
+    /// Pastes `text` into the box, which the question view takes the cursor into first, on a
+    /// question open to answers.
     fn paste(&mut self, text: &str) {
-        let is_answering = matches!(lock(&self.shared).phase, Phase::Answering(_));
-        if is_answering && self.pick.cursor != Cursor::Writing {
+        let view = match &lock(&self.shared).phase {
+            Phase::Answering(view) => Some(view.clone()),
+            _ => None,
+        };
+        if let Some(view) = &view
+            && (view.is_submitted || view.form == Form::Review)
+        {
+            return;
+        }
+        if view.is_some() && self.pick.cursor != Cursor::Writing {
             self.pick.start_writing();
             self.enter_box();
         }
@@ -677,7 +692,10 @@ impl InputLine {
             };
         }
         // In the question view, the cursor shows only while the user writes in the box
-        if view.is_none() || self.pick.cursor == Cursor::Writing {
+        let is_writing = view
+            .as_ref()
+            .is_none_or(|view| self.pick.cursor == Cursor::Writing && !view.is_submitted);
+        if is_writing {
             let shape = match self.editor.mode() {
                 Mode::Insert => SetCursorStyle::SteadyBar,
                 Mode::Normal | Mode::Visual | Mode::VisualLine => SetCursorStyle::SteadyBlock,
@@ -690,25 +708,24 @@ impl InputLine {
 
     /// Draws the label row at `label_row`, and returns the width of its text. The row shows the
     /// keys of a half-typed vi command at its right edge, where vim's `showcmd` shows them, so
-    /// nothing else on the row moves when they appear or go, and the question view which
-    /// question it shows of how many. Keys wider than the screen wrap onto the box's first row.
+    /// nothing else on the row moves when they appear or go, and the question view the batch's
+    /// progress. Keys wider than the screen wrap onto the box's first row.
     fn draw_label(&self, out: &mut Vec<u8>, label_row: u16, view: Option<&View>) -> usize {
         let width = self.layout.width;
         put_bar_line(out, label_row, &self.label);
         let pending = self.editor.pending();
-        let position = view.map(|view| format!("{}/{}", view.index + 1, view.count));
-        let right: Vec<&str> = [Some(pending.as_str()), position.as_deref()]
+        let pending = (!pending.is_empty()).then(|| format!("{STATUS_COLOR}{pending}"));
+        let right: Vec<String> = [pending, view.map(progress)]
             .into_iter()
             .flatten()
-            .filter(|part| !part.is_empty())
             .collect();
         let right = right.join(" ");
         if right.is_empty() {
             return visible_width(&self.label);
         }
-        let column = width.saturating_sub(u16::try_from(right.width()).unwrap_or(u16::MAX));
+        let column = width.saturating_sub(u16::try_from(visible_width(&right)).unwrap_or(u16::MAX));
         put!(out, MoveTo(column, label_row));
-        out.extend(format!("{}{STATUS_COLOR}{right}{RESET}", start_bar_row()).as_bytes());
+        out.extend(format!("{}{right}{RESET}", start_bar_row()).as_bytes());
         // The row's text now reaches the right edge, so a narrower screen splits the whole row,
         // not only the label
         usize::from(width)
@@ -764,7 +781,16 @@ impl InputLine {
                 put_line(out, row, &line);
             }
         }
-        let (options, own) = picker::lines(&view.choices, &view.own_label, view.form, &self.pick);
+        let submitted = view
+            .is_submitted
+            .then(|| self.pick.chosen(view.form, &self.text()));
+        let (options, own) = picker::lines(
+            &view.choices,
+            &view.own_label,
+            view.form,
+            &self.pick,
+            submitted.as_ref(),
+        );
         // The rows the options leave empty stay on the bar, above the user's own answer
         let mut options = options.iter();
         for row in rows.options..rows.own {
@@ -873,8 +899,10 @@ impl InputLine {
             Phase::Answering(view) => {
                 let hint = if self.is_drop_warned {
                     format!("{ORANGE}press again to leave out your own answer")
+                } else if view.is_submitted {
+                    format!("{GREEN}submitted{STATUS_COLOR}, enter edits it")
                 } else {
-                    picker::hint(view.form, self.pick.cursor).to_string()
+                    picker::hint(view.form, &self.pick, view.choices.len())
                 };
                 format!("{} {YELLOW}{} {STATUS_COLOR}│ {hint}", marks(), view.label)
             }
@@ -1112,6 +1140,27 @@ fn limit_indicator(letter: char, level: Option<Level>) -> String {
 
 /// Y and how many questions wait, up to 9 and + for more, which keeps one character for the
 /// count, in the color of a warning while any waits, since only the user moves them on.
+/// The batch's progress in the question view: each question's number, green once submitted,
+/// with the one shown in reverse video, which ends without a reset, so the bar stays behind
+/// them. Numbers keep the marks the same size, and match the
+/// review's rows.
+fn progress(view: &View) -> String {
+    view.progress
+        .iter()
+        .enumerate()
+        .map(|(index, &is_submitted)| {
+            let color = if is_submitted { GREEN } else { STATUS_COLOR };
+            let (on, off) = if index == view.index {
+                ("\x1b[7m", "\x1b[27m")
+            } else {
+                ("", "")
+            };
+            format!("{color}{on}{}{off}", index + 1)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn waiting_indicator(waiting: usize) -> String {
     let (color, count) = match waiting {
         0 => (STATUS_COLOR, "0".to_string()),

@@ -17,7 +17,8 @@ use unicode_width::UnicodeWidthChar;
 use crate::markdown::Highlighter;
 use crate::protocol::{Ask, AskKind, Question, SettingsError, State, ToolResult, ToolUse};
 
-const GREEN: &str = "\x1b[32m";
+// For what was added, and what the user submitted
+pub const GREEN: &str = "\x1b[32m";
 // The marks of the user's lines
 pub const LIGHT_CYAN: &str = "\x1b[96m";
 pub const YELLOW: &str = "\x1b[33m";

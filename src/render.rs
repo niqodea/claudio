@@ -626,6 +626,8 @@ fn reply_mark() -> String {
 /// cut. Both its start and its end stay, since the part that tells one line from the next is
 /// often at the end, like the file a command ends with:
 /// <https://v5-archive.patternfly.org/ux-writing/truncation>.
+/// The line holds its own colors, since the `…` and the end take the colors in effect where the
+/// line has them, and know nothing of colors set before it.
 pub fn cut(line: &str, columns: NonZeroUsize) -> String {
     let mut characters = Vec::new();
     let mut rest = line.char_indices();
@@ -658,11 +660,21 @@ pub fn cut(line: &str, columns: NonZeroUsize) -> String {
         end_width += width;
         end_start = *index;
     }
+    // The `…` stands for the text it replaces, so it takes the colors of that text's start
+    let cut_start = characters
+        .iter()
+        .find(|(index, _, _)| *index >= start_end)
+        .map_or(start_end, |(index, _, _)| *index);
+    let end = &line[end_start..];
+    let end = if end.is_empty() {
+        String::new()
+    } else {
+        format!("{}{end}", colors_at(line, end_start))
+    };
     format!(
-        "{}{RESET}…{}{}",
+        "{}{RESET}{}…{RESET}{end}",
         &line[..start_end],
-        colors_at(line, end_start),
-        &line[end_start..]
+        colors_at(line, cut_start),
     )
 }
 
@@ -1040,24 +1052,32 @@ mod tests {
 
     #[test]
     fn a_line_too_long_keeps_its_start_and_its_end() {
-        assert_eq!(cut("abcdefgh", columns(6)), format!("abc{RESET}…gh"));
+        assert_eq!(cut("abcdefgh", columns(6)), format!("abc{RESET}…{RESET}gh"));
     }
 
     #[test]
     fn the_end_kept_starts_with_the_colors_in_effect_there() {
         assert_eq!(
             cut(&format!("{DIM}abcdef"), columns(4)),
-            format!("{DIM}ab{RESET}…{DIM}f")
+            format!("{DIM}ab{RESET}{DIM}…{RESET}{DIM}f")
         );
         assert_eq!(
             cut(&format!("{BOLD}ab{RESET}cdefgh"), columns(4)),
-            format!("{BOLD}ab{RESET}…h")
+            format!("{BOLD}ab{RESET}…{RESET}h")
+        );
+    }
+
+    #[test]
+    fn the_ellipsis_takes_the_colors_of_the_text_it_replaces() {
+        assert_eq!(
+            cut(&format!("ab{DIM}cdefgh"), columns(4)),
+            format!("ab{RESET}{DIM}…{RESET}{DIM}h")
         );
     }
 
     #[test]
     fn a_wide_character_that_does_not_fit_is_cut_whole() {
-        assert_eq!(cut("ab日本", columns(4)), format!("ab{RESET}…"));
+        assert_eq!(cut("ab日本", columns(4)), format!("ab{RESET}…{RESET}"));
     }
 
     #[test]

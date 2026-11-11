@@ -811,7 +811,10 @@ impl InputLine {
             let title = if title.is_empty() {
                 String::new()
             } else {
-                format!("── {LIGHT_CYAN}{}{STATUS_COLOR} ", cut(title, columns))
+                format!(
+                    "── {}{STATUS_COLOR} ",
+                    cut(&format!("{LIGHT_CYAN}{title}"), columns)
+                )
             };
             let fill = "─".repeat(usize::from(width).saturating_sub(visible_width(&title)));
             format!("{STATUS_COLOR}{title}{fill}")

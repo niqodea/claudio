@@ -23,6 +23,12 @@ const CODE: &str = "\x1b[36m";
 // Opens a code block, and closes it
 const FENCE: &str = "```";
 
+/// `text` as a code span, the way Markdown marks literal text: its backticks say it without
+/// color, and the color says it at a glance.
+pub fn code_span(text: &str) -> String {
+    format!("{CODE}`{text}`{RESET}")
+}
+
 /// Colors one block of Markdown as it streams in.
 pub struct Highlighter {
     code_block: Option<CodeBlock>,

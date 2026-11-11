@@ -141,3 +141,7 @@ Its lines don't depend on the terminal's size, so they read the same at any widt
 Below the conversation, the label row and the input box are drawn again on every key and every resize, and never reach the scrollback, so they may use the terminal's size.
 The input line's editing state, like vi's mode, may even show without characters, like with the cursor's shape: only the person typing needs it, and only while typing.
 The test is whether it would matter to someone reading the scrollback later.
+
+Color never carries meaning alone: whatever a color says, a character says too, so the scrollback reads the same without color, as once copied.
+A tool call's line, for one, shows Claude's description of the call for a tool that has one, like Bash, and otherwise the call's input as code, in backticks, as Markdown marks literal text.
+Ctrl-O shows the whole input, like Bash's command.

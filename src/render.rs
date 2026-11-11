@@ -14,7 +14,7 @@ use std::num::NonZeroUsize;
 use serde_json::{Map, Value};
 use unicode_width::UnicodeWidthChar;
 
-use crate::markdown::Highlighter;
+use crate::markdown::{Highlighter, code_span};
 use crate::protocol::{Ask, AskKind, Question, SettingsError, State, ToolResult, ToolUse};
 
 // For what was added, and what the user submitted
@@ -39,14 +39,14 @@ pub const STATUS_COLOR: &str = "\x1b[38;5;244m";
 // the rest of the last row the terminal wraps the text onto
 const FILL_ROW: &str = "\x1b[K";
 
-// Past this, a tool's input in JSON is noise to read through
-const INPUT_SUMMARY_CHARACTERS: usize = 200;
+/// The tools whose input carries a `description` of the call in Claude's words, which sums it up
+/// in place of its input, still whole in the full view.
+/// Seen with Claude Code 2.1.322: the field is optional, yet every one of 1,798 Bash calls over
+/// 60 days of one user's sessions had it, so a Bash call shows its command only in the full view.
+const DESCRIBED_TOOLS: [&str; 2] = ["Agent", "Bash"];
 
-/// The field that sums up a call of each tool that has one.
-/// TODO: Show the description a call carries, like Bash's, before the field, which stays for the
-/// user to check what ran
-const SUMMARY_FIELDS: [(&str, &str); 10] = [
-    ("Agent", "description"),
+/// The field that sums up a call of each tool that has one, when the call has no description.
+const SUMMARY_FIELDS: [(&str, &str); 9] = [
     ("Bash", "command"),
     ("Edit", "file_path"),
     ("ExitPlanMode", "planFilePath"),
@@ -321,8 +321,13 @@ impl Output {
         self.begin(Section::Tools);
         // One line per call keeps the tool calls out of the way of the conversation
         let summary = summarize(&tool_use.name, &tool_use.input);
-        let mut summary_lines = summary.lines();
+        let mut summary_lines = summary.text.lines();
         let first = summary_lines.next().unwrap_or_default();
+        let first = if summary.is_input {
+            code_span(first)
+        } else {
+            first.to_string()
+        };
         let more = match summary_lines.count() {
             0 => String::new(),
             count => format!(" {DIM}(+{count} lines){RESET}"),
@@ -534,6 +539,9 @@ impl Output {
     /// Adds a detail line, after the break that sets it apart, if one waits: cut on screen, since
     /// a detail line can run long, and whole in the full view. A detail line is any line other
     /// than the conversation itself, the user's words and Claude's prose.
+    ///
+    /// The cut here is the only one a detail line gets, so callers pass their text whole, and the
+    /// full view shows it as it was.
     fn push_detail(&mut self, line: &str) {
         self.write_break();
         self.end_claude_line();
@@ -717,15 +725,38 @@ pub fn answer_label(question: &str) -> String {
     format!("{bar}{YELLOW}{question}{RESET}{bar} {LIGHT_CYAN}›{RESET}{bar} ")
 }
 
-/// The input's summary field for a tool that has one, and its start in JSON otherwise.
-fn summarize(tool: &str, input: &Map<String, Value>) -> String {
-    if let Some((_, field)) = SUMMARY_FIELDS.iter().find(|(name, _)| *name == tool) {
-        return read_field(input, field).to_string();
+/// What sums up a call on its line.
+struct Summary {
+    text: String,
+    /// Whether the text is the call's input, as written, rather than Claude's words about it,
+    /// which the line tells apart by showing the input as code.
+    is_input: bool,
+}
+
+/// The call's description for a tool that has one, or else its input: the summary field for a
+/// tool that has one, and all of it in JSON otherwise.
+fn summarize(tool: &str, input: &Map<String, Value>) -> Summary {
+    let text = |field: &str| input.get(field).and_then(Value::as_str);
+    if DESCRIBED_TOOLS.contains(&tool)
+        && let Some(description) = text("description")
+    {
+        return Summary {
+            text: description.to_string(),
+            is_input: false,
+        };
     }
-    let json = serde_json::to_string(input).expect("a JSON object turns back into JSON");
-    match json.char_indices().nth(INPUT_SUMMARY_CHARACTERS) {
-        Some((end, _)) => format!("{DIM}{}…{RESET}", &json[..end]),
-        None => format!("{DIM}{json}{RESET}"),
+    let field = SUMMARY_FIELDS
+        .iter()
+        .find(|(name, _)| *name == tool)
+        .and_then(|(_, field)| text(field));
+    // The line's cut shortens it, once
+    let text = field.map_or_else(
+        || serde_json::to_string(input).expect("a JSON object turns back into JSON"),
+        str::to_string,
+    );
+    Summary {
+        text,
+        is_input: true,
     }
 }
 
@@ -987,7 +1018,10 @@ mod tests {
             [
                 format!("✓ {DIM}#00 Read: one (+1 lines){RESET}"),
                 "  two".to_string(),
-                format!("{BOLD}○{RESET} {DIM}#01{RESET}{BOLD} Read{RESET} b.txt"),
+                format!(
+                    "{BOLD}○{RESET} {DIM}#01{RESET}{BOLD} Read{RESET} {}",
+                    code_span("b.txt")
+                ),
                 format!("  {DIM}file_path:{RESET}"),
                 "    b.txt".to_string(),
                 format!("✓ {DIM}#01 Read: three{RESET}"),
@@ -1035,7 +1069,10 @@ mod tests {
             output.show_tool_use(&read_call("1", &path));
             screen = output.take_lines();
         });
-        let call = format!("{BOLD}○{RESET} {DIM}#00{RESET}{BOLD} Read{RESET} {path}");
+        let call = format!(
+            "{BOLD}○{RESET} {DIM}#00{RESET}{BOLD} Read{RESET} {}",
+            code_span(&path)
+        );
         assert_eq!(screen[1], cut(&call, Config::default().max_detail_columns));
         assert_ne!(screen[1], call);
         assert_eq!(lines[1], call);
@@ -1093,7 +1130,10 @@ mod tests {
         let lines = output.take_lines();
         assert_eq!(
             lines[2],
-            format!("{BOLD}○{RESET} {DIM}#01{RESET}{BOLD} Read{RESET} b.txt")
+            format!(
+                "{BOLD}○{RESET} {DIM}#01{RESET}{BOLD} Read{RESET} {}",
+                code_span("b.txt")
+            )
         );
         assert_eq!(lines[3], format!("✓ {DIM}#01 Read: b{RESET}"));
     }
@@ -1121,7 +1161,47 @@ mod tests {
         assert_eq!(
             lines.last().expect("the call's line"),
             &format!(
-                "{BOLD}○{RESET} {DIM}#00{RESET}{BOLD} Bash{RESET} cd a {DIM}(+2 lines){RESET}"
+                "{BOLD}○{RESET} {DIM}#00{RESET}{BOLD} Bash{RESET} {} {DIM}(+2 lines){RESET}",
+                code_span("cd a")
+            )
+        );
+    }
+
+    #[test]
+    fn a_described_call_shows_its_description_in_place_of_its_input() {
+        let mut output = output_after_message();
+        output.show_tool_use(&tool_use(
+            "Bash",
+            json!({"command": "cargo test", "description": "Run the tests"}),
+        ));
+        let lines = output.take_lines();
+        assert_eq!(
+            lines.last().expect("the call's line"),
+            &format!("{BOLD}○{RESET} {DIM}#00{RESET}{BOLD} Bash{RESET} Run the tests")
+        );
+    }
+
+    #[test]
+    fn a_long_input_in_json_is_cut_once() {
+        let mut output = output_after_message();
+        let message = "x".repeat(300);
+        output.show_tool_use(&tool_use("TodoWrite", json!({"message": message})));
+        let lines = output.take_lines();
+        let line = lines.last().expect("the call's line");
+        assert_eq!(line.matches('…').count(), 1);
+        assert!(line.ends_with(&format!("x\"}}`{RESET}")));
+    }
+
+    #[test]
+    fn a_tool_without_a_summary_field_shows_its_input_in_json_as_code() {
+        let mut output = output_after_message();
+        output.show_tool_use(&tool_use("TodoWrite", json!({"todos": []})));
+        let lines = output.take_lines();
+        assert_eq!(
+            lines.last().expect("the call's line"),
+            &format!(
+                "{BOLD}○{RESET} {DIM}#00{RESET}{BOLD} TodoWrite{RESET} {}",
+                code_span(r#"{"todos":[]}"#)
             )
         );
     }
@@ -1135,7 +1215,8 @@ mod tests {
         assert_eq!(
             lines.last().expect("the call's line"),
             &format!(
-                "{BOLD}○{RESET} {DIM}#00{RESET}{BOLD} Edit{RESET} a.rs {RED}-2{RESET} {GREEN}+1{RESET}"
+                "{BOLD}○{RESET} {DIM}#00{RESET}{BOLD} Edit{RESET} {} {RED}-2{RESET} {GREEN}+1{RESET}",
+                code_span("a.rs")
             )
         );
     }

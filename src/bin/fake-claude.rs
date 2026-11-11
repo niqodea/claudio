@@ -3,8 +3,8 @@
 //! Code writes, from the fixtures of `claudio::contract`, so it passes the checks that make no
 //! call, as `tests/fake_claude.rs` checks.
 //!
-//! It answers each message with a tool call of several lines and its result, then two text
-//! blocks in a row, and the message `ask` with two questions of `AskUserQuestion`'s, whose turn
+//! It answers each message with a described tool call of several lines, a call shown by its
+//! input, and their results, then two text blocks in a row, and the message `ask` with two questions of `AskUserQuestion`'s, whose turn
 //! ends once they are answered: one of one choice whose options have previews, and one of
 //! several choices. The message `ask one` asks only the first. `/clear` starts a new session. `FAKE_DELAY` is how many seconds each answer
 //! waits before it starts, none when unset.
@@ -248,6 +248,26 @@ fn turn() -> Vec<Value> {
                 "type": "tool_result",
                 "tool_use_id": "fake-call",
                 "content": "compiled a.c\nlinked a",
+                "is_error": false,
+            }]},
+            "parent_tool_use_id": null,
+        }),
+        json!({
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use",
+                "id": "fake-read",
+                "name": "Read",
+                "input": {"file_path": "a/Makefile"},
+            }]},
+            "parent_tool_use_id": null,
+        }),
+        json!({
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result",
+                "tool_use_id": "fake-read",
+                "content": "a: a.c",
                 "is_error": false,
             }]},
             "parent_tool_use_id": null,

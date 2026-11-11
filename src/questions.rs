@@ -371,6 +371,12 @@ mod tests {
         draft
     }
 
+    fn with_ticks(cursor: usize, ticked: &[usize]) -> Draft {
+        let mut draft = draft(Cursor::Option(cursor), "");
+        draft.pick.ticked = ticked.iter().copied().collect();
+        draft
+    }
+
     fn questions_of(ask: &Ask) -> &[Question] {
         match &ask.kind {
             AskKind::Questions(questions) => questions,
@@ -401,7 +407,7 @@ mod tests {
     fn enter_submits_and_moves_on_and_opens_a_submitted_question_again() {
         let mut questions = Questions::default();
         questions.add(two_questions("a"), vec![1, 2]);
-        assert_eq!(shown(&questions.send(1, draft(Cursor::Option(2), ""))), 0);
+        assert_eq!(shown(&questions.send(1, with_ticks(2, &[2]))), 0);
         assert_eq!(questions.view(0).progress, [false, true]);
         assert_eq!(questions.step(0, true), 1);
         assert!(questions.view(1).is_submitted);
@@ -447,7 +453,7 @@ mod tests {
         let mut questions = Questions::default();
         questions.add(two_questions("a"), vec![1, 2]);
         questions.send(0, draft(Cursor::Option(1), ""));
-        questions.send(1, draft(Cursor::Option(0), ""));
+        questions.send(1, with_ticks(0, &[0]));
         let mut review = questions.draft(2);
         review.pick.ticked.remove(&0);
         assert_eq!(shown(&questions.send(2, review)), 0);
@@ -483,11 +489,11 @@ mod tests {
             Some("Lint, Tests, fuzzing")
         );
         // The user's own words stay out while unticked
-        let unticked = draft(Cursor::Option(1), "fuzzing");
+        let mut unticked = with_ticks(0, &[1]);
+        unticked.text = "fuzzing".to_string();
         assert_eq!(choose(checks, &unticked).as_deref(), Some("Tests"));
-        // With nothing ticked, the option under the cursor
-        let focused = draft(Cursor::Option(2), "");
-        assert_eq!(choose(checks, &focused).as_deref(), Some("Types"));
+        // With nothing ticked, nothing, whatever the cursor is on
+        assert!(choose(checks, &draft(Cursor::Option(2), "")).is_none());
     }
 
     #[test]

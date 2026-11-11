@@ -91,6 +91,8 @@ There, Enter submits your answer, or on several choices, ticks it as one more it
 Esc in normal mode takes you back to the list too, keeping the text without ticking it, and `]`/`[` in normal mode go to another question.
 Space on your own ticked answer unticks it, keeping the text.
 An answer that leaves out the text you wrote waits for the same key again, and the label row says so in orange.
+Every question needs an answer, so Enter on several choices with none ticked waits too, and to answer none, you write it.
+Claude Code instead lets a question go unanswered, which Claude can't tell from a choice of none.
 Ctrl-N/Ctrl-P move between the options from anywhere, the box too.
 
 Claude Code takes the answers to a call's questions together, so Enter submits a question and moves on to the next one not submitted.

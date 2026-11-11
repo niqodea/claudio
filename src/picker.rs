@@ -168,10 +168,20 @@ impl Pick {
         is_left_out && !text.trim().is_empty()
     }
 
-    /// What chosen together on a question that takes `form` with `text` as the user's own: the
-    /// options and the user's own answer. One option takes the option the cursor is on, or else
-    /// the user's own answer. Several take the options ticked, and the user's own answer when it
-    /// is ticked, or with neither, the option the cursor is on.
+    /// What is chosen on a question that takes `form`, with `text` as the user's own: the options
+    /// and the user's own answer. One option takes the option the cursor is on, or else the
+    /// user's own answer. Several take exactly the options ticked, and the user's own answer when
+    /// it is ticked, never the option the cursor is on, as checkboxes do: Enter sends what the
+    /// ticks show.
+    ///
+    /// Every question needs an answer, so an empty one waits, as Clack's multiselect does by
+    /// default. Claude Code 2.1.322 instead lets a question go unanswered and leaves it out of
+    /// what Claude reads, so Claude cannot tell it from a choice of none. To choose none, the
+    /// user writes it.
+    /// Ref: <https://tessl.io/registry/tessl/npm-clack--prompts/0.11.0/files/docs/selection-prompts.md>,
+    /// on Clack's multiselect taking `required`, true by default
+    /// Ref: <https://github.com/anthropics/claude-code/issues/30320>, on asking Claude Code to
+    /// tell Claude an empty answer from a real one
     pub fn chosen(&self, form: Form, text: &str) -> Chosen {
         let focused = match self.cursor {
             Cursor::Option(index) => Some(index),
@@ -184,12 +194,10 @@ impl Pick {
                 is_own: focused.is_none() && has_text,
             };
         }
-        let is_own = self.is_own_ticked && has_text;
-        let mut options: Vec<usize> = self.ticked.iter().copied().collect();
-        if options.is_empty() && !is_own {
-            options.extend(focused);
+        Chosen {
+            options: self.ticked.iter().copied().collect(),
+            is_own: self.is_own_ticked && has_text,
         }
-        Chosen { options, is_own }
     }
 
     fn press_on_list(&mut self, key: &KeyEvent, choices: usize, form: Form) -> Effect {
@@ -274,6 +282,12 @@ impl Pick {
 pub struct Chosen {
     pub options: Vec<usize>,
     pub is_own: bool,
+}
+
+impl Chosen {
+    pub fn is_empty(&self) -> bool {
+        self.options.is_empty() && !self.is_own
+    }
 }
 
 /// The lines of `choices`, and of the item of the user's own answer, which says `own_label`. The

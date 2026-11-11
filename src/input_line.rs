@@ -113,9 +113,8 @@ pub struct InputLine {
     editor: Editor,
     /// What the user picks on the question the question view shows.
     pick: Pick,
-    /// Whether the last key was an answer that would leave out the user's own text, which the
-    /// label row then warns of, so the same key again answers.
-    is_drop_warned: bool,
+    /// What the label row warns of after the last key, an answer it held back.
+    warning: Option<Warning>,
     layout: Layout,
     /// The first row of the text the box shows.
     scroll: u16,
@@ -167,7 +166,7 @@ impl InputLine {
             input_rows,
             editor: Editor::new(""),
             pick: Draft::new().pick,
-            is_drop_warned: false,
+            warning: None,
             layout,
             scroll: 0,
             end: End::Before(row.min(lowest)),
@@ -300,7 +299,7 @@ impl InputLine {
     /// Acts on a key, with an outcome for one that ends the reading.
     fn key(&mut self, key: KeyEvent) -> Result<Option<Outcome<()>>, String> {
         let phase = lock(&self.shared).phase.clone();
-        let was_drop_warned = std::mem::take(&mut self.is_drop_warned);
+        let was_drop_warned = self.warning.take() == Some(Warning::LeavesOut);
         let action = keys::action(&phase, &key, self.editor.is_empty());
         // Any key other than an edit cancels the half-typed vi command
         if action != Action::Edit {
@@ -359,13 +358,19 @@ impl InputLine {
         };
         let before = self.pick.clone();
         let effect = self.pick.press(key, view.choices.len(), view.form, input);
-        if effect == picker::Effect::Submit
-            && self.pick.leaves_out(view.form, &text)
-            && !was_drop_warned
-        {
-            self.pick = before;
-            self.is_drop_warned = true;
-            return Ok(None);
+        if effect == picker::Effect::Submit && view.form != Form::Review {
+            let warning = if self.pick.chosen(view.form, &text).is_empty() {
+                Some(Warning::Empty)
+            } else if self.pick.leaves_out(view.form, &text) && !was_drop_warned {
+                Some(Warning::LeavesOut)
+            } else {
+                None
+            };
+            if warning.is_some() {
+                self.pick = before;
+                self.warning = warning;
+                return Ok(None);
+            }
         }
         self.carry_out(effect, key)
     }
@@ -897,8 +902,13 @@ impl InputLine {
                 format!("{indicators}{state}")
             }
             Phase::Answering(view) => {
-                let hint = if self.is_drop_warned {
-                    format!("{ORANGE}press again to leave out your own answer")
+                let hint = if let Some(warning) = self.warning {
+                    let text = match (warning, view.form) {
+                        (Warning::LeavesOut, _) => "press again to leave out your own answer",
+                        (Warning::Empty, Form::One) => "write your answer, or esc goes back",
+                        (Warning::Empty, _) => "tick one or more with space",
+                    };
+                    format!("{ORANGE}{text}")
                 } else if view.is_submitted {
                     format!("{GREEN}submitted{STATUS_COLOR}, enter edits it")
                 } else {
@@ -920,6 +930,15 @@ impl InputLine {
             }
         }
     }
+}
+
+/// Why the question view held back an answer, which the label row says.
+#[derive(Clone, Copy, PartialEq)]
+enum Warning {
+    /// It would leave out the user's own text, so the same key again answers.
+    LeavesOut,
+    /// It answers nothing, so it waits for an option or the user's words.
+    Empty,
 }
 
 impl Drop for InputLine {

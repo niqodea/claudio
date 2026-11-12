@@ -31,7 +31,7 @@ use crate::limits::{Level, limit_level};
 use crate::picker::{self, Cursor, Draft, Form, Move, Pick, question_name};
 use crate::render::{Output, Status, colors_at, cut, marks, start_bar_row, user_line};
 use crate::status;
-use crate::style::{BOLD, GREEN, MARK, ORANGE, RESET, REVERSE, STATUS_COLOR, UNREVERSE};
+use crate::style::{BOLD, GREEN, ORANGE, RESET, REVERSE, STATUS_COLOR, UNREVERSE};
 use crate::terminal::{Settings, run_in_terminal};
 use crate::vi::{Editor, Mode};
 use crate::wrap;
@@ -859,8 +859,8 @@ impl InputLine {
                 String::new()
             } else {
                 format!(
-                    "── {}{STATUS_COLOR} ",
-                    cut(&format!("{MARK}{title}"), columns)
+                    "── {}{RESET}{STATUS_COLOR} ",
+                    cut(&format!("{BOLD}{title}"), columns)
                 )
             };
             let fill = "─".repeat(usize::from(width).saturating_sub(visible_width(&title)));

@@ -8,6 +8,8 @@
 //! - a line's start once it says what the line is, which the character after its mark settles,
 //!   like the space in `- ` for a list item;
 //! - a `*` with the next character, which makes it half of bold's `**` or leaves it a star;
+//! - a code span once the backticks that close it end, since only a run of as many as opened it
+//!   closes it, and at the line's end, the backticks of one that never closed, as plain text;
 //! - a line colored whole at its end: a code fence, a line of a code block, which its grammar
 //!   colors a line at a time, and a table's row, which waits for the table's end too, since the
 //!   widest cell sets each column's width.
@@ -287,11 +289,35 @@ fn is_fence(line: &str) -> bool {
 /// The marks stay, colored with what they mark.
 #[derive(Default)]
 struct Inline {
-    is_code_span: bool,
+    /// A code span that waits for the backticks that close it.
+    span: Option<Span>,
     is_bold: bool,
     /// A `*` that waits for the next character: with another `*` it opens or closes bold, and
     /// with any other character it is a star.
     has_star: bool,
+}
+
+/// A code span as Markdown's spec reads one: a run of backticks opens it, and only a run of as many
+/// closes it, so a span can hold fewer or more of them.
+/// Ref: <https://spec.commonmark.org/0.31.2/#code-spans>
+#[derive(Default)]
+struct Span {
+    /// The backticks that open the span.
+    ticks: usize,
+    /// What follows them, the backticks that may close it included.
+    text: String,
+    /// The backticks in a row that end `text`.
+    run: usize,
+}
+
+impl Span {
+    fn is_closed(&self) -> bool {
+        self.run == self.ticks
+    }
+
+    fn colored(&self) -> String {
+        format!("{CODE}{}{}{RESET}", "`".repeat(self.ticks), self.text)
+    }
 }
 
 impl Inline {
@@ -302,6 +328,28 @@ impl Inline {
     }
 
     fn push(&mut self, character: char, colored: &mut String) {
+        if let Some(span) = &mut self.span {
+            match character {
+                '`' if span.text.is_empty() => span.ticks += 1,
+                '`' => {
+                    span.text.push('`');
+                    span.run += 1;
+                }
+                _ if span.is_closed() => {
+                    colored.push_str(&span.colored());
+                    if self.is_bold {
+                        colored.push_str(BOLD);
+                    }
+                    self.span = None;
+                    self.push(character, colored);
+                }
+                _ => {
+                    span.text.push(character);
+                    span.run = 0;
+                }
+            }
+            return;
+        }
         if std::mem::take(&mut self.has_star) {
             if character == '*' {
                 if self.is_bold {
@@ -317,30 +365,33 @@ impl Inline {
             colored.push('*');
         }
         match character {
-            '`' if self.is_code_span => {
-                colored.push('`');
-                self.is_code_span = false;
-                colored.push_str(RESET);
-                if self.is_bold {
-                    colored.push_str(BOLD);
-                }
-            }
             '`' => {
-                self.is_code_span = true;
-                colored.push_str(CODE);
-                colored.push('`');
+                self.span = Some(Span {
+                    ticks: 1,
+                    ..Span::default()
+                });
             }
-            '*' if !self.is_code_span => self.has_star = true,
+            '*' => self.has_star = true,
             character => colored.push(character),
         }
     }
 
-    /// Ends the line: a star that waits stays a star, and the marks still open close.
-    fn end(self, colored: &mut String) {
+    /// Ends the line: a star that waits stays a star, a span that never closed leaves its
+    /// backticks plain and its text read again, and the marks still open close.
+    fn end(mut self, colored: &mut String) {
+        if let Some(span) = self.span.take() {
+            if span.is_closed() {
+                colored.push_str(&span.colored());
+            } else {
+                colored.push_str(&"`".repeat(span.ticks));
+                self.push_str(&span.text, colored);
+                return self.end(colored);
+            }
+        }
         if self.has_star {
             colored.push('*');
         }
-        if self.is_code_span || self.is_bold {
+        if self.is_bold {
             colored.push_str(RESET);
         }
     }
@@ -382,6 +433,23 @@ mod tests {
             color(&["run `ls` now"]),
             [format!("run {CODE}`ls`{RESET} now")]
         );
+    }
+
+    #[test]
+    fn a_code_span_closes_only_with_as_many_backticks_as_opened_it() {
+        assert_eq!(
+            color(&["a `` `x` `` and `f``g` b"]),
+            [format!(
+                "a {CODE}`` `x` ``{RESET} and {CODE}`f``g`{RESET} b"
+            )]
+        );
+    }
+
+    #[test]
+    fn backticks_that_never_close_stay_plain() {
+        assert_eq!(color(&["a `b and ``"]), ["a `b and ``"]);
+        // What the backticks held reads again as prose
+        assert_eq!(color(&["`a **b**"]), [format!("`a {BOLD}**b**{RESET}")]);
     }
 
     #[test]
@@ -521,7 +589,7 @@ mod tests {
         assert_settles(&[("12", ""), (".", ""), (" x", &format!("{DIM}12.{RESET} x"))]);
         assert_settles(&[("##", ""), (" T", &format!("{BOLD}## T"))]);
         assert_settles(&[("  ", ""), ("x", "  x")]);
-        assert_settles(&[("``", ""), ("x", &format!("{CODE}``{RESET}x"))]);
+        assert_settles(&[("``", ""), ("x", "")]);
     }
 
     #[test]
@@ -533,6 +601,15 @@ mod tests {
             ("*", &format!("**{RESET}")),
         ]);
         assert_settles(&[("2 *", "2 "), (" 3", "* 3")]);
+    }
+
+    #[test]
+    fn a_code_span_waits_for_the_backticks_that_close_it() {
+        assert_settles(&[
+            ("a `b", "a "),
+            ("`", ""),
+            (" c", &format!("{CODE}`b`{RESET} c")),
+        ]);
     }
 
     #[test]

@@ -15,3 +15,11 @@ Each rule names its source, or says it is claudio's own.
 - Keep a line to one idea, in the active voice, with plain words and no filler, like please or sorry. [Chrome DevTools](https://chromium.googlesource.com/devtools/devtools-frontend/+/main/docs/styleguide/ux/writing.md)
 - Start with a small letter unless a name starts the line, end with no period, and write numbers as digits. [Rust](https://rust-lang.github.io/api-guidelines/interoperability.html#c-good-err), [Chrome DevTools](https://chromium.googlesource.com/devtools/devtools-frontend/+/main/docs/styleguide/ux/writing.md)
 - Say a warning in words too, never by its color alone. [WCAG 1.4.1](https://www.w3.org/WAI/WCAG22/Understanding/use-of-color)
+
+## Color
+
+- Give a color only a meaning from the README's Colors table, and add a new color, or a new use of one, to the table first.
+- Keep red for what failed. [clig.dev](https://clig.dev/#output)
+- Set code in bold, as man pages set literal text. [man-pages](https://man7.org/linux/man-pages/man7/man-pages.7.html#FORMATTING_AND_WORDING_CONVENTIONS)
+- Prefer the terminal's 16 colors, which its theme sets, to fixed shades, and keep fixed shades for what the 16 lack: orange, and the bar's subtle background and the grey on it. [bat](https://github.com/sharkdp/bat#8-bit-themes)
+- Keep text at a contrast of at least 4.5:1 with what is behind it, the bar included. [WCAG 1.4.3](https://www.w3.org/WAI/WCAG22/Understanding/contrast-minimum)

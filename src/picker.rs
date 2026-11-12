@@ -15,7 +15,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::keys::Input;
 use crate::render::markdown_lines;
-use crate::style::{DIM, GREEN, LIGHT_CYAN, RESET};
+use crate::style::{DIM, GREEN, MARK, RESET};
 
 /// The key of the user's own answer, and its mark, the same on every question.
 pub const OWN_KEY: char = '>';
@@ -343,7 +343,7 @@ pub fn lines(
                 }
             }
             None => match (pick.cursor == cursor, pick.cursor) {
-                (true, _) => (format!("{LIGHT_CYAN}❯{RESET}"), LIGHT_CYAN, is_ticked),
+                (true, _) => (format!("{MARK}❯{RESET}"), MARK, is_ticked),
                 (false, Cursor::Writing) if cursor == Cursor::Own => {
                     (format!("{DIM}❯{RESET}"), "", is_ticked)
                 }

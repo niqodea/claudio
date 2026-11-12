@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::context::{COLD_COLOR, Context};
 use crate::limits::{Limits, level, limit_level};
 use crate::protocol::{Ceiling, Limit};
-use crate::style::{RESET, STATUS_COLOR, YELLOW};
+use crate::style::{RESET, STATUS_COLOR};
 
 /// How long before the cache turns cold its cold-at time shows in yellow.
 const NEAR_COLD: Duration = Duration::from_mins(5);
@@ -79,7 +79,7 @@ fn context_row(context: &Context, now: Instant, wall_now: SystemTime) -> String 
     match context.warm_until(now) {
         Some(cold_at) => {
             let time_left = cold_at - now;
-            let color = (time_left <= NEAR_COLD).then_some(YELLOW);
+            let color = (time_left <= NEAR_COLD).then_some(COLD_COLOR);
             let cold_at = change("cold at", wall_now + time_left, wall_now, color);
             row(
                 "Context",
@@ -342,7 +342,7 @@ mod tests {
         let context = context_with(41_203, NEAR_COLD, 967_000, now);
         let status = lines(None, None, &Limits::new(), &context, now, wall_now);
         let cold_at = clock(wall_now + NEAR_COLD, wall_now);
-        assert!(status[6].contains(&format!("{YELLOW}  cold at {cold_at}")));
+        assert!(status[6].contains(&format!("{COLD_COLOR}  cold at {cold_at}")));
     }
 
     #[test]

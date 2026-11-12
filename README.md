@@ -186,3 +186,20 @@ The test is whether it would matter to someone reading the scrollback later.
 Color never carries meaning alone: whatever a color says, a character says too, so the scrollback reads the same without color, as once copied.
 A tool call's line, for one, shows Claude's description of the call for a tool that has one, like Bash, and otherwise the call's input as code, in backticks, as Markdown marks literal text.
 Ctrl+O shows the whole input, like Bash's command.
+
+## Colors
+
+Each color means one thing, and a character on the line says it too, as [Design](#design) asks:
+
+| Style | Means |
+| ----- | ----- |
+| The default color | what you and Claude write |
+| Bold | headings, strong text, code, tool names and question names |
+| Dim, or grey on the bar | what stays in the background, like a call's result |
+| The bar's background | what is yours: your lines and the input box |
+| Magenta | the conversation's marks: `››`, `‹‹` and the cursor among options |
+| Orange | what needs your attention: a warning, a key that waits for a second press, questions that wait, a cache that turns cold, a limit near its end |
+| Red | what failed or was removed: an error, Claude Code's error output, a limit reached, the lines a diff removes |
+| Green | what is done or added: a submitted answer, the lines a diff adds |
+
+Code in a language shows in the colors of its grammar, which your terminal's palette sets.

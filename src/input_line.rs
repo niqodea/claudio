@@ -31,7 +31,7 @@ use crate::limits::{Level, limit_level};
 use crate::picker::{self, Cursor, Draft, Form, Move, Pick, question_name};
 use crate::render::{Output, Status, colors_at, cut, marks, start_bar_row, user_line};
 use crate::status;
-use crate::style::{GREEN, LIGHT_CYAN, ORANGE, RESET, REVERSE, STATUS_COLOR, UNREVERSE, YELLOW};
+use crate::style::{BOLD, GREEN, MARK, ORANGE, RESET, REVERSE, STATUS_COLOR, UNREVERSE};
 use crate::terminal::{Settings, run_in_terminal};
 use crate::vi::{Editor, Mode};
 use crate::wrap;
@@ -859,7 +859,7 @@ impl InputLine {
             } else {
                 format!(
                     "── {}{STATUS_COLOR} ",
-                    cut(&format!("{LIGHT_CYAN}{title}"), columns)
+                    cut(&format!("{MARK}{title}"), columns)
                 )
             };
             let fill = "─".repeat(usize::from(width).saturating_sub(visible_width(&title)));
@@ -1026,7 +1026,11 @@ impl InputLine {
                         view.sends_at_once,
                     )
                 };
-                format!("{} {YELLOW}{} {STATUS_COLOR}│ {hint}", marks(), view.label)
+                format!(
+                    "{} {BOLD}{}{RESET} {STATUS_COLOR}│ {hint}",
+                    marks(),
+                    view.label
+                )
             }
             Phase::Ending => {
                 let output = &shared.output;

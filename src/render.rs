@@ -18,7 +18,7 @@ use crate::markdown::{Highlighter, code_span};
 use crate::protocol::{Ask, AskKind, Question, SettingsError, State, ToolResult, ToolUse};
 use crate::status::grouped;
 
-use crate::style::{BAR, BOLD, DIM, GREEN, LIGHT_CYAN, ORANGE, RED, RESET, STATUS_COLOR, YELLOW};
+use crate::style::{BAR, BOLD, DIM, GREEN, MARK, ORANGE, RED, RESET, STATUS_COLOR};
 
 // Erases to the end of the row in the background color that is set, which fills the row's
 // rest with the bar without writing spaces into the text. Written after the text too, it fills
@@ -508,6 +508,8 @@ impl Output {
         !self.waiting_stderr.is_empty()
     }
 
+    /// Seen with Claude Code 2.1.322: it writes to its error output only on failure, like the
+    /// tag of an API error, so each line is red, as a failure.
     fn push_stderr(&mut self, line: &str) {
         self.begin(Section::Notice);
         self.push_detail(&format!("{DIM}stderr │{RESET} {RED}{line}{RESET}"));
@@ -642,13 +644,13 @@ pub fn start_bar_row() -> String {
 
 /// The marks in front of a message, on a row of their own.
 pub fn marks() -> String {
-    format!("{LIGHT_CYAN}››")
+    format!("{MARK}››")
 }
 
 /// The marks in front of what Claude writes, on a row of their own, in the color of the user's
 /// marks, since both say who starts.
 fn reply_mark() -> String {
-    format!("{LIGHT_CYAN}‹‹{RESET}")
+    format!("{MARK}‹‹{RESET}")
 }
 
 /// `line` cut in the middle to take at most `columns` columns on screen, with `…` where it is
@@ -763,7 +765,7 @@ pub fn question_lines(question: &Question) -> Vec<String> {
 /// The question in front of an answer, on the bar.
 pub fn answer_label(question: &str) -> String {
     let bar = start_bar_row();
-    format!("{bar}{YELLOW}{question}{RESET}{bar} {LIGHT_CYAN}›{RESET}{bar} ")
+    format!("{bar}{BOLD}{question}{RESET}{bar} {MARK}›{RESET}{bar} ")
 }
 
 /// What sums up a call on its line.

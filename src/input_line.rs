@@ -975,10 +975,12 @@ impl InputLine {
             .map(|first| format!("{ORANGE}{} again {}", keys::name(&first.key), first.loss))
     }
 
-    /// The label row: for a message, `››` with the context's level, marked and red on a cold
-    /// cache, the levels of the plan's usage limits, and after them the questions that wait, in
-    /// the color of a warning since only the user moves them on, or else what Claude does; for
-    /// an answer, the question; at the end, the work Claude still does.
+    /// The label row: for a message, `››` with the budgets, then the activity, as AGENTS.md's
+    /// rules for the label row group them. The budgets are the context's level, marked and red
+    /// on a cold cache, and the levels of the plan's usage limits. The activity is the questions
+    /// that wait, in the color of a warning since only the user moves them on, the tasks that run
+    /// in the background, and what Claude does, `idle` too, so the user always sees whether it is
+    /// their turn. For an answer, the question; at the end, the work Claude still does.
     fn make_label(&self) -> String {
         let shared = lock(&self.shared);
         match &shared.phase {
@@ -993,20 +995,23 @@ impl InputLine {
                 } else {
                     (" ", STATUS_COLOR)
                 };
-                let indicators = format!(
-                    "{}{level_color}{cold_mark}T{} {} {} {}",
-                    marks(),
+                let budgets = format!(
+                    "{level_color}{cold_mark}T{} {} {}",
                     show_level(level),
                     limit_indicator('S', shared.limits.session().map(limit_level)),
                     limit_indicator('W', shared.limits.week().map(limit_level)),
-                    waiting_indicator(*waiting),
                 );
+                let activity = format!(
+                    "{} {}",
+                    waiting_indicator(*waiting),
+                    background_indicator(shared.output.background_tasks().len()),
+                );
+                let indicators = format!("{}{budgets} {STATUS_COLOR}│ {activity}", marks());
                 let state = (self.confirmation())
                     .or_else(|| self.command_line())
-                    .or_else(|| describe_work(&shared.output));
-                let state =
-                    state.map_or_else(String::new, |state| format!(" {STATUS_COLOR}│ {state}"));
-                format!("{indicators}{state}")
+                    .or_else(|| describe_work(&shared.output))
+                    .unwrap_or_else(|| "idle".to_string());
+                format!("{indicators} {STATUS_COLOR}│ {state}")
             }
             Phase::Answering(view) => {
                 let hint = if let Some(confirmation) = self.confirmation() {
@@ -1036,8 +1041,10 @@ impl InputLine {
             Phase::Ending => {
                 let output = &shared.output;
                 let tasks = output.background_tasks();
-                let background =
-                    (!tasks.is_empty()).then(|| format!("background: {}", tasks.join(", ")));
+                let descriptions: Vec<&str> =
+                    tasks.iter().map(|task| task.description.as_str()).collect();
+                let background = (!descriptions.is_empty())
+                    .then(|| format!("background: {}", descriptions.join(", ")));
                 let parts: Vec<String> = ["ending".to_string()]
                     .into_iter()
                     .chain(describe_work(output))
@@ -1303,15 +1310,27 @@ fn names(done: &[bool], shown: usize, name: fn(usize) -> char) -> Option<String>
     Some(names.collect::<Vec<_>>().join(" "))
 }
 
-/// Y and how many questions wait, up to 9 and + for more, which keeps one character for the
-/// count, in the color of a warning while any waits, since only the user moves them on.
+/// Y and how many questions wait, in the color of a warning while any waits, since only the
+/// user moves them on.
 fn waiting_indicator(waiting: usize) -> String {
-    let (color, count) = match waiting {
-        0 => (STATUS_COLOR, "0".to_string()),
-        1..=9 => (ORANGE, waiting.to_string()),
-        _ => (ORANGE, "+".to_string()),
-    };
-    format!("{color}Y{count}")
+    let color = if waiting == 0 { STATUS_COLOR } else { ORANGE };
+    format!("{color}Y{}", show_count(waiting))
+}
+
+/// B and how many tasks run in the background, like a shell Claude started, in the bar's grey
+/// however many run, since they need nothing from the user.
+fn background_indicator(tasks: usize) -> String {
+    format!("{STATUS_COLOR}B{}", show_count(tasks))
+}
+
+/// A count up to 9, and + for more, which keeps one character for the count, so the label's
+/// width stays.
+fn show_count(count: usize) -> String {
+    if count > 9 {
+        "+".to_string()
+    } else {
+        count.to_string()
+    }
 }
 
 /// Draws `lines` so that they end right above `bottom`, after a blank row, on a screen `width`
@@ -1410,6 +1429,15 @@ fn describe_work(output: &Output) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_count_keeps_one_character() {
+        assert_eq!(background_indicator(0), format!("{STATUS_COLOR}B0"));
+        assert_eq!(background_indicator(9), format!("{STATUS_COLOR}B9"));
+        assert_eq!(background_indicator(10), format!("{STATUS_COLOR}B+"));
+        assert_eq!(waiting_indicator(0), format!("{STATUS_COLOR}Y0"));
+        assert_eq!(waiting_indicator(12), format!("{ORANGE}Y+"));
+    }
 
     #[test]
     fn a_level_names_its_items_only_when_it_has_several() {

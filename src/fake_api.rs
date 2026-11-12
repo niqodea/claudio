@@ -3,8 +3,12 @@
 //! follows one rule for each kind of request:
 //!
 //! - a turn whose last user message asks `Run <command> with Bash` gets a call of Bash with the
-//!   command
-//! - a turn whose last user message holds a tool's result gets the text `ok`
+//!   command, and one that asks `Run <command> in the background with Bash` gets one that runs it
+//!   in the background
+//! - a turn whose last user message asks `Stop <task id> with TaskStop` gets a call of `TaskStop`
+//!   with the task's id
+//! - a turn whose last user message says `Reply ok`, holds a tool's result, or Claude Code's
+//!   notification that a background task ended, gets the text `ok`
 //! - the question of the auto mode classifier, the one request that stops at `</severity>`, gets
 //!   a severity of 5, which allows the call, after the delay the fake started with
 //! - Claude Code's check of the connection, `HEAD /api/hello`, gets an empty answer
@@ -18,6 +22,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
@@ -121,31 +126,49 @@ fn reply(request: &Value, classifier_delay: Duration) -> Result<(Value, &'static
         Some(text @ Value::String(_)) => vec![json!({"type": "text", "text": text})],
         _ => Vec::new(),
     };
-    if blocks.iter().any(|block| block["type"] == "tool_result") {
+    let texts: Vec<&str> = blocks
+        .iter()
+        .filter_map(|block| block["text"].as_str())
+        .collect();
+    let request = |prefix: &str, suffix: &str| {
+        (texts.iter()).find_map(|text| text.trim().strip_prefix(prefix)?.strip_suffix(suffix))
+    };
+    // One id per turn, as each turn adds messages
+    let id = format!("toolu_fake_{}", messages.len());
+    if let Some(task_id) = request("Stop ", " with TaskStop") {
+        let call = json!({"type": "tool_use", "id": id, "name": "TaskStop", "input": {"task_id": task_id}});
+        return Ok((call, "tool_use"));
+    }
+    if let Some(command) = request("Run ", " with Bash") {
+        let mut input = json!({"command": command, "description": format!("Run {command}")});
+        if let Some(command) = command.strip_suffix(" in the background") {
+            input = json!({
+                "command": command,
+                "description": format!("Run {command}"),
+                "run_in_background": true,
+            });
+        }
+        let call = json!({"type": "tool_use", "id": id, "name": "Bash", "input": input});
+        return Ok((call, "tool_use"));
+    }
+    let says_ok = texts.iter().any(|text| text.trim() == "Reply ok");
+    let has_result = blocks.iter().any(|block| block["type"] == "tool_result");
+    let is_notification = texts
+        .iter()
+        .any(|text| text.contains("<task-notification>"));
+    if says_ok || has_result || is_notification {
         return Ok((json!({"type": "text", "text": "ok"}), "end_turn"));
     }
-    let command = blocks.iter().find_map(|block| {
-        let text = block["text"].as_str()?.trim();
-        text.strip_prefix("Run ")?.strip_suffix(" with Bash")
-    });
-    match command {
-        Some(command) => Ok((
-            json!({
-                "type": "tool_use",
-                // One id per turn, as each turn adds messages
-                "id": format!("toolu_fake_{}", messages.len()),
-                "name": "Bash",
-                "input": {"command": command, "description": format!("Run {command}")},
-            }),
-            "tool_use",
-        )),
-        None => Err("Claude Code made a call that no rule of the fake covers".to_string()),
-    }
+    Err("Claude Code made a call that no rule of the fake covers".to_string())
 }
 
+/// The reply of `block`, with an id of its own, since Claude Code takes the blocks of replies
+/// with the same id for one message.
 fn message(block: &Value, stop_reason: &str) -> Value {
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let count = COUNT.fetch_add(1, Ordering::Relaxed);
     json!({
-        "id": "msg_fake",
+        "id": format!("msg_fake_{count}"),
         "type": "message",
         "role": "assistant",
         "model": "fake",

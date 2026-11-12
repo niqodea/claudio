@@ -63,8 +63,26 @@ pub enum Event {
         tool_use_id: String,
         is_checking: bool,
     },
-    /// What each of the tasks that run in the background does, in the order they started.
-    BackgroundTasks(Vec<String>),
+    /// The tasks that run in the background, in the order they started.
+    BackgroundTasks(Vec<Task>),
+    /// A task started for the tool use with `tool_use_id`, as a command does once it runs in the
+    /// background, or has run for a few seconds, and runs in the background when
+    /// `is_backgrounded`.
+    TaskStarted {
+        task_id: String,
+        tool_use_id: Option<String>,
+        is_backgrounded: bool,
+    },
+    /// A task that started in the foreground moved to the background.
+    TaskBackgrounded {
+        task_id: String,
+    },
+    /// A task ended, as `status` says, and as Claude Code sums it up for Claude in `summary`.
+    TaskEnded {
+        task_id: String,
+        status: TaskStatus,
+        summary: String,
+    },
     /// How much of the plan's usage limits the account used, each none when Claude Code left it
     /// out.
     Limits {
@@ -107,6 +125,27 @@ pub enum Event {
         request_id: String,
         subtype: String,
     },
+}
+
+/// A task that runs in the background, like a shell Claude started.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Task {
+    #[serde(rename = "task_id")]
+    pub id: String,
+    /// What the task does, as the call that started it describes it.
+    pub description: String,
+}
+
+/// How a task ended.
+///
+/// Undocumented: [`crate::contract::a_background_task_is_told_from_start_to_end`]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Completed,
+    Failed,
+    /// Stopped before it ended, as by Claude's call of `TaskStop`.
+    Stopped,
 }
 
 /// How much a notice of Claude Code's stands out.
@@ -583,9 +622,31 @@ fn read_system(system: System, line: &str) -> Class {
             Event::Version(claude_code_version),
         ]),
         System::SessionStateChanged { state } => Shown(vec![Event::State(state)]),
-        System::BackgroundTasksChanged { tasks } => Shown(vec![Event::BackgroundTasks(
-            tasks.into_iter().map(|task| task.description).collect(),
-        )]),
+        System::BackgroundTasksChanged { tasks } => Shown(vec![Event::BackgroundTasks(tasks)]),
+        System::TaskStarted {
+            task_id,
+            tool_use_id,
+            is_backgrounded,
+        } => Shown(vec![Event::TaskStarted {
+            task_id,
+            tool_use_id,
+            is_backgrounded,
+        }]),
+        System::TaskUpdated {
+            task_id,
+            patch: TaskPatch {
+                is_backgrounded: Some(true),
+            },
+        } => Shown(vec![Event::TaskBackgrounded { task_id }]),
+        System::TaskNotification {
+            task_id,
+            status,
+            summary,
+        } => Shown(vec![Event::TaskEnded {
+            task_id,
+            status,
+            summary,
+        }]),
         System::CompactBoundary { compact_metadata } => Shown(vec![Event::Compacted {
             before: compact_metadata.pre_tokens,
             after: compact_metadata.post_tokens,
@@ -625,10 +686,10 @@ fn read_system(system: System, line: &str) -> Class {
         }
         System::ThinkingTokens => Skipped("claudio leaves Claude's thinking out"),
         System::SessionTitleChanged => Skipped("claudio shows the session's title nowhere"),
-        System::TaskStarted
-        | System::TaskUpdated
-        | System::TaskProgress
-        | System::TaskNotification => Skipped("background_tasks_changed tells the same"),
+        System::TaskUpdated { .. } => {
+            Skipped("a task's other changes, like its end, come in messages of their own")
+        }
+        System::TaskProgress => Skipped("a task shows only as it starts and ends"),
         System::HookStarted | System::HookProgress => {
             Skipped("how a hook ends tells all that matters of it")
         }
@@ -887,9 +948,12 @@ enum System {
     SessionStateChanged {
         state: State,
     },
-    /// Sent each time a task starts or ends, with every task that still runs.
+    /// Sent each time a task goes to the background or ends there, with every task that runs
+    /// there, as the session runs and not only once its input closes.
+    ///
+    /// Undocumented: [`crate::contract::a_background_task_is_told_from_start_to_end`]
     BackgroundTasksChanged {
-        tasks: Vec<BackgroundTask>,
+        tasks: Vec<Task>,
     },
     /// Sent once the context was compacted, as by `/compact`.
     CompactBoundary {
@@ -901,10 +965,32 @@ enum System {
     ThinkingTokens,
     /// The title Claude Code gives the session.
     SessionTitleChanged,
-    TaskStarted,
-    TaskUpdated,
+    /// Sent as a task starts, before the result of the call that started it, which
+    /// `tool_use_id` names, as for a command that runs in the background, as `is_backgrounded`
+    /// says, or that has run for a few seconds in the foreground.
+    ///
+    /// Undocumented: [`crate::contract::a_background_task_is_told_from_start_to_end`],
+    /// [`crate::contract::a_call_moved_to_the_background_is_told`]
+    TaskStarted {
+        task_id: String,
+        tool_use_id: Option<String>,
+        is_backgrounded: bool,
+    },
+    /// Sent as a task changes, like as it ends, or as it moves to the background, before the
+    /// result of the call that started it.
+    ///
+    /// Undocumented: [`crate::contract::a_call_moved_to_the_background_is_told`]
+    TaskUpdated {
+        task_id: String,
+        patch: TaskPatch,
+    },
     TaskProgress,
-    TaskNotification,
+    /// Sent as a task ends, in the background or in the foreground.
+    TaskNotification {
+        task_id: String,
+        status: TaskStatus,
+        summary: String,
+    },
     HookStarted,
     HookProgress,
     /// How a hook of the user's settings ended.
@@ -951,15 +1037,16 @@ enum CheckStatus {
     Done,
 }
 
+/// What changed of a task.
+#[derive(Deserialize)]
+struct TaskPatch {
+    is_backgrounded: Option<bool>,
+}
+
 #[derive(Deserialize)]
 struct CompactMetadata {
     pre_tokens: u64,
     post_tokens: Option<u64>,
-}
-
-#[derive(Deserialize)]
-struct BackgroundTask {
-    description: String,
 }
 
 #[derive(Deserialize)]
@@ -1268,24 +1355,52 @@ mod tests {
     }
 
     #[test]
-    fn a_change_of_the_background_tasks_tells_what_each_one_does() {
-        // As Claude Code 2.1.316 sent it
-        let line = json!({
-            "type": "system",
-            "subtype": "background_tasks_changed",
-            "tasks": [{
-                "task_id": "bbaaokkwa",
-                "run_id": "0mw6q3kby-4c564330",
-                "task_type": "local_bash",
-                "description": "Sleep 20 seconds in background",
-            }],
-        })
-        .to_string();
-        let events = read_events(&line).expect("a readable line");
+    fn a_change_of_the_background_tasks_tells_each_task() {
+        let line = &contract::background_task("completed")[1];
+        let events = read_events(line).expect("a readable line");
         let [Event::BackgroundTasks(tasks)] = events.as_slice() else {
             panic!("background tasks");
         };
-        assert_eq!(tasks, &["Sleep 20 seconds in background"]);
+        assert_eq!(tasks[0].description, "Run sleep 1");
+    }
+
+    #[test]
+    fn only_a_move_to_the_background_tells_of_a_task_change() {
+        let moved = &contract::moved_call()[3];
+        let events = read_events(moved).expect("a readable line");
+        assert!(matches!(
+            events.as_slice(),
+            [Event::TaskBackgrounded { .. }]
+        ));
+        let ended = json!({"type": "system", "subtype": "task_updated", "task_id": "t", "patch": {"status": "completed", "end_time": 1}});
+        assert!(
+            read_events(&ended.to_string())
+                .expect("a readable line")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_task_tells_the_call_that_started_it_and_how_it_ended() {
+        let lines = contract::background_task("completed");
+        let started = read_events(&lines[2]).expect("a readable line");
+        let [
+            Event::TaskStarted {
+                tool_use_id,
+                is_backgrounded,
+                ..
+            },
+        ] = started.as_slice()
+        else {
+            panic!("a task's start");
+        };
+        assert_eq!(tool_use_id.as_deref(), Some("toolu_background"));
+        assert!(is_backgrounded);
+        let ended = read_events(&lines[4]).expect("a readable line");
+        let [Event::TaskEnded { status, .. }] = ended.as_slice() else {
+            panic!("a task's end");
+        };
+        assert_eq!(*status, TaskStatus::Completed);
     }
 
     #[test]

@@ -30,6 +30,14 @@ Each rule names its source, or says it is claudio's own.
 - Cut in the middle, with `…`, so both the start and the end stay, and keep the whole line in the full view. [PatternFly](https://v5-archive.patternfly.org/ux-writing/truncation)
 - On the question screen, cut each line at the screen's width, since a line there takes exactly one row: claudio's own rule
 
+## Label row
+
+- Put each indicator in its group, with `│` between groups: the budgets, which tell how much room is left, as `T`, `S` and `W`, then the activity, which tells what happens now, as `Y`, `B` and what Claude does, `idle` included. Items close together read as one group, and space or a line sets groups apart. [NN/g](https://www.nngroup.com/articles/gestalt-proximity/)
+- Always show what Claude does, `idle` too, since the user decides their next step by it. [NN/g](https://www.nngroup.com/articles/visibility-system-status/)
+- Within a group, put first what needs the user, and among the budgets, the narrowest first, since attention leans left. [NN/g](https://www.nngroup.com/articles/horizontal-attention-leans-left/)
+- Keep what holds for the whole session on the left, and what holds for the moment, like a half-typed vi command, at the right end. [VS Code](https://code.visualstudio.com/api/ux-guidelines/status-bar)
+- Keep each indicator's width fixed, with one character for a count, so it stays where the eye learned to find it, and put text of varying width last: claudio's own rule
+
 ## Checks
 
 - Keep the API of the checks a fake: give each kind of request one rule, listed in the doc of `fake_api`, and fail the check on a request that no rule covers. [Software Engineering at Google](https://abseil.io/resources/swe-book/html/ch13.html#faking-id00043)

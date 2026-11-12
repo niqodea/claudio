@@ -116,6 +116,9 @@ These keys are:
 Ctrl+C stops Claude's turn at once, since a message tells Claude to go on.
 Any other key, or a paste, cancels the wait, however long it lasted, and a loss that changes in between waits for one press more.
 
+`B` on the label row counts the tasks Claude runs in the background, like a shell, up to 9 and then `+`.
+Ctrl+D waits for them to end, and names them on the label row meanwhile, and Ctrl+C there stops them.
+
 Ctrl+L starts a new session, as Claude Code's `/clear` does, and keeps your text in the box, ready to be the new session's first message.
 The conversation marks the new start with a line like `›› cleared │ session <id>`, which names the session it ended, and `claude --resume <id>` goes back to.
 Text you send that starts with `/` reaches Claude as written, so a `/clear` you type is a message like any other.
@@ -196,6 +199,11 @@ The test is whether it would matter to someone reading the scrollback later.
 Color never carries meaning alone: whatever a color says, a character says too, so the scrollback reads the same without color, as once copied.
 A tool call's line, for one, shows Claude's description of the call for a tool that has one, like Bash, and otherwise the call's input as code, in backticks, as Markdown marks literal text.
 Ctrl+O shows the whole input, like Bash's command.
+
+A command that runs in the background, as Claude asks or as a message you send while it runs moves it there, keeps its call's tag to the end.
+Its result line says `◌ #00 Bash: running in background`, and once it ends, a line says how, like `✓ #00 Bash: completed`, or `✗` with `failed` or `stopped`.
+A call that names the task, like TaskStop's, names it by that tag too.
+Ctrl+O shows what Claude Code told Claude of the task, like the file its output goes to, which `tail -f` follows.
 
 ## Colors
 

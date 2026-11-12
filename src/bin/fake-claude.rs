@@ -7,7 +7,8 @@
 //! input, and their results, then two text blocks in a row, and the message `ask` with two
 //! questions of `AskUserQuestion`'s, whose turn ends once they are answered: one of one choice
 //! whose options have previews, and one of several choices. The message `ask one` asks only the
-//! first. The message of the check of a slow permission check gets that check's tool call.
+//! first. The messages of the checks of a slow permission check and of tasks get those checks'
+//! lines, and an interrupt, send now's too, gets the rest of a call that waits for one.
 //! `/clear` starts a new session, and `/compact` and `/cost` answer as Claude Code does.
 //! `FAKE_DELAY` is how many seconds each answer waits before it starts, none when unset.
 
@@ -31,6 +32,7 @@ fn main() {
         session: 1,
         has_started: false,
         sends_states: env::var_os("CLAUDE_CODE_SDK_READS_SESSION_STATE").is_some(),
+        on_interrupt: Vec::new(),
     };
     for line in io::stdin().lock().lines().map_while(Result::ok) {
         let Ok(message) = serde_json::from_str::<Value>(&line) else {
@@ -47,6 +49,8 @@ struct Fake {
     has_started: bool,
     /// Whether the session's state goes out, as `CLAUDE_CODE_SDK_READS_SESSION_STATE` asks.
     sends_states: bool,
+    /// The lines of a turn that waits for an interrupt, which ends it.
+    on_interrupt: Vec<String>,
 }
 
 impl Fake {
@@ -56,6 +60,12 @@ impl Fake {
             Some("initialize") => send(&contract::initialize_response(&account())),
             Some("get_context_usage") => respond(message, &context_usage()),
             Some("get_usage") => respond(message, &plan_usage()),
+            Some("interrupt") if !self.on_interrupt.is_empty() => {
+                for line in std::mem::take(&mut self.on_interrupt) {
+                    send(&line);
+                }
+                return self.end_turn();
+            }
             _ => {}
         }
         // The answers to the questions end the turn that asked them
@@ -86,11 +96,26 @@ impl Fake {
             "ask" => return send(&ask(2).to_string()),
             "ask one" => return send(&ask(1).to_string()),
             contract::SLOW_PERMISSION_CHECK_MESSAGE => {
-                for line in contract::slow_permission_check() {
-                    send(&line);
-                }
-                send(&json!({"type": "result", "subtype": "success"}).to_string());
-                return self.state("idle");
+                return self.send_turn(&contract::slow_permission_check());
+            }
+            contract::BACKGROUND_TASK_MESSAGE => {
+                return self.send_task(&contract::background_task("completed"));
+            }
+            contract::FAILED_BACKGROUND_TASK_MESSAGE => {
+                return self.send_task(&contract::background_task("failed"));
+            }
+            contract::LONG_BACKGROUND_TASK_MESSAGE => {
+                return self.send_turn(&contract::stopped_background_task()[..4]);
+            }
+            contract::REPLY_OK_MESSAGE => return self.send_turn(&[text_line("ok")]),
+            contract::MOVED_CALL_MESSAGE => {
+                return self.wait_for_interrupt(&contract::moved_call());
+            }
+            contract::STOPPED_CALL_MESSAGE => {
+                return self.wait_for_interrupt(&contract::stopped_call());
+            }
+            text if text.starts_with("Stop ") && text.ends_with(" with TaskStop") => {
+                return self.send_turn(&contract::stopped_background_task()[4..]);
             }
             _ => {}
         }
@@ -113,6 +138,36 @@ impl Fake {
         self.state("idle");
     }
 
+    /// Sends `lines` as a turn, and ends it.
+    fn send_turn(&self, lines: &[String]) {
+        for line in lines {
+            send(line);
+        }
+        self.end_turn();
+    }
+
+    /// Sends the lines of a background task: up to the call's result as a turn, and the task's
+    /// end after it, at once.
+    fn send_task(&self, lines: &[String]) {
+        let (turn, end) = lines.split_at(4);
+        self.send_turn(turn);
+        for line in end {
+            send(line);
+        }
+    }
+
+    /// Sends the call that starts `lines`, and keeps the rest for the interrupt that ends it.
+    fn wait_for_interrupt(&mut self, lines: &[String]) {
+        let (call, rest) = lines.split_first().expect("a call");
+        send(call);
+        self.on_interrupt = rest.to_vec();
+    }
+
+    fn end_turn(&self) {
+        send(&json!({"type": "result", "subtype": "success"}).to_string());
+        self.state("idle");
+    }
+
     fn session_id(&self) -> String {
         format!("fake-session-{}", self.session)
     }
@@ -126,6 +181,16 @@ impl Fake {
 
 fn send(line: &str) {
     println!("{line}");
+}
+
+/// A reply of Claude's that is `text` alone.
+fn text_line(text: &str) -> String {
+    json!({
+        "type": "assistant",
+        "message": {"content": [{"type": "text", "text": text}]},
+        "parent_tool_use_id": null,
+    })
+    .to_string()
 }
 
 /// What Claude Code writes for the command `text` in the session `session`, as 2.1.322 does,

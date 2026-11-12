@@ -36,7 +36,7 @@ pub struct Check {
     pub run: fn(&Path) -> Result<(), String>,
 }
 
-pub const CHECKS: [Check; 9] = [
+pub const CHECKS: [Check; 12] = [
     Check {
         name: "session state comes with its variable",
         is_paid: false,
@@ -61,6 +61,21 @@ pub const CHECKS: [Check; 9] = [
         name: "a slow permission check is told",
         is_paid: false,
         run: a_slow_permission_check_is_told,
+    },
+    Check {
+        name: "a background task is told from start to end",
+        is_paid: false,
+        run: a_background_task_is_told_from_start_to_end,
+    },
+    Check {
+        name: "a call moved to the background is told",
+        is_paid: false,
+        run: a_call_moved_to_the_background_is_told,
+    },
+    Check {
+        name: "a stopped call gets its result",
+        is_paid: false,
+        run: a_stopped_call_gets_its_result,
     },
     Check {
         name: "a rate limit event has every window",
@@ -249,32 +264,16 @@ pub fn init(session: &str) -> String {
 /// as the classifier answers, both between the call and its result.
 ///
 /// The check runs Claude Code against [`crate::fake_api`], whose classifier answers after 5
-/// seconds, with a config directory of its own, since the user's settings can set the API's
-/// address and key. The call runs `sh -c true`, since Claude Code allows a read-only command
-/// without the classifier.
+/// seconds. The call runs `sh -c true`, since Claude Code allows a read-only command without the
+/// classifier.
 pub(crate) fn a_slow_permission_check_is_told(program: &Path) -> Result<(), String> {
-    let api = FakeApi::start(Duration::from_secs(5))?;
-    let config =
-        tempfile::tempdir().map_err(|error| format!("cannot create a directory: {error}"))?;
-    let config_path = config.path().to_string_lossy();
-    let mut run = Run::start(
-        program,
-        &["--model", MODEL, "--permission-mode", "auto"],
-        &[
-            ("ANTHROPIC_BASE_URL", &api.url),
-            ("ANTHROPIC_API_KEY", "claudio-check"),
-            ("CLAUDE_CONFIG_DIR", &config_path),
-        ],
-        &["ANTHROPIC_AUTH_TOKEN"],
-    )?;
-    run.send_message(SLOW_PERMISSION_CHECK_MESSAGE)?;
-    run.close_input();
-    let lines = run.read_to_end(FREE_TIMEOUT);
-    // A request that no rule covers explains a timeout too, as Claude Code then retries
-    api.all_covered()?;
+    let lines = on_fake(program, Duration::from_secs(5), |run| {
+        run.send_message(SLOW_PERMISSION_CHECK_MESSAGE)?;
+        Ok(Vec::new())
+    })?;
     compare(
         &["tool use", "permission check", "tool result"],
-        &texts(&lines?),
+        &lines,
         &slow_permission_check(),
     )
 }
@@ -320,6 +319,317 @@ pub fn slow_permission_check() -> Vec<String> {
             }]},
             "parent_tool_use_id": null,
         }),
+    ];
+    lines.iter().map(Value::to_string).collect()
+}
+
+/// Seen with Claude Code 2.1.322: a command that Claude runs in the background gets a
+/// `task_started` that links its task to the call and says it runs in the background, before the
+/// call's result. As the task ends, `task_notification` tells how, as `completed`, `failed` or,
+/// once `TaskStop` stopped it, `stopped`. `background_tasks_changed` lists the task while it
+/// runs, as the session runs, the input open, while Claude is idle too.
+///
+/// The check runs Claude Code against [`crate::fake_api`], and waits for each task's end before
+/// it closes the input, since Claude Code waits for its background tasks once the input closes.
+pub(crate) fn a_background_task_is_told_from_start_to_end(program: &Path) -> Result<(), String> {
+    for (message, status) in [
+        (BACKGROUND_TASK_MESSAGE, "completed"),
+        (FAILED_BACKGROUND_TASK_MESSAGE, "failed"),
+    ] {
+        let lines = on_fake(program, Duration::ZERO, |run| {
+            run.send_message(message)?;
+            run.read_until(FREE_TIMEOUT, is_no_background_task)
+        })?;
+        compare(TASK_KINDS, &lines, &background_task(status))
+            .map_err(|error| format!("a task that {status}: {error}"))?;
+    }
+    let lines = on_fake(program, Duration::ZERO, |run| {
+        run.send_message(LONG_BACKGROUND_TASK_MESSAGE)?;
+        let mut lines = run.read_until(FREE_TIMEOUT, |line| line["subtype"] == "task_started")?;
+        let task_id = lines
+            .last()
+            .map_or("", |line| line["task_id"].as_str().unwrap_or(""));
+        run.send(&protocol::Command::Message {
+            id: "claudio-check-stop",
+            text: &stop_message(task_id),
+        })?;
+        lines.extend(run.read_until(FREE_TIMEOUT, is_no_background_task)?);
+        lines.extend(run.read_until(FREE_TIMEOUT, is_tool_result)?);
+        Ok(lines)
+    })?;
+    compare(TASK_KINDS, &lines, &stopped_background_task())
+        .map_err(|error| format!("a task that TaskStop stopped: {error}"))
+}
+
+/// Seen with Claude Code 2.1.322: a message sent with send now, while a command runs in the
+/// foreground, moves the command to the background. Its task started in the foreground, as for
+/// any command that runs for a while, then a `task_updated` says it moved, before the call's
+/// result. The task's end then comes as for any background task.
+pub(crate) fn a_call_moved_to_the_background_is_told(program: &Path) -> Result<(), String> {
+    let lines = on_fake(program, Duration::ZERO, |run| {
+        run.send_message(MOVED_CALL_MESSAGE)?;
+        let mut lines = run.read_until(FREE_TIMEOUT, is_tool_use)?;
+        run.send(&protocol::Command::Message {
+            id: "claudio-check-move",
+            text: REPLY_OK_MESSAGE,
+        })?;
+        run.send(&protocol::Command::SendNow {
+            request_id: "claudio-check-send-now".to_string(),
+            message_id: "claudio-check-move",
+        })?;
+        lines.extend(run.read_until(FREE_TIMEOUT, is_no_background_task)?);
+        Ok(lines)
+    })?;
+    compare(TASK_KINDS, &lines, &moved_call())
+}
+
+/// Seen with Claude Code 2.1.322: an interrupt fails the call that runs with a result of its
+/// own, so every call gets its result, however its turn ends.
+pub(crate) fn a_stopped_call_gets_its_result(program: &Path) -> Result<(), String> {
+    let lines = on_fake(program, Duration::ZERO, |run| {
+        run.send_message(STOPPED_CALL_MESSAGE)?;
+        let mut lines = run.read_until(FREE_TIMEOUT, is_tool_use)?;
+        run.send(&protocol::Command::Interrupt {
+            request_id: "claudio-check-interrupt".to_string(),
+        })?;
+        lines.extend(run.read_until(FREE_TIMEOUT, |line| line["type"] == "result")?);
+        Ok(lines)
+    })?;
+    compare(&["tool use", "tool result"], &lines, &stopped_call())
+}
+
+/// The kinds of event that the checks of tasks compare.
+const TASK_KINDS: &[&str] = &[
+    "tool use",
+    "task started",
+    "task backgrounded",
+    "background",
+    "tool result",
+    "task ended",
+];
+
+fn is_tool_use(line: &Value) -> bool {
+    line["type"] == "assistant" && line["message"]["content"][0]["type"] == "tool_use"
+}
+
+fn is_tool_result(line: &Value) -> bool {
+    line["type"] == "user" && line["message"]["content"][0]["type"] == "tool_result"
+}
+
+/// Whether `line` tells that no task runs in the background, which a check sees only once a
+/// task it started ended.
+fn is_no_background_task(line: &Value) -> bool {
+    line["subtype"] == "background_tasks_changed"
+        && line["tasks"].as_array().is_some_and(Vec::is_empty)
+}
+
+/// The messages of the checks of tasks, which `fake-claude` answers with their fixtures.
+pub const BACKGROUND_TASK_MESSAGE: &str = "Run sleep 1 in the background with Bash";
+pub const FAILED_BACKGROUND_TASK_MESSAGE: &str = "Run sleep 1; exit 3 in the background with Bash";
+pub const LONG_BACKGROUND_TASK_MESSAGE: &str = "Run sleep 30 in the background with Bash";
+pub const MOVED_CALL_MESSAGE: &str = "Run sleep 4 with Bash";
+pub const STOPPED_CALL_MESSAGE: &str = "Run sleep 5 with Bash";
+pub const REPLY_OK_MESSAGE: &str = "Reply ok";
+
+/// The message that has Claude stop the task `task_id` with `TaskStop`.
+#[must_use]
+pub fn stop_message(task_id: &str) -> String {
+    format!("Stop {task_id} with TaskStop")
+}
+
+/// The task id of the fixtures.
+const TASK_ID: &str = "b040svj56";
+
+fn tool_use(id: &str, name: &str, input: &Value) -> Value {
+    json!({
+        "type": "assistant",
+        "message": {"content": [{"type": "tool_use", "id": id, "name": name, "input": input}]},
+        "parent_tool_use_id": null,
+    })
+}
+
+fn tool_result(id: &str, content: &str) -> Value {
+    json!({
+        "type": "user",
+        "message": {"content": [{
+            "type": "tool_result",
+            "tool_use_id": id,
+            "content": content,
+            "is_error": false,
+        }]},
+        "parent_tool_use_id": null,
+    })
+}
+
+fn background_tasks(tasks: &[&str]) -> Value {
+    let tasks: Vec<Value> = tasks
+        .iter()
+        .map(|description| {
+            json!({"task_id": TASK_ID, "task_type": "local_bash", "description": description})
+        })
+        .collect();
+    json!({"type": "system", "subtype": "background_tasks_changed", "tasks": tasks})
+}
+
+fn task_started(call: &str, description: &str, is_backgrounded: bool) -> Value {
+    json!({
+        "type": "system",
+        "subtype": "task_started",
+        "task_id": TASK_ID,
+        "tool_use_id": call,
+        "task_type": "local_bash",
+        "description": description,
+        "is_backgrounded": is_backgrounded,
+    })
+}
+
+fn task_notification(call: &str, status: &str, summary: &str) -> Value {
+    json!({
+        "type": "system",
+        "subtype": "task_notification",
+        "task_id": TASK_ID,
+        "tool_use_id": call,
+        "status": status,
+        "summary": summary,
+        "output_file": format!("/tmp/claude-1000/tasks/{TASK_ID}.output"),
+    })
+}
+
+/// The result of a call whose command runs in the background.
+fn running_in_background() -> String {
+    format!(
+        "Command running in background with ID: {TASK_ID}. Output is being written to: \
+         /tmp/claude-1000/tasks/{TASK_ID}.output. You will be notified when it completes. To \
+         check interim output, use Read on that file path."
+    )
+}
+
+/// What Claude Code writes, as 2.1.322 did, without the turn's other lines, for a command that
+/// Claude runs in the background and that ends with `status`, `completed` or `failed`.
+///
+/// # Panics
+///
+/// On any other status.
+#[must_use]
+pub fn background_task(status: &str) -> Vec<String> {
+    let (command, summary) = match status {
+        "completed" => ("sleep 1", "completed (exit code 0)"),
+        "failed" => ("sleep 1; exit 3", "failed with exit code 3"),
+        _ => panic!("a background task ends as completed or failed, not as {status}"),
+    };
+    let description = format!("Run {command}");
+    let call = "toolu_background";
+    let lines = [
+        tool_use(
+            call,
+            "Bash",
+            &json!({"command": command, "description": description, "run_in_background": true}),
+        ),
+        background_tasks(&[&description]),
+        task_started(call, &description, true),
+        tool_result(call, &running_in_background()),
+        task_notification(
+            call,
+            status,
+            &format!("Background command \"{description}\" {summary}"),
+        ),
+        background_tasks(&[]),
+    ];
+    lines.iter().map(Value::to_string).collect()
+}
+
+/// What Claude Code writes, as 2.1.322 did, for a command that Claude runs in the background and
+/// then stops with `TaskStop`, without the turns' other lines. The lines up to the call's result
+/// come of the first message, and the rest of the second one.
+#[must_use]
+pub fn stopped_background_task() -> Vec<String> {
+    let description = "Run sleep 30";
+    let (call, stop) = ("toolu_background", "toolu_stop");
+    let lines = [
+        tool_use(
+            call,
+            "Bash",
+            &json!({"command": "sleep 30", "description": description, "run_in_background": true}),
+        ),
+        background_tasks(&[description]),
+        task_started(call, description, true),
+        tool_result(call, &running_in_background()),
+        tool_use(stop, "TaskStop", &json!({"task_id": TASK_ID})),
+        // A stopped task's summary is its description
+        task_notification(call, "stopped", description),
+        background_tasks(&[]),
+        tool_result(
+            stop,
+            &json!({
+                "message": format!("Successfully stopped task: {TASK_ID} (sleep 30)"),
+                "task_id": TASK_ID,
+                "task_type": "local_bash",
+                "command": "sleep 30",
+            })
+            .to_string(),
+        ),
+    ];
+    lines.iter().map(Value::to_string).collect()
+}
+
+/// What Claude Code writes, as 2.1.322 did, for a command that a message sent with send now moves
+/// to the background, without the turns' other lines. The call comes of the first message, and
+/// the rest of send now.
+#[must_use]
+pub fn moved_call() -> Vec<String> {
+    let description = "Run sleep 4";
+    let call = "toolu_moved";
+    let lines = [
+        tool_use(
+            call,
+            "Bash",
+            &json!({"command": "sleep 4", "description": description}),
+        ),
+        task_started(call, description, false),
+        background_tasks(&[description]),
+        json!({
+            "type": "system",
+            "subtype": "task_updated",
+            "task_id": TASK_ID,
+            "patch": {"is_backgrounded": true},
+        }),
+        tool_result(
+            call,
+            &format!(
+                "Command was moved to the background (ID: {TASK_ID}) so that a message that \
+                 arrived while it was running can reach you; it was not interrupted. Output is \
+                 being written to: /tmp/claude-1000/tasks/{TASK_ID}.output"
+            ),
+        ),
+        task_notification(
+            call,
+            "completed",
+            &format!("Background command \"{description}\" completed (exit code 0)"),
+        ),
+        background_tasks(&[]),
+    ];
+    lines.iter().map(Value::to_string).collect()
+}
+
+/// What Claude Code writes, as 2.1.322 did, for a call that an interrupt stops, without the
+/// turn's other lines. The call comes of the message, and its result of the interrupt.
+#[must_use]
+pub fn stopped_call() -> Vec<String> {
+    let call = "toolu_stopped";
+    let mut result = tool_result(
+        call,
+        "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if \
+         it was a file edit, the new_string was NOT written to the file). STOP what you are doing \
+         and wait for the user to tell you how to proceed.",
+    );
+    result["message"]["content"][0]["is_error"] = json!(true);
+    let lines = [
+        tool_use(
+            call,
+            "Bash",
+            &json!({"command": "sleep 5", "description": "Run sleep 5"}),
+        ),
+        result,
     ];
     lines.iter().map(Value::to_string).collect()
 }
@@ -444,6 +754,39 @@ pub(crate) fn the_output_closes_as_claude_code_exits(program: &Path) -> Result<(
     }
 }
 
+/// What Claude Code writes as `act` drives it, and then until it exits, its input closed, when
+/// it runs against [`crate::fake_api`], whose classifier answers after `classifier_delay`. It
+/// runs in auto mode, with a config directory of its own, since the user's settings can set
+/// the API's address and key.
+fn on_fake(
+    program: &Path,
+    classifier_delay: Duration,
+    act: impl FnOnce(&mut Run) -> Result<Vec<Value>, String>,
+) -> Result<Vec<String>, String> {
+    let api = FakeApi::start(classifier_delay)?;
+    let config =
+        tempfile::tempdir().map_err(|error| format!("cannot create a directory: {error}"))?;
+    let config_path = config.path().to_string_lossy();
+    let mut run = Run::start(
+        program,
+        &["--model", MODEL, "--permission-mode", "auto"],
+        &[
+            ("ANTHROPIC_BASE_URL", &api.url),
+            ("ANTHROPIC_API_KEY", "claudio-check"),
+            ("CLAUDE_CONFIG_DIR", &config_path),
+        ],
+        &["ANTHROPIC_AUTH_TOKEN"],
+    )?;
+    let lines = act(&mut run).and_then(|mut lines| {
+        run.close_input();
+        lines.extend(run.read_to_end(FREE_TIMEOUT)?);
+        Ok(lines)
+    });
+    // A request that no rule covers explains a timeout too, as Claude Code then retries
+    api.all_covered()?;
+    Ok(texts(&lines?))
+}
+
 /// Compares the events of the kinds in `kinds` that `real` and `fixture` tell, in order.
 fn compare(kinds: &[&str], real: &[String], fixture: &[String]) -> Result<(), String> {
     same(
@@ -479,45 +822,80 @@ fn events(lines: &[String]) -> Vec<Event> {
 /// named by their order of appearance among those events, so the fixture's ids and Claude
 /// Code's are equal when each repeats in the same places.
 fn summary(kinds: &[&str], events: &[Event]) -> Vec<String> {
-    let mut ids: Vec<&str> = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
     events
         .iter()
-        .filter_map(|event| match event {
-            Event::State(state) => Some(("state", None, format!("{state:?}"))),
-            Event::PayingKey(key) => Some(("paying", None, key.clone())),
-            Event::Reset { previous_session } => {
-                Some(("reset", Some(previous_session), String::new()))
-            }
-            Event::SessionId(session) => Some(("session", Some(session), String::new())),
-            Event::TurnEnd { failure } => Some(("turn end", None, format!("{failure:?}"))),
-            Event::ToolUse(tool_use) => Some(("tool use", Some(&tool_use.id), String::new())),
-            Event::ToolResult(result) => {
-                Some(("tool result", Some(&result.tool_use_id), String::new()))
-            }
-            Event::PermissionCheck {
-                tool_use_id,
-                is_checking,
-            } => {
-                let status = if *is_checking { " checking" } else { " done" };
-                Some(("permission check", Some(tool_use_id), status.to_string()))
-            }
-            Event::Limits { session, week } => Some((
-                "limits",
-                None,
-                format!("session {} week {}", session.is_some(), week.is_some()),
-            )),
-            _ => None,
+        .filter_map(|event| {
+            let (kind, ids, rest): (&str, Vec<&str>, String) = match event {
+                Event::State(state) => ("state", vec![], format!("{state:?}")),
+                Event::PayingKey(key) => ("paying", vec![], key.clone()),
+                Event::Reset { previous_session } => {
+                    ("reset", vec![previous_session], String::new())
+                }
+                Event::SessionId(session) => ("session", vec![session], String::new()),
+                Event::TurnEnd { failure } => ("turn end", vec![], format!("{failure:?}")),
+                Event::ToolUse(tool_use) => ("tool use", vec![&tool_use.id], String::new()),
+                Event::ToolResult(result) => {
+                    ("tool result", vec![&result.tool_use_id], String::new())
+                }
+                Event::PermissionCheck {
+                    tool_use_id,
+                    is_checking,
+                } => {
+                    let status = if *is_checking { "checking" } else { "done" };
+                    ("permission check", vec![tool_use_id], status.to_string())
+                }
+                Event::BackgroundTasks(tasks) => (
+                    "background",
+                    tasks.iter().map(|task| task.id.as_str()).collect(),
+                    String::new(),
+                ),
+                Event::TaskStarted {
+                    task_id,
+                    tool_use_id,
+                    is_backgrounded,
+                } => (
+                    "task started",
+                    [Some(task_id), tool_use_id.as_ref()]
+                        .into_iter()
+                        .flatten()
+                        .map(String::as_str)
+                        .collect(),
+                    if *is_backgrounded { "backgrounded" } else { "" }.to_string(),
+                ),
+                Event::TaskBackgrounded { task_id } => {
+                    ("task backgrounded", vec![task_id], String::new())
+                }
+                Event::TaskEnded {
+                    task_id, status, ..
+                } => ("task ended", vec![task_id], format!("{status:?}")),
+                Event::Limits { session, week } => (
+                    "limits",
+                    vec![],
+                    format!("session {} week {}", session.is_some(), week.is_some()),
+                ),
+                _ => return None,
+            };
+            Some((kind, ids, rest))
         })
         .filter(|(kind, _, _)| kinds.contains(kind))
-        .map(|(kind, id, rest)| {
-            let Some(id) = id else {
-                return format!("{kind}: {rest}");
-            };
-            let index = ids.iter().position(|seen| seen == id).unwrap_or_else(|| {
-                ids.push(id);
-                ids.len() - 1
-            });
-            format!("{kind}: id {}{rest}", index + 1)
+        .map(|(kind, ids, rest)| {
+            let ids: Vec<String> = ids
+                .into_iter()
+                .map(|id| {
+                    let index = seen.iter().position(|old| *old == id).unwrap_or_else(|| {
+                        seen.push(id);
+                        seen.len() - 1
+                    });
+                    format!("id {}", index + 1)
+                })
+                .collect();
+            [kind.to_string(), ids.join(" ")]
+                .into_iter()
+                .chain([rest])
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
         })
         .collect()
 }

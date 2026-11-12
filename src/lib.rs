@@ -338,6 +338,21 @@ fn read_claude(from_claude: ChildStdout, shared: &Mutex<Shared>, forward: &dyn F
                     .note_permission_check(&tool_use_id, is_checking),
                 Event::Limits { session, week } => shared.limits.note(session, week),
                 Event::BackgroundTasks(tasks) => shared.output.note_background_tasks(tasks),
+                Event::TaskStarted {
+                    task_id,
+                    tool_use_id,
+                    is_backgrounded,
+                } => shared
+                    .output
+                    .note_task_started(task_id, tool_use_id, is_backgrounded),
+                Event::TaskBackgrounded { task_id } => {
+                    shared.output.note_task_backgrounded(&task_id);
+                }
+                Event::TaskEnded {
+                    task_id,
+                    status,
+                    summary,
+                } => shared.output.show_task_end(&task_id, status, &summary),
                 Event::Call(usage) => {
                     shared.context.note_call(&usage, Instant::now());
                 }

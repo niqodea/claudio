@@ -15,7 +15,9 @@ use serde_json::{Map, Value};
 use unicode_width::UnicodeWidthChar;
 
 use crate::markdown::{Highlighter, code_span};
-use crate::protocol::{Ask, AskKind, Level, Question, SettingsError, State, ToolResult, ToolUse};
+use crate::protocol::{
+    Ask, AskKind, Level, Question, SettingsError, State, Task, TaskStatus, ToolResult, ToolUse,
+};
 use crate::status::grouped;
 
 use crate::style::{BAR, BOLD, DIM, GREEN, MARK, ORANGE, RED, RESET, STATUS_COLOR};
@@ -72,8 +74,16 @@ pub struct Output {
     /// The tool uses whose result repeats what the screen already shows.
     hidden_results: HashSet<String>,
     /// Each tool use that waits for its result. Claude can run several tools at once, so a
-    /// result can come after a line of another tool.
+    /// result can come after a line of another tool. Every call gets its result, however its
+    /// turn ends, and the result removes the call.
+    ///
+    /// Undocumented: [`crate::contract::a_stopped_call_gets_its_result`]
     pending_calls: HashMap<String, PendingCall>,
+    /// The task that each tool use started, by the tool use's id, until the call's result.
+    call_tasks: HashMap<String, CallTask>,
+    /// Each call whose task goes on in the background once its result came, by the task's id,
+    /// so that the task's end repeats the call's tag.
+    background_calls: HashMap<String, BackgroundCall>,
     /// The columns a noisy line takes at most on screen.
     max_noisy_line_columns: NonZeroUsize,
     /// The tag of the next tool use.
@@ -84,11 +94,33 @@ pub struct Output {
     /// The lines of Claude Code's error output that wait for Claude to finish the text it
     /// writes.
     waiting_stderr: Vec<String>,
-    /// What each task that runs in the background does.
-    background_tasks: Vec<String>,
+    /// The tasks that run in the background, as Claude Code last told them.
+    background_tasks: Vec<Task>,
+}
+
+/// The task a tool use started, until the call's result.
+struct CallTask {
+    id: String,
+    is_backgrounded: bool,
+    /// How the task ended, when it ended before the call's result.
+    end: Option<TaskEnd>,
+}
+
+struct TaskEnd {
+    status: TaskStatus,
+    /// Claude Code's summary of the end for Claude.
+    summary: String,
+}
+
+/// A call whose task runs in the background.
+struct BackgroundCall {
+    call: PendingCall,
+    /// Whether Claude Code listed the task among those that run in the background.
+    was_listed: bool,
 }
 
 /// A tool use that waits for its result, whose line names the tool and repeats the tag.
+#[derive(Clone)]
 struct PendingCall {
     name: String,
     /// What ties the result's line to the call's line: two hexadecimal digits, which keep the
@@ -172,6 +204,8 @@ impl Output {
             status: Status::Idle,
             hidden_results: HashSet::new(),
             pending_calls: HashMap::new(),
+            call_tasks: HashMap::new(),
+            background_calls: HashMap::new(),
             max_noisy_line_columns,
             next_tag: 0,
             interruption: None,
@@ -185,12 +219,82 @@ impl Output {
         self.status.clone()
     }
 
-    pub fn background_tasks(&self) -> &[String] {
+    pub fn background_tasks(&self) -> &[Task] {
         &self.background_tasks
     }
 
-    pub fn note_background_tasks(&mut self, tasks: Vec<String>) {
+    /// Notes the tasks that run in the background. A task that an earlier list held and this one
+    /// does not has ended, so its call is forgotten, even if its end never came. A task that no
+    /// list held yet stays, since it may join a later list.
+    pub fn note_background_tasks(&mut self, tasks: Vec<Task>) {
+        self.background_calls.retain(|task_id, background| {
+            let is_listed = tasks.iter().any(|task| task.id == *task_id);
+            let has_left = background.was_listed && !is_listed;
+            background.was_listed |= is_listed;
+            !has_left
+        });
         self.background_tasks = tasks;
+    }
+
+    /// Notes that the tool use with `tool_use_id` started the task `task_id`, which runs in the
+    /// background when `is_backgrounded`.
+    pub fn note_task_started(
+        &mut self,
+        task_id: String,
+        tool_use_id: Option<String>,
+        is_backgrounded: bool,
+    ) {
+        if let Some(tool_use_id) = tool_use_id {
+            let task = CallTask {
+                id: task_id,
+                is_backgrounded,
+                end: None,
+            };
+            self.call_tasks.insert(tool_use_id, task);
+        }
+    }
+
+    /// Notes that the task `task_id` moved to the background.
+    pub fn note_task_backgrounded(&mut self, task_id: &str) {
+        if let Some(task) = self.call_task(task_id) {
+            task.is_backgrounded = true;
+        }
+    }
+
+    /// Shows how the task `task_id` ended in the background, under the tag of the call that
+    /// started it, or keeps the end for the call's result, when it comes first. A task that ends
+    /// in the foreground shows as its call's result.
+    pub fn show_task_end(&mut self, task_id: &str, status: TaskStatus, summary: &str) {
+        let end = TaskEnd {
+            status,
+            summary: summary.to_string(),
+        };
+        if let Some(background) = self.background_calls.remove(task_id) {
+            self.begin(Section::Tools);
+            self.push_task_end(&background.call, &end);
+        } else if let Some(task) = self.call_task(task_id) {
+            task.end = Some(end);
+        }
+    }
+
+    /// The task `task_id` of a call whose result has not come yet.
+    fn call_task(&mut self, task_id: &str) -> Option<&mut CallTask> {
+        self.call_tasks.values_mut().find(|task| task.id == task_id)
+    }
+
+    /// Adds the line of how the task of `call` ended, with Claude Code's summary for Claude in
+    /// the full view.
+    fn push_task_end(&mut self, call: &PendingCall, end: &TaskEnd) {
+        let (outcome, word) = match end.status {
+            TaskStatus::Completed => ("✓", "completed"),
+            TaskStatus::Failed => ("✗", "failed"),
+            TaskStatus::Stopped => ("✗", "stopped"),
+        };
+        self.push_detail(&format!(
+            "{outcome} {DIM}#{:02x} {}: {word}{RESET}",
+            call.tag, call.name
+        ));
+        self.write_full_view_line(&format!("  {}", end.summary));
     }
 
     /// Takes the text that waits to be printed above the input line.
@@ -382,8 +486,16 @@ impl Output {
             format!("{BOLD}○{RESET} {DIM}#{tag:02x}{RESET}{BOLD}")
         };
         self.begin(Section::Tools);
-        // One line per call keeps the tool calls out of the way of the conversation
-        let summary = summarize(&tool_use.name, &tool_use.input);
+        // One line per call keeps the tool calls out of the way of the conversation. A call that
+        // names a task, like TaskStop's, names it by the tag of the call that started it
+        let task_call = (self.background_calls).get(read_field(&tool_use.input, "task_id"));
+        let summary = match task_call {
+            Some(BackgroundCall { call, .. }) => Summary {
+                text: format!("{DIM}#{:02x}{RESET}", call.tag),
+                is_input: false,
+            },
+            None => summarize(&tool_use.name, &tool_use.input),
+        };
         let mut summary_lines = summary.text.lines();
         let first = summary_lines.next().unwrap_or_default();
         let first = if summary.is_input {
@@ -428,6 +540,7 @@ impl Output {
             self.set_status(Status::Working);
         }
         let call = self.pending_calls.remove(&result.tool_use_id);
+        let task = self.call_tasks.remove(&result.tool_use_id);
         // What a subagent did shows in what it reports back to Claude. A tool the interrupt
         // stopped fails with Claude Code's message to Claude.
         if result.is_subagent
@@ -437,9 +550,34 @@ impl Output {
             return;
         }
         self.begin(Section::Tools);
+        let text = result.text.as_deref().map_or("(no text)", str::trim);
+        // A call whose task goes on in the background has only started, and its result is
+        // Claude Code's note to Claude with the task's id and output file, so the line says that
+        // the task runs, and the task's end shows the outcome
+        if let (Some(call), Some(task)) = (&call, task)
+            && task.is_backgrounded
+        {
+            self.push_detail(&format!(
+                "◌ {DIM}#{:02x} {}: running in background{RESET}",
+                call.tag, call.name
+            ));
+            for line in text.lines() {
+                self.write_full_view_line(&format!("  {line}"));
+            }
+            if let Some(end) = task.end {
+                self.push_task_end(call, &end);
+            } else {
+                let was_listed = self.background_tasks.iter().any(|old| old.id == task.id);
+                let background = BackgroundCall {
+                    call: call.clone(),
+                    was_listed,
+                };
+                self.background_calls.insert(task.id, background);
+            }
+            return;
+        }
         // The outcome is all the line adds to the call's line, so the rest stays in the back
         let outcome = if result.is_error { "✗" } else { "✓" };
-        let text = result.text.as_deref().map_or("(no text)", str::trim);
         let mut lines = text.lines();
         let first = lines.next().unwrap_or("(no output)");
         let rest = lines.count();
@@ -905,6 +1043,9 @@ fn read_field<'a>(input: &'a Map<String, Value>, field: &str) -> &'a str {
 mod tests {
     use serde_json::json;
 
+    use crate::contract;
+    use crate::protocol::Event;
+
     use super::*;
     use crate::config::Config;
 
@@ -1297,6 +1438,123 @@ mod tests {
             )
         );
         assert_eq!(lines[3], format!("✓ {DIM}#01 Read: b{RESET}"));
+    }
+
+    /// Shows `lines` as Claude Code wrote them, by the events that claudio reads of tasks and
+    /// calls, and gives the lines that come of them.
+    fn show_lines(output: &mut Output, lines: &[String]) -> Vec<String> {
+        for line in lines {
+            for event in crate::protocol::read_events(line).expect("a readable line") {
+                match event {
+                    Event::ToolUse(tool_use) => output.show_tool_use(&tool_use),
+                    Event::ToolResult(result) => output.show_tool_result(&result),
+                    Event::BackgroundTasks(tasks) => output.note_background_tasks(tasks),
+                    Event::TaskStarted {
+                        task_id,
+                        tool_use_id,
+                        is_backgrounded,
+                    } => output.note_task_started(task_id, tool_use_id, is_backgrounded),
+                    Event::TaskBackgrounded { task_id } => output.note_task_backgrounded(&task_id),
+                    Event::TaskEnded {
+                        task_id,
+                        status,
+                        summary,
+                    } => output.show_task_end(&task_id, status, &summary),
+                    _ => {}
+                }
+            }
+        }
+        output.take_lines()
+    }
+
+    fn running_in_background(tag: &str) -> String {
+        format!("◌ {DIM}#{tag} Bash: running in background{RESET}")
+    }
+
+    #[test]
+    fn a_background_task_shows_as_it_goes_there_and_as_it_ends() {
+        for (status, outcome, word) in [("completed", "✓", "completed"), ("failed", "✗", "failed")]
+        {
+            let mut output = output_after_message();
+            let lines = show_lines(&mut output, &contract::background_task(status));
+            assert_eq!(
+                lines[2..],
+                [
+                    running_in_background("00"),
+                    format!("{outcome} {DIM}#00 Bash: {word}{RESET}"),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn a_call_moved_to_the_background_shows_as_one_that_went_there() {
+        let mut output = output_after_message();
+        let lines = show_lines(&mut output, &contract::moved_call());
+        assert_eq!(lines[2], running_in_background("00"));
+        assert_eq!(lines[3], format!("✓ {DIM}#00 Bash: completed{RESET}"));
+    }
+
+    #[test]
+    fn a_task_that_ends_before_its_call_result_shows_its_end_with_the_result() {
+        let mut output = output_after_message();
+        let lines = contract::background_task("completed");
+        // The call, the list, the start, then the end and the empty list before the result
+        let early = [&lines[..3], &lines[4..], &lines[3..4]].concat();
+        let lines = show_lines(&mut output, &early);
+        assert_eq!(
+            lines[2..],
+            [
+                running_in_background("00"),
+                format!("✓ {DIM}#00 Bash: completed{RESET}"),
+            ]
+        );
+        assert!(output.background_calls.is_empty());
+    }
+
+    #[test]
+    fn a_task_is_kept_until_it_leaves_the_list_it_was_on() {
+        let mut output = output_after_message();
+        let moved = contract::moved_call();
+        // The call, its start, its move, and its result, without the list that holds the task
+        show_lines(&mut output, &[&moved[..2], &moved[3..5]].concat());
+        let task = |id: &str| Task {
+            id: id.to_string(),
+            description: String::new(),
+        };
+        // A list that does not hold the task yet keeps it
+        output.note_background_tasks(vec![task("other")]);
+        assert_eq!(output.background_calls.len(), 1);
+        output.note_background_tasks(vec![task("b040svj56")]);
+        assert_eq!(output.background_calls.len(), 1);
+        // Once it left the list, it ended
+        output.note_background_tasks(Vec::new());
+        assert!(output.background_calls.is_empty());
+    }
+
+    #[test]
+    fn a_call_that_stops_a_task_names_it_by_its_tag() {
+        let mut output = output_after_message();
+        let lines = show_lines(&mut output, &contract::stopped_background_task());
+        assert_eq!(
+            lines[3],
+            format!("{BOLD}○{RESET} {DIM}#01{RESET}{BOLD} TaskStop{RESET} {DIM}#00{RESET}")
+        );
+        assert_eq!(lines[4], format!("✗ {DIM}#00 Bash: stopped{RESET}"));
+        assert!(lines[5].starts_with(&format!("✓ {DIM}#01 TaskStop: ")));
+    }
+
+    #[test]
+    fn a_task_that_ends_in_the_foreground_shows_as_its_call_result() {
+        let mut output = output_after_message();
+        let started = json!({"type": "system", "subtype": "task_started", "task_id": "t", "tool_use_id": "c", "description": "Run sleep 4", "is_backgrounded": false});
+        let ended = json!({"type": "system", "subtype": "task_notification", "task_id": "t", "status": "completed", "summary": "Run sleep 4"});
+        let call = json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "c", "name": "Bash", "input": {"command": "sleep 4", "description": "Run sleep 4"}}]}, "parent_tool_use_id": null});
+        let result = json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "c", "content": "", "is_error": false}]}, "parent_tool_use_id": null});
+        let lines = [call, started, ended, result].map(|line| line.to_string());
+        let lines = show_lines(&mut output, &lines);
+        assert_eq!(lines[2..], [format!("✓ {DIM}#00 Bash: (no output){RESET}")]);
+        assert!(output.call_tasks.is_empty());
     }
 
     fn tool_use(name: &str, input: Value) -> ToolUse {

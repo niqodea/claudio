@@ -15,7 +15,7 @@ use serde_json::{Map, Value};
 use unicode_width::UnicodeWidthChar;
 
 use crate::markdown::{Highlighter, code_span};
-use crate::protocol::{Ask, AskKind, Question, SettingsError, State, ToolResult, ToolUse};
+use crate::protocol::{Ask, AskKind, Level, Question, SettingsError, State, ToolResult, ToolUse};
 use crate::status::grouped;
 
 use crate::style::{BAR, BOLD, DIM, GREEN, MARK, ORANGE, RED, RESET, STATUS_COLOR};
@@ -517,6 +517,61 @@ impl Output {
         self.push_detail(&format!(
             "{ORANGE}{key} pays for this session, not the subscription{RESET}"
         ));
+    }
+
+    /// Shows that the hook `hook` failed with `exit_code`, or was cancelled, when
+    /// `is_cancelled`, then its error output.
+    pub fn show_hook_failure(
+        &mut self,
+        hook: &str,
+        exit_code: Option<i64>,
+        stderr: &str,
+        is_cancelled: bool,
+    ) {
+        let how = match exit_code {
+            _ if is_cancelled => "was cancelled".to_string(),
+            Some(code) => format!("failed with exit code {code}"),
+            None => "failed".to_string(),
+        };
+        self.show_error(&format!("{hook} hook {how}"));
+        for line in stderr.lines().filter(|line| !line.trim().is_empty()) {
+            self.push_stderr(line);
+        }
+    }
+
+    /// Shows what Claude Code tells the user at `level`: in the full view only when it is
+    /// `Info`, dim when it is a `Notice`, and else in orange, after the level's name.
+    pub fn show_notice(&mut self, text: &str, level: Level) {
+        let lines: Vec<String> = match level {
+            Level::Info => {
+                for line in text.lines() {
+                    self.write_full_view_line(line);
+                }
+                return;
+            }
+            Level::Notice => text
+                .lines()
+                .map(|line| format!("{DIM}{line}{RESET}"))
+                .collect(),
+            Level::Suggestion | Level::Warning => {
+                let name = if level == Level::Warning {
+                    "warning"
+                } else {
+                    "suggestion"
+                };
+                text.lines()
+                    .enumerate()
+                    .map(|(index, line)| match index {
+                        0 => format!("{ORANGE}{name}: {line}{RESET}"),
+                        _ => format!("{ORANGE}{line}{RESET}"),
+                    })
+                    .collect()
+            }
+        };
+        self.begin(Section::Notice);
+        for line in lines {
+            self.push_detail(&line);
+        }
     }
 
     pub fn show_error(&mut self, error: &str) {
@@ -1392,6 +1447,31 @@ mod tests {
         // The check ends after its call did
         output.note_permission_check("2", false);
         assert!(output.status() == Status::Working);
+    }
+
+    #[test]
+    fn a_failed_hook_shows_in_red_with_its_error_output() {
+        let mut output = output_after_message();
+        output.show_hook_failure("Stop", Some(1), "no tmux server\n", false);
+        let lines = output.take_lines();
+        assert_eq!(
+            lines[1],
+            format!("{RED}Stop hook failed with exit code 1{RESET}")
+        );
+        assert!(lines[2].contains("stderr │") && lines[2].contains("no tmux server"));
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn a_notice_shows_by_its_level() {
+        let mut output = output_after_message();
+        output.show_notice("in the full view only", Level::Info);
+        output.show_notice("quiet", Level::Notice);
+        output.show_notice("loud", Level::Warning);
+        let lines = output.take_lines();
+        assert!(!lines.join("").contains("in the full view only"));
+        assert_eq!(lines[1], format!("{DIM}quiet{RESET}"));
+        assert_eq!(lines[2], format!("{ORANGE}warning: loud{RESET}"));
     }
 
     #[test]

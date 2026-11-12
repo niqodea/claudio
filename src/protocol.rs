@@ -44,6 +44,19 @@ pub enum Event {
     /// A tool that waits for the user's answer before it runs.
     Ask(Ask),
     State(State),
+    /// A hook of the user's settings, named `hook` as Claude Code names it, failed with
+    /// `exit_code` and `stderr`, or was cancelled, when `is_cancelled`.
+    HookFailed {
+        hook: String,
+        exit_code: Option<i64>,
+        stderr: String,
+        is_cancelled: bool,
+    },
+    /// What Claude Code tells the user, like a hook's message, at `level`.
+    Notice {
+        text: String,
+        level: Level,
+    },
     /// A slow permission check of the tool use with `tool_use_id` started, when `is_checking`,
     /// or ended.
     PermissionCheck {
@@ -94,6 +107,20 @@ pub enum Event {
         request_id: String,
         subtype: String,
     },
+}
+
+/// How much a notice of Claude Code's stands out.
+/// Ref: `SDKInformationalMessage` in `sdk.d.ts`
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Level {
+    /// Shown only in the full transcript.
+    Info,
+    /// Shown dim.
+    Notice,
+    /// Shown prominently, as a warning is.
+    Suggestion,
+    Warning,
 }
 
 /// Whether Claude works, waits for a message, or waits for the answer to an ask.
@@ -525,6 +552,21 @@ fn read_system(system: System, line: &str) -> Vec<Event> {
             tool_use_id,
             is_checking: status == CheckStatus::Checking,
         }],
+        System::HookResponse {
+            hook_name,
+            outcome: outcome @ (HookOutcome::Error | HookOutcome::Cancelled),
+            exit_code,
+            stderr,
+        } => vec![Event::HookFailed {
+            hook: hook_name,
+            exit_code,
+            stderr,
+            is_cancelled: outcome == HookOutcome::Cancelled,
+        }],
+        System::Informational { content, level } => vec![Event::Notice {
+            text: content,
+            level,
+        }],
         System::Unknown => vec![unknown(line, "system message", "/subtype")],
         System::Status
         | System::ThinkingTokens
@@ -534,7 +576,12 @@ fn read_system(system: System, line: &str) -> Vec<Event> {
         | System::TaskProgress
         | System::TaskNotification
         | System::HookStarted
-        | System::HookResponse
+        | System::HookProgress
+        | System::HookResponse {
+            outcome: HookOutcome::Success,
+            ..
+        }
+        | System::PermissionDenied
         // What a subagent does shows nowhere on the label row
         | System::PermissionCheckStatus {
             agent_id: Some(_), ..
@@ -812,9 +859,23 @@ enum System {
     TaskUpdated,
     TaskProgress,
     TaskNotification,
-    // When a hook of the user's settings starts and ends, which tells nothing of the conversation
+    // A hook of the user's settings that starts or runs, which tells nothing of the conversation
     HookStarted,
-    HookResponse,
+    HookProgress,
+    /// How a hook of the user's settings ended, shown when it failed.
+    HookResponse {
+        hook_name: String,
+        outcome: HookOutcome,
+        exit_code: Option<i64>,
+        stderr: String,
+    },
+    /// What Claude Code tells the user, like a hook's message or a refused model.
+    Informational {
+        content: String,
+        level: Level,
+    },
+    /// A tool use that auto mode refused, which the tool's failed result shows already.
+    PermissionDenied,
     /// Sent once the auto mode classifier has not answered for 4 seconds whether a tool use
     /// needs the user's approval, and again as it answers, so the wait shows as a check rather
     /// than as a slow tool.
@@ -828,6 +889,14 @@ enum System {
     },
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum HookOutcome {
+    Success,
+    Error,
+    Cancelled,
 }
 
 #[derive(Deserialize, PartialEq)]
@@ -1500,12 +1569,45 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_hook_tells_its_name_exit_code_and_error_output() {
+        let line = json!({
+            "type": "system",
+            "subtype": "hook_response",
+            "hook_id": "a",
+            "hook_name": "Stop",
+            "hook_event": "Stop",
+            "output": "",
+            "stdout": "",
+            "stderr": "no tmux server",
+            "exit_code": 1,
+            "outcome": "error",
+            "uuid": "b",
+            "session_id": "c",
+        });
+        let events = read_events(&line.to_string()).expect("a readable line");
+        assert!(matches!(
+            &events[..],
+            [Event::HookFailed { hook, exit_code: Some(1), stderr, is_cancelled: false }]
+                if hook == "Stop" && stderr == "no tmux server"
+        ));
+    }
+
+    #[test]
     fn a_kind_skipped_on_purpose_tells_nothing() {
         let lines = [
             json!({"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 5}),
             json!({"type": "system", "subtype": "session_title_changed", "title": "A title"}),
             json!({"type": "system", "subtype": "hook_started", "hook_event": "Stop"}),
-            json!({"type": "system", "subtype": "hook_response", "hook_event": "Stop"}),
+            json!({"type": "system", "subtype": "hook_progress", "hook_event": "Stop"}),
+            json!({
+                "type": "system",
+                "subtype": "hook_response",
+                "hook_name": "Stop",
+                "outcome": "success",
+                "exit_code": 0,
+                "stderr": "",
+            }),
+            json!({"type": "system", "subtype": "permission_denied", "tool_name": "Bash"}),
             json!({"type": "tool_progress", "tool_name": "Bash", "elapsed_time_seconds": 3}),
         ];
         for line in lines {

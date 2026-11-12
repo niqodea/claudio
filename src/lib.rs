@@ -286,6 +286,7 @@ fn read_claude(from_claude: ChildStdout, shared: &Mutex<Shared>, forward: &dyn F
         };
         let events = match read_events(&line) {
             Ok(events) => events,
+            // Claude Code still runs, so a message claudio cannot read ends no session
             Err(error) => {
                 lock(shared).output.show_error(&error);
                 continue;
@@ -301,6 +302,15 @@ fn read_claude(from_claude: ChildStdout, shared: &Mutex<Shared>, forward: &dyn F
                     shared.output.show_unknown(part, &name, &line);
                 }
                 Event::ApiError(text) => shared.output.show_error(&text),
+                Event::HookFailed {
+                    hook,
+                    exit_code,
+                    stderr,
+                    is_cancelled,
+                } => shared
+                    .output
+                    .show_hook_failure(&hook, exit_code, &stderr, is_cancelled),
+                Event::Notice { text, level } => shared.output.show_notice(&text, level),
                 Event::ToolUse(tool_use) => shared.output.show_tool_use(&tool_use),
                 Event::ToolResult(result) => shared.output.show_tool_result(&result),
                 Event::TurnEnd { failure } => shared.output.show_turn_end(failure.as_deref()),

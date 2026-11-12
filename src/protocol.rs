@@ -518,7 +518,9 @@ fn read_system(system: System, line: &str) -> Vec<Event> {
         | System::TaskStarted
         | System::TaskUpdated
         | System::TaskProgress
-        | System::TaskNotification => vec![],
+        | System::TaskNotification
+        | System::HookStarted
+        | System::HookResponse => vec![],
     }
 }
 
@@ -792,6 +794,9 @@ enum System {
     TaskUpdated,
     TaskProgress,
     TaskNotification,
+    // When a hook of the user's settings starts and ends, which tells nothing of the conversation
+    HookStarted,
+    HookResponse,
     #[serde(other)]
     Unknown,
 }
@@ -1439,6 +1444,8 @@ mod tests {
         let lines = [
             json!({"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 5}),
             json!({"type": "system", "subtype": "session_title_changed", "title": "A title"}),
+            json!({"type": "system", "subtype": "hook_started", "hook_event": "Stop"}),
+            json!({"type": "system", "subtype": "hook_response", "hook_event": "Stop"}),
             json!({"type": "tool_progress", "tool_name": "Bash", "elapsed_time_seconds": 3}),
         ];
         for line in lines {

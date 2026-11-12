@@ -423,12 +423,12 @@ pub fn hint(form: Form, pick: &Pick, choices: usize, sends_at_once: bool) -> Str
     let unticked = choices - pick.ticked.len();
     let enter = if sends_at_once { "sends" } else { "submits" };
     match (form, pick.cursor == Cursor::Writing) {
-        (Form::Review, _) if unticked == 0 => "space unticks to edit, enter sends".to_string(),
-        (Form::Review, _) => format!("enter edits {unticked}"),
-        (Form::One, false) => format!("enter {enter}"),
-        (Form::Several, false) => format!("space ticks, enter {enter}"),
-        (Form::One, true) => format!("enter {enter}, esc goes back"),
-        (Form::Several, true) => "enter adds it, esc goes back".to_string(),
+        (Form::Review, _) if unticked == 0 => "Space unticks to edit, Enter sends".to_string(),
+        (Form::Review, _) => format!("Enter edits {unticked}"),
+        (Form::One, false) => format!("Enter {enter}"),
+        (Form::Several, false) => format!("Space ticks, Enter {enter}"),
+        (Form::One, true) => format!("Enter {enter}, Esc goes back"),
+        (Form::Several, true) => "Enter adds it, Esc goes back".to_string(),
     }
 }
 
@@ -573,7 +573,7 @@ mod tests {
         assert_eq!(pick.cursor, Cursor::Option(2));
         assert_eq!(press(&mut pick, Form::Review, " 1"), [Effect::Stay; 2]);
         assert_eq!(pick.ticked, BTreeSet::from([0, 1]));
-        assert_eq!(hint(Form::Review, &pick, 3, false), "enter edits 1");
+        assert_eq!(hint(Form::Review, &pick, 3, false), "Enter edits 1");
     }
 
     #[test]

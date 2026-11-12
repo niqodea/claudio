@@ -477,7 +477,7 @@ impl Editor {
         }
     }
 
-    /// Where Ctrl-W or Ctrl-U deleting back to `start` stops: once at the insert session's
+    /// Where Ctrl+W or Ctrl+U deleting back to `start` stops: once at the insert session's
     /// start, which the next press goes past, as in vim.
     fn stop_at_insert_start(&self, start: usize) -> usize {
         match self.insert_start {

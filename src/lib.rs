@@ -94,7 +94,7 @@ fn run() -> Result<ExitCode, String> {
         let is_paid = match args.nth(1).as_deref() {
             None => false,
             Some("--paid") if args.next().is_none() => true,
-            Some(_) => return Err(format!("Usage: claudio {CHECK_COMMAND} [--paid]")),
+            Some(_) => return Err(format!("usage: claudio {CHECK_COMMAND} [--paid]")),
         };
         return check_claude_code(is_paid);
     }
@@ -111,10 +111,10 @@ fn run() -> Result<ExitCode, String> {
         .stdout(Stdio::piped())
         // Its error output reaches the terminal through the output, above the input line
         .stderr(Stdio::piped())
-        // Keys reach only this process, which turns Ctrl-C into an interrupt of the turn
+        // Keys reach only this process, which turns Ctrl+C into an interrupt of the turn
         .process_group(0)
         .spawn()
-        .map_err(|error| format!("Cannot start {}: {error}", program.display()))?;
+        .map_err(|error| format!("cannot start {}: {error}", program.display()))?;
     let to_claude = claude.stdin.take().expect("stdin is piped");
     let from_claude = claude.stdout.take().expect("stdout is piped");
     let errors_from_claude = claude.stderr.take().expect("stderr is piped");
@@ -124,13 +124,13 @@ fn run() -> Result<ExitCode, String> {
     let full_view = tempfile::Builder::new()
         .prefix("claudio-")
         .tempfile()
-        .map_err(|error| format!("Cannot create the file of the full view: {error}"))?;
+        .map_err(|error| format!("cannot create the file of the full view: {error}"))?;
     let shared = Arc::new(Mutex::new(Shared {
         phase: Phase::Writing { waiting: 0 },
         output: Output::new(
             full_view
                 .reopen()
-                .map_err(|error| format!("Cannot open the file of the full view: {error}"))?,
+                .map_err(|error| format!("cannot open the file of the full view: {error}"))?,
             config.max_detail_columns,
         ),
         context: Context::new(),
@@ -225,7 +225,7 @@ fn end(
 ) -> Result<ExitCode, String> {
     let status = claude
         .wait()
-        .map_err(|error| format!("Cannot wait for claude: {error}"))?;
+        .map_err(|error| format!("cannot wait for claude: {error}"))?;
     join(readers);
     let shared = &mut lock(shared);
     let output = &mut shared.output;
@@ -279,7 +279,7 @@ fn read_claude(from_claude: ChildStdout, shared: &Mutex<Shared>, forward: &dyn F
             Err(error) => {
                 lock(shared)
                     .output
-                    .show_error(&format!("Cannot read from claude: {error}"));
+                    .show_error(&format!("cannot read from claude: {error}"));
                 break;
             }
         };
@@ -350,7 +350,7 @@ fn read_claude_errors(errors_from_claude: ChildStderr, shared: &Mutex<Shared>) {
             Err(error) => {
                 lock(shared)
                     .output
-                    .show_error(&format!("Cannot read the error output of claude: {error}"));
+                    .show_error(&format!("cannot read the error output of claude: {error}"));
                 return;
             }
         };

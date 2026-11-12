@@ -112,7 +112,7 @@ pub enum Status {
 /// How the user stopped a turn.
 #[derive(Clone, Copy)]
 pub enum Interruption {
-    /// With Ctrl-C, or by refusing a tool, which the turn's end then says.
+    /// With Ctrl+C, or by refusing a tool, which the turn's end then says.
     Stop,
     /// With a message, which says it already. The turn may instead move its work to the
     /// background and end without being stopped.
@@ -252,7 +252,7 @@ impl Output {
         }
         self.begin(Section::Notice);
         self.push_detail(&format!(
-            "{ORANGE}claudio skips Claude Code's {name} {part}s, a kind it does not know{RESET}"
+            "{ORANGE}Claude Code's {name} {part}s are not shown: Ctrl+O shows the first{RESET}"
         ));
         self.write_full_view_line(&format!("  {line}"));
     }
@@ -446,8 +446,8 @@ impl Output {
         // A message makes the turn either stop or move its work to the background and end well
         let line = match (failure, self.interruption.take()) {
             (None, _) | (Some(_), Some(Interruption::Message)) => None,
-            (Some(_), Some(Interruption::Stop)) => Some("Interrupted".to_string()),
-            (Some(reason), None) => Some(format!("Turn ended: {reason}")),
+            (Some(_), Some(Interruption::Stop)) => Some("stopped".to_string()),
+            (Some(reason), None) => Some(format!("turn ended: {reason}")),
         };
         if let Some(line) = line {
             self.begin(Section::Notice);
@@ -462,9 +462,9 @@ impl Output {
     pub fn show_settings_errors(&mut self, errors: &[SettingsError]) {
         self.begin(Section::Notice);
         for error in errors {
-            let file = error.file.as_deref().unwrap_or("A settings file");
+            let file = error.file.as_deref().unwrap_or("a settings file");
             self.push_detail(&format!(
-                "{RED}Skipped {file}, so none of its settings apply: {} {}{RESET}",
+                "{RED}Claude Code skipped {file}, so none of its settings apply: {} {}{RESET}",
                 error.path, error.message
             ));
         }
@@ -475,7 +475,7 @@ impl Output {
     pub fn show_unchecked_version(&mut self, version: &str) {
         self.begin(Section::Notice);
         self.push_detail(&format!(
-            "{ORANGE}Claude Code {version} runs, and claudio was checked against {}{RESET}",
+            "{ORANGE}Claude Code {version} runs, but {} is the one checked to work{RESET}",
             crate::claude_code::VERSION
         ));
     }

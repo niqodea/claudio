@@ -303,7 +303,7 @@ pub(crate) fn a_permission_after_the_input_closes_fails(program: &Path) -> Resul
 }
 
 /// Seen with Claude Code 2.1.316: SIGINT stops Claude's turn and its background tasks, as
-/// Ctrl-C does a program's work in the terminal, and Claude Code then exits, since its input
+/// Ctrl+C does a program's work in the terminal, and Claude Code then exits, since its input
 /// closed.
 pub(crate) fn sigint_stops_claude_code_after_its_input_closes(
     program: &Path,
@@ -436,7 +436,7 @@ impl Run {
         removed: &[&str],
     ) -> Result<Self, String> {
         let directory =
-            tempfile::tempdir().map_err(|error| format!("Cannot create a directory: {error}"))?;
+            tempfile::tempdir().map_err(|error| format!("cannot create a directory: {error}"))?;
         let mut command = claude_code::command(program);
         command
             .args(args)
@@ -452,7 +452,7 @@ impl Run {
         }
         let mut child = command
             .spawn()
-            .map_err(|error| format!("Cannot start {}: {error}", program.display()))?;
+            .map_err(|error| format!("cannot start {}: {error}", program.display()))?;
         let input = child.stdin.take();
         let output = child.stdout.take().expect("stdout is piped");
         let (sender, lines) = mpsc::channel();
@@ -477,7 +477,7 @@ impl Run {
         input
             .write_all(command.to_line().as_bytes())
             .and_then(|()| input.flush())
-            .map_err(|error| format!("Cannot write to Claude Code: {error}"))
+            .map_err(|error| format!("cannot write to Claude Code: {error}"))
     }
 
     fn send_message(&mut self, text: &str) -> Result<(), String> {
@@ -548,7 +548,7 @@ impl Run {
         // ends, so its id still names it
         if unsafe { libc::kill(self.child.id().cast_signed(), libc::SIGINT) } == -1 {
             return Err(format!(
-                "Cannot send SIGINT: {}",
+                "cannot send SIGINT: {}",
                 std::io::Error::last_os_error()
             ));
         }
@@ -562,7 +562,7 @@ impl Run {
             match self.child.try_wait() {
                 Ok(Some(_)) => return Ok(()),
                 Ok(None) => thread::sleep(Duration::from_millis(100)),
-                Err(error) => return Err(format!("Cannot wait for Claude Code: {error}")),
+                Err(error) => return Err(format!("cannot wait for Claude Code: {error}")),
             }
         }
         Err(format!("Claude Code still ran after {timeout:?}"))

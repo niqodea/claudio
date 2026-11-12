@@ -76,7 +76,7 @@ impl<'a> Conversation<'a> {
         // answering a status line with HTTP 429
         self.send(&Command::GetUsage)?;
         let mut draft = String::new();
-        // What Claude asks waits for the user to open it with Ctrl-Y, so no key typed before a
+        // What Claude asks waits for the user to open it with Ctrl+Y, so no key typed before a
         // question showed can answer it
         let mut questions = Questions::default();
         // The question the question view shows, while it shows
@@ -85,7 +85,7 @@ impl<'a> Conversation<'a> {
             match self.session.next_input() {
                 Some(Input::Ask(ask)) if matches!(ask.kind, AskKind::Permission) => {
                     lock(&self.session.shared).output.show_error(&format!(
-                        "Refused {}: only auto mode is supported",
+                        "refused {}: only auto mode works, which ~/.claude/settings.json sets",
                         ask.tool_name
                     ));
                     self.reply(&ask, Answer::Deny)?;
@@ -255,7 +255,7 @@ impl<'a> Conversation<'a> {
                 questions.first()
             }
             Outcome::End => unreachable!("the session ends before"),
-            Outcome::Clear(_) => unreachable!("the question view takes no Ctrl-L"),
+            Outcome::Clear(_) => unreachable!("the question view takes no Ctrl+L"),
             Outcome::Run(..) => unreachable!("the question view takes no command"),
         })
     }
@@ -326,9 +326,9 @@ impl<'a> Conversation<'a> {
     }
 
     fn refuse(&mut self, request_id: &str, subtype: &str) -> Result<(), String> {
-        lock(&self.session.shared)
-            .output
-            .show_error(&format!("Refused {subtype}: not supported"));
+        lock(&self.session.shared).output.show_error(&format!(
+            "refused Claude Code's {subtype} request, which does not work here"
+        ));
         self.send(&Command::Refuse {
             request_id,
             subtype,
@@ -344,7 +344,7 @@ impl<'a> Conversation<'a> {
             .and_then(|()| self.to_claude.flush())
         {
             Err(error) if error.kind() != io::ErrorKind::BrokenPipe => {
-                Err(format!("Cannot write to claude: {error}"))
+                Err(format!("cannot write to claude: {error}"))
             }
             _ => Ok(()),
         }
@@ -355,13 +355,13 @@ impl<'a> Conversation<'a> {
 /// finishes its work.
 pub struct Ending<'a> {
     session: Session,
-    /// Claude Code's process, which Ctrl-C interrupts.
+    /// Claude Code's process, which Ctrl+C interrupts.
     claude: &'a Child,
 }
 
 impl Ending<'_> {
     /// Shows Claude finish its work, until Claude Code exits once its turn and its background
-    /// tasks end. Ctrl-C stops them. Claude Code fails what it asks once its input closed, so
+    /// tasks end. Ctrl+C stops them. Claude Code fails what it asks once its input closed, so
     /// nothing it asks waits for an answer.
     ///
     /// Undocumented: [`crate::contract::a_permission_after_the_input_closes_fails`]
@@ -387,7 +387,7 @@ impl Ending<'_> {
         }
     }
 
-    /// Stops Claude's turn and its background tasks with SIGINT, as Ctrl-C does a program's
+    /// Stops Claude's turn and its background tasks with SIGINT, as Ctrl+C does a program's
     /// work in the terminal, after which Claude Code exits, its input closed.
     ///
     /// Undocumented: [`crate::contract::sigint_stops_claude_code_after_its_input_closes`]
@@ -400,7 +400,7 @@ impl Ending<'_> {
         // to the child, which this borrow of it rules out
         if unsafe { libc::kill(self.claude.id().cast_signed(), libc::SIGINT) } == -1 {
             return Err(format!(
-                "Cannot stop claude: {}",
+                "cannot stop claude: {}",
                 io::Error::last_os_error()
             ));
         }

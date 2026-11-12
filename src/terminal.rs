@@ -6,8 +6,8 @@ use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitStatus};
 
 /// Hands the client every key as typed until it is dropped: the terminal echoes none, holds none
-/// for a whole line, and takes none for itself, like Ctrl-C for a signal, Ctrl-S to pause the
-/// output or Ctrl-V to quote the next key. Its output stays as it was, so a line break still
+/// for a whole line, and takes none for itself, like Ctrl+C for a signal, Ctrl+S to pause the
+/// output or Ctrl+V to quote the next key. Its output stays as it was, so a line break still
 /// starts the next row at its start. Between two readings of the input line, a key then waits
 /// for the next one instead of showing up where Claude's text goes.
 pub struct QuietTerminal {
@@ -21,12 +21,12 @@ pub struct Settings(libc::termios);
 impl QuietTerminal {
     pub fn new() -> Result<Self, String> {
         let original = read_settings()
-            .map_err(|error| format!("Cannot read the terminal's settings: {error}"))?;
+            .map_err(|error| format!("cannot read the terminal's settings: {error}"))?;
         let mut quiet = original.0;
         quiet.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG | libc::IEXTEN);
         quiet.c_iflag &= !(libc::IXON | libc::ICRNL);
         write_settings(Settings(quiet), libc::TCSANOW)
-            .map_err(|error| format!("Cannot change the terminal's settings: {error}"))?;
+            .map_err(|error| format!("cannot change the terminal's settings: {error}"))?;
         Ok(QuietTerminal { original })
     }
 
@@ -45,7 +45,7 @@ impl Drop for QuietTerminal {
 }
 
 /// Runs `command` in the terminal and waits for it, as POSIX `system` does: with the terminal's
-/// `original` settings, where Ctrl-C and Ctrl-\ send their signals, which the client ignores
+/// `original` settings, where Ctrl+C and Ctrl+\ send their signals, which the client ignores
 /// meanwhile and the command takes with their default actions. The client's settings return
 /// once the command ends.
 pub fn run_in_terminal(original: Settings, command: &mut Command) -> io::Result<ExitStatus> {

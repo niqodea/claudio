@@ -533,7 +533,7 @@ impl InputLine {
     fn edit_in_editor(&mut self) -> Result<(), String> {
         let path = env::temp_dir().join(format!("claudio-{}.md", process::id()));
         fs::write(&path, self.text())
-            .map_err(|error| format!("Cannot write {}: {error}", path.display()))?;
+            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
         let status = match self
             .run_program(process::Command::new(&self.editor_command).arg(&path))?
         {
@@ -541,11 +541,11 @@ impl InputLine {
             // The draft stays on the line, and the session goes on
             Err(error) => {
                 let _ = fs::remove_file(&path);
-                return self.show_error(&format!("Cannot run {}: {error}", self.editor_command));
+                return self.show_error(&format!("cannot run {}: {error}", self.editor_command));
             }
         };
         let text = fs::read_to_string(&path)
-            .map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
         // The file goes with the draft, which the input line now holds
         let _ = fs::remove_file(&path);
         if status.success() {
@@ -637,7 +637,7 @@ impl InputLine {
     }
 
     /// Shows the full view in less, from its end, where `F` follows the lines that keep coming
-    /// until Ctrl-C, or from the question the question view shows, which reads in full there
+    /// until Ctrl+C, or from the question the question view shows, which reads in full there
     /// with less's own keys and then answers on `q`. less keeps the colors, draws on a screen of its own, which leaves the
     /// conversation's rows as they were, and stays open on a view shorter than a screen,
     /// whatever `LESS` says. It reads the file as the UTF-8 the output writes, whatever the
@@ -656,7 +656,7 @@ impl InputLine {
         )?;
         match status {
             Ok(_) => Ok(()),
-            Err(error) => self.show_error(&format!("Cannot show the full view: {error}")),
+            Err(error) => self.show_error(&format!("cannot show the full view: {error}")),
         }
     }
 
@@ -887,7 +887,7 @@ impl InputLine {
                 .map(|line| cut(line, columns))
                 .collect();
             if is_cut && room > 0 {
-                lines.push(format!("{STATUS_COLOR}… Ctrl-O shows it whole"));
+                lines.push(format!("{STATUS_COLOR}… Ctrl+O shows it whole"));
             }
             for (row, line) in (1..).zip(lines) {
                 put_line(out, row, &line);
@@ -1012,12 +1012,12 @@ impl InputLine {
                     confirmation
                 } else if self.is_empty_warned {
                     let text = match view.form {
-                        Form::One => "write your answer, or esc goes back",
-                        _ => "tick one or more with space",
+                        Form::One => "write your answer, or Esc goes back",
+                        _ => "Space ticks one or more",
                     };
                     format!("{ORANGE}{text}")
                 } else if view.is_submitted {
-                    format!("{GREEN}submitted{STATUS_COLOR}, enter edits it")
+                    format!("{GREEN}submitted{STATUS_COLOR}, Enter edits it")
                 } else {
                     picker::hint(
                         view.form,
@@ -1247,11 +1247,11 @@ fn write_out(out: &[u8]) -> Result<(), String> {
     stdout
         .write_all(out)
         .and_then(|()| stdout.flush())
-        .map_err(|error| format!("Cannot write to the terminal: {error}"))
+        .map_err(|error| format!("cannot write to the terminal: {error}"))
 }
 
 fn cannot_read_terminal(error: &io::Error) -> String {
-    format!("Cannot read the terminal: {error}")
+    format!("cannot read the terminal: {error}")
 }
 
 /// The last line of the session, on the bar, with the session's id once Claude Code told it.
@@ -1325,7 +1325,7 @@ fn draw_lines_above(out: &mut Vec<u8>, lines: &[String], width: u16, bottom: u16
         if line_rows > room {
             if row > 0 {
                 put!(out, MoveTo(0, row - 1));
-                out.extend(format!("{STATUS_COLOR}… Ctrl-O shows it whole{RESET}").as_bytes());
+                out.extend(format!("{STATUS_COLOR}… Ctrl+O shows it whole{RESET}").as_bytes());
             }
             return row.saturating_sub(1);
         }

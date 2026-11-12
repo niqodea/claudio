@@ -41,9 +41,9 @@ impl Config {
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Config::default()),
-            Err(error) => return Err(format!("Cannot read {}: {error}", path.display())),
+            Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
         };
-        toml::from_str(&text).map_err(|error| format!("Cannot read {}: {error}", path.display()))
+        toml::from_str(&text).map_err(|error| format!("cannot read {}: {error}", path.display()))
     }
 }
 

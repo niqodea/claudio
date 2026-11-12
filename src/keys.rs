@@ -12,7 +12,7 @@ use crate::picker::{Choice, Form};
 #[derive(Clone)]
 pub enum Phase {
     /// Writes a message to Claude, while `waiting` questions of Claude's wait. A question waits
-    /// for Ctrl-Y rather than taking the input box as it arrives, since a key typed just then
+    /// for Ctrl+Y rather than taking the input box as it arrives, since a key typed just then
     /// would answer it. Claude Code's own interface instead puts a question in place of the
     /// input box, where typing only answers it, and refusing it ends the turn before the user
     /// writes again. So Enter on a message refuses the waiting questions, which makes it a press
@@ -25,7 +25,7 @@ pub enum Phase {
     Writing { waiting: usize },
     /// Answers the question the question view shows.
     Answering(View),
-    /// Has nothing more to say, while Claude finishes its work, which only Ctrl-C stops.
+    /// Has nothing more to say, while Claude finishes its work, which only Ctrl+C stops.
     Ending,
 }
 
@@ -64,29 +64,29 @@ pub struct View {
 /// What a session key does. Only `Edit` changes the text, through the user's editor.
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum SessionKey {
-    /// Ctrl-C: stops Claude's turn, refusing what Claude asks.
+    /// Ctrl+C: stops Claude's turn, refusing what Claude asks.
     Stop,
-    /// Ctrl-D: ends the session, refusing what Claude asks.
+    /// Ctrl+D: ends the session, refusing what Claude asks.
     End,
-    /// Ctrl-L: clears the context, refusing what Claude asks and stopping Claude's turn, and
-    /// keeps the text, which can be the new context's first message. Ctrl-L clears the screen
+    /// Ctrl+L: clears the context, refusing what Claude asks and stopping Claude's turn, and
+    /// keeps the text, which can be the new context's first message. Ctrl+L clears the screen
     /// in a shell, and starts a new session here, whose start a line marks in the conversation.
     Clear,
-    /// Ctrl-E: opens the text in the user's editor, as readline's Ctrl-X Ctrl-E does, and takes
+    /// Ctrl+E: opens the text in the user's editor, as readline's Ctrl+X Ctrl+E does, and takes
     /// back what it saved.
     Edit,
-    /// Ctrl-O: shows the whole conversation, from the question the question view shows.
+    /// Ctrl+O: shows the whole conversation, from the question the question view shows.
     ShowFullView,
-    /// Ctrl-S: shows the status.
+    /// Ctrl+S: shows the status.
     ShowStatus,
-    /// Ctrl-Y: opens the questions that wait, or goes back to the message from them, as Esc
+    /// Ctrl+Y: opens the questions that wait, or goes back to the message from them, as Esc
     /// also does on the list of options.
     Questions,
-    /// Ctrl-N: moves down the options of the question the question view shows, to the user's own
-    /// answer after the last, from the input box too, as Ctrl-N moves down a list in fzf and in
+    /// Ctrl+N: moves down the options of the question the question view shows, to the user's own
+    /// answer after the last, from the input box too, as Ctrl+N moves down a list in fzf and in
     /// vim's completion menu.
     Down,
-    /// Ctrl-P: moves up the options, like `Down`.
+    /// Ctrl+P: moves up the options, like `Down`.
     Up,
 }
 
@@ -203,16 +203,18 @@ fn questions(count: usize) -> String {
     }
 }
 
-/// The name of `key` on the label row, as the user knows it from the keyboard.
+/// The name of `key` on the label row, as its keycap shows it, like Enter and Ctrl+C. A vi key
+/// stays the character it types, like `j`.
 pub fn name(key: &KeyEvent) -> String {
     let base = match key.code {
-        KeyCode::Enter => "enter".to_string(),
-        KeyCode::Char(' ') => "space".to_string(),
+        // crossterm names it Return on macOS, where the README says Enter
+        KeyCode::Enter => "Enter".to_string(),
+        KeyCode::Char(' ') => "Space".to_string(),
         KeyCode::Char(character) => character.to_string(),
-        code => code.to_string().to_lowercase(),
+        code => code.to_string(),
     };
     if key.modifiers.contains(KeyModifiers::CONTROL) {
-        format!("ctrl-{base}")
+        format!("Ctrl+{}", base.to_uppercase())
     } else {
         base
     }
@@ -236,9 +238,9 @@ pub enum Action {
 
 /// What `key` does in `phase`, on `input`. Enter and the session keys do their job even while a
 /// vi command is half typed, since they are not vi keys. `:` on a message opens the command
-/// line from the idle box, as from vim's normal mode, and Enter runs it. Ctrl-D ends only an
+/// line from the idle box, as from vim's normal mode, and Enter runs it. Ctrl+D ends only an
 /// empty input, as in a shell, so a draft is never lost to it.
-/// Ref: <https://www.gnu.org/software/bash/manual/html_node/Commands-For-Text.html>, on Ctrl-D
+/// Ref: <https://www.gnu.org/software/bash/manual/html_node/Commands-For-Text.html>, on Ctrl+D
 /// as the end of input only on an empty line
 pub fn action(phase: &Phase, key: &KeyEvent, input: Input) -> Action {
     match (phase, SessionKey::of(key)) {
@@ -501,9 +503,10 @@ mod tests {
 
     #[test]
     fn keys_go_by_their_keyboard_names() {
-        assert_eq!(name(&control('c')), "ctrl-c");
-        assert_eq!(name(&plain(KeyCode::Enter)), "enter");
-        assert_eq!(name(&plain(KeyCode::Char(' '))), "space");
+        assert_eq!(name(&control('c')), "Ctrl+C");
+        assert_eq!(name(&plain(KeyCode::Enter)), "Enter");
+        assert_eq!(name(&plain(KeyCode::Char(' '))), "Space");
+        assert_eq!(name(&plain(KeyCode::Esc)), "Esc");
         assert_eq!(name(&plain(KeyCode::Char('2'))), "2");
     }
 

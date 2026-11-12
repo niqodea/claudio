@@ -106,15 +106,15 @@ pub fn install() -> Result<(), String> {
         let (platform, checksum) = platform()?;
         println!("Downloading Claude Code {VERSION} for {platform}…");
         fs::create_dir_all(directory)
-            .map_err(|error| format!("Cannot create {}: {error}", directory.display()))?;
+            .map_err(|error| format!("cannot create {}: {error}", directory.display()))?;
         // A download that fails leaves the partial file, which the next one overwrites
         let partial = directory.join("claude.part");
         download(platform, &partial)?;
         check(&partial, checksum)?;
         fs::set_permissions(&partial, fs::Permissions::from_mode(0o755))
-            .map_err(|error| format!("Cannot make {} executable: {error}", partial.display()))?;
+            .map_err(|error| format!("cannot make {} executable: {error}", partial.display()))?;
         fs::rename(&partial, &path)
-            .map_err(|error| format!("Cannot move {}: {error}", partial.display()))?;
+            .map_err(|error| format!("cannot move {}: {error}", partial.display()))?;
         println!(
             "Installed Claude Code {VERSION} for {platform} in {}",
             directory.display()
@@ -168,19 +168,19 @@ fn download(platform: &str, to: &Path) -> Result<(), String> {
         .arg(to)
         .arg(&url)
         .status()
-        .map_err(|error| format!("Cannot run curl: {error}"))?;
+        .map_err(|error| format!("cannot run curl: {error}"))?;
     if !status.success() {
-        return Err(format!("Cannot download {url}: curl ended with {status}"));
+        return Err(format!("cannot download {url}: curl ended with {status}"));
     }
     Ok(())
 }
 
 fn check(path: &Path, expected: &str) -> Result<(), String> {
     let mut file =
-        fs::File::open(path).map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
+        fs::File::open(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     let mut hasher = Sha256::new();
     io::copy(&mut file, &mut hasher)
-        .map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     let actual = format!("{:x}", hasher.finalize());
     if actual != expected {
         return Err(format!(
@@ -197,16 +197,16 @@ fn remove_other_versions(versions: &Path) -> Result<(), String> {
     let entries = match fs::read_dir(versions) {
         Ok(entries) => entries,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(format!("Cannot read {}: {error}", versions.display())),
+        Err(error) => return Err(format!("cannot read {}: {error}", versions.display())),
     };
     for entry in entries {
         let entry =
-            entry.map_err(|error| format!("Cannot read {}: {error}", versions.display()))?;
+            entry.map_err(|error| format!("cannot read {}: {error}", versions.display()))?;
         if entry.file_name() == VERSION {
             continue;
         }
         fs::remove_dir_all(entry.path())
-            .map_err(|error| format!("Cannot remove {}: {error}", entry.path().display()))?;
+            .map_err(|error| format!("cannot remove {}: {error}", entry.path().display()))?;
         println!(
             "Removed Claude Code {}",
             entry.file_name().to_string_lossy()

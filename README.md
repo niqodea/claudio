@@ -166,6 +166,17 @@ Each question keeps what you picked and typed on it until the call is answered.
 
 ## Design
 
+claudio takes on something only when it spares a reason to leave for the interactive Claude Code, or when without it, the conversation would hide what happened, as when the context is compacted.
+Each need comes from use, never from the docs alone: a feature claudio lacks waits until its absence gets in the way, twice.
+One general way in comes before a case of its own: `:` hands any command to Claude Code as written, and what comes back shows as any reply does, unless it would show nothing at all.
+claudio need not do everything Claude Code does: for what it lacks, `claude --resume <id>` opens the same session in the interactive Claude Code.
+
+So claudio leaves out on purpose:
+
+- a view of its own for one command, where Claude Code's reply reads well enough
+- a key or a list for what Claude Code's settings already set, like the permission mode
+- completion and checks that need a list of Claude Code's commands, which would go stale with each new version
+
 claudio only ever appends to the conversation, in characters on screen, so it copies along with the rest of the scrollback.
 Its lines don't depend on the terminal's size, so they read the same at any width, with the terminal wrapping a line wider than the screen.
 Below the conversation, the label row and the input box are drawn again on every key and every resize, and never reach the scrollback, so they may use the terminal's size.

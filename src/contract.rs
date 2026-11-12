@@ -389,33 +389,38 @@ fn events(lines: &[String]) -> Vec<Event> {
 }
 
 /// Each event of the kinds in `kinds`, as the kind and what claudio takes from it. Ids are
-/// named by their order of appearance, so the fixture's ids and Claude Code's are equal when
-/// each repeats in the same places.
+/// named by their order of appearance among those events, so the fixture's ids and Claude
+/// Code's are equal when each repeats in the same places.
 fn summary(kinds: &[&str], events: &[Event]) -> Vec<String> {
-    let mut ids: Vec<String> = Vec::new();
-    let mut id = |value: &str| {
-        let index = ids.iter().position(|id| id == value).unwrap_or_else(|| {
-            ids.push(value.to_string());
-            ids.len() - 1
-        });
-        format!("id {}", index + 1)
-    };
+    let mut ids: Vec<&str> = Vec::new();
     events
         .iter()
         .filter_map(|event| match event {
-            Event::State(state) => Some(("state", format!("{state:?}"))),
-            Event::PayingKey(key) => Some(("paying", key.clone())),
-            Event::Reset { previous_session } => Some(("reset", id(previous_session))),
-            Event::SessionId(session) => Some(("session", id(session))),
-            Event::TurnEnd { failure } => Some(("turn end", format!("{failure:?}"))),
+            Event::State(state) => Some(("state", None, format!("{state:?}"))),
+            Event::PayingKey(key) => Some(("paying", None, key.clone())),
+            Event::Reset { previous_session } => {
+                Some(("reset", Some(previous_session), String::new()))
+            }
+            Event::SessionId(session) => Some(("session", Some(session), String::new())),
+            Event::TurnEnd { failure } => Some(("turn end", None, format!("{failure:?}"))),
             Event::Limits { session, week } => Some((
                 "limits",
+                None,
                 format!("session {} week {}", session.is_some(), week.is_some()),
             )),
             _ => None,
         })
-        .filter(|(kind, _)| kinds.contains(kind))
-        .map(|(kind, value)| format!("{kind}: {value}"))
+        .filter(|(kind, _, _)| kinds.contains(kind))
+        .map(|(kind, id, rest)| {
+            let Some(id) = id else {
+                return format!("{kind}: {rest}");
+            };
+            let index = ids.iter().position(|seen| seen == id).unwrap_or_else(|| {
+                ids.push(id);
+                ids.len() - 1
+            });
+            format!("{kind}: id {}{rest}", index + 1)
+        })
         .collect()
 }
 

@@ -15,18 +15,18 @@ use serde::Deserialize;
 pub struct Config {
     /// The rows of the input box.
     pub input_rows: NonZeroU16,
-    /// The columns a detail line takes at most on screen: any line other than the user's
-    /// words and Claude's prose.
-    pub max_detail_columns: NonZeroUsize,
+    /// The columns a noisy line takes at most on screen: a line that shows a tool's input or
+    /// output as it is.
+    pub max_noisy_line_columns: NonZeroUsize,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
             input_rows: NonZeroU16::new(3).expect("3 is not zero"),
-            // A cut keeps 44 columns at the start and 43 at the end, which hold a detail line's
+            // A cut keeps 44 columns at the start and 43 at the end, which hold a noisy line's
             // marks, tags, tool name and counts whole, since each end's fixed part takes about 20
-            max_detail_columns: NonZeroUsize::new(88).expect("88 is not zero"),
+            max_noisy_line_columns: NonZeroUsize::new(88).expect("88 is not zero"),
         }
     }
 }
@@ -56,8 +56,8 @@ mod tests {
         let config: Config = toml::from_str("input_rows = 5").expect("the file reads");
         assert_eq!(config.input_rows.get(), 5);
         assert_eq!(
-            config.max_detail_columns,
-            Config::default().max_detail_columns
+            config.max_noisy_line_columns,
+            Config::default().max_noisy_line_columns
         );
     }
 

@@ -846,7 +846,8 @@ impl InputLine {
     /// as fzf's preview window with a label, so only the preview changes as the cursor moves.
     /// Below the label row go the options, on the bar, and the user's own answer right above the
     /// box. Each option and preview line takes one row, and loses its middle to `…` when it is
-    /// wider than the screen.
+    /// wider than the screen, since a line that wrapped would push the rows below it out of
+    /// place. The limit of noisy lines is for the scrollback, which this screen never reaches.
     fn draw_question(&self, out: &mut Vec<u8>, view: &View, rows: ViewRows) {
         let width = self.layout.width;
         put!(out, Clear(ClearType::All));

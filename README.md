@@ -69,11 +69,11 @@ Every setting is optional, and these are the defaults:
 ```toml
 # The rows of the input box
 input_rows = 3
-# The columns a detail line takes at most: any line other than your words and Claude's prose
-max_detail_columns = 88
+# The columns a noisy line takes at most: a tool call's input or a tool's output
+max_noisy_line_columns = 88
 ```
 
-A detail line wider than that loses its middle to `…`, and Ctrl+O shows it whole.
+A noisy line wider than that loses its middle to `…`, and Ctrl+O shows it whole.
 A setting claudio does not know, or a 0, stops claudio with an error that names it.
 
 ## Keys
@@ -179,6 +179,8 @@ So claudio leaves out on purpose:
 
 claudio only ever appends to the conversation, in characters on screen, so it copies along with the rest of the scrollback.
 Its lines don't depend on the terminal's size, so they read the same at any width, with the terminal wrapping a line wider than the screen.
+A noisy line, which shows a tool's input or output as it is, is cut in the middle to a fixed width, since its start and end tell it from the next and Ctrl+O shows it whole.
+Every other line, like an error or a warning, stays whole, to be read in full.
 Below the conversation, the label row and the input box are drawn again on every key and every resize, and never reach the scrollback, so they may use the terminal's size.
 The input line's editing state, like vi's mode, may even show without characters, like with the cursor's shape: only the person typing needs it, and only while typing.
 The test is whether it would matter to someone reading the scrollback later.

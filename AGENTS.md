@@ -23,3 +23,9 @@ Each rule names its source, or says it is claudio's own.
 - Set code in bold, as man pages set literal text. [man-pages](https://man7.org/linux/man-pages/man7/man-pages.7.html#FORMATTING_AND_WORDING_CONVENTIONS)
 - Prefer the terminal's 16 colors, which its theme sets, to fixed shades, and keep fixed shades for what the 16 lack: orange, and the bar's subtle background and the grey on it. [bat](https://github.com/sharkdp/bat#8-bit-themes)
 - Keep text at a contrast of at least 4.5:1 with what is behind it, the bar included. [WCAG 1.4.3](https://www.w3.org/WAI/WCAG22/Understanding/contrast-minimum)
+
+## Cutting
+
+- Cut only a noisy line, which shows a tool's input or output as it is, and keep every other line whole, like an error, a warning or Claude's description of a call: claudio's own rule, whose reason the README's Design section gives
+- Cut in the middle, with `…`, so both the start and the end stay, and keep the whole line in the full view. [PatternFly](https://v5-archive.patternfly.org/ux-writing/truncation)
+- On the question screen, cut each line at the screen's width, since a line there takes exactly one row: claudio's own rule

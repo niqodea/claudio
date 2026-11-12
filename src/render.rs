@@ -74,8 +74,8 @@ pub struct Output {
     /// Each tool use that waits for its result. Claude can run several tools at once, so a
     /// result can come after a line of another tool.
     pending_calls: HashMap<String, PendingCall>,
-    /// The columns a detail line takes at most on screen.
-    max_detail_columns: NonZeroUsize,
+    /// The columns a noisy line takes at most on screen.
+    max_noisy_line_columns: NonZeroUsize,
     /// The tag of the next tool use.
     next_tag: u8,
     /// How the user stopped the turn that runs, if they did.
@@ -151,7 +151,7 @@ enum Section {
 }
 
 impl Output {
-    pub fn new(full_view: File, max_detail_columns: NonZeroUsize) -> Self {
+    pub fn new(full_view: File, max_noisy_line_columns: NonZeroUsize) -> Self {
         Output {
             text: String::new(),
             full_view,
@@ -164,7 +164,7 @@ impl Output {
             status: Status::Idle,
             hidden_results: HashSet::new(),
             pending_calls: HashMap::new(),
-            max_detail_columns,
+            max_noisy_line_columns,
             next_tag: 0,
             interruption: None,
             highlighter: Highlighter::new(),
@@ -373,10 +373,13 @@ impl Output {
         } else {
             String::new()
         };
-        self.push_detail(&format!(
-            "{mark} {}{RESET} {first}{more}{changes}",
-            tool_use.name
-        ));
+        let line = format!("{mark} {}{RESET} {first}{more}{changes}", tool_use.name);
+        // A description is Claude's sentence about the call, so only the call's input is noisy
+        if summary.is_input {
+            self.push_noisy(&line);
+        } else {
+            self.push_detail(&line);
+        }
         let indent = if tool_use.is_subagent { "    " } else { "  " };
         for (field, value) in &tool_use.input {
             match value {
@@ -419,7 +422,7 @@ impl Output {
         let label = call.map_or_else(String::new, |call| {
             format!("#{:02x} {}: ", call.tag, call.name)
         });
-        self.push_detail(&format!("{outcome} {DIM}{label}{first}{more}{RESET}"));
+        self.push_noisy(&format!("{outcome} {DIM}{label}{first}{more}{RESET}"));
         for line in text.lines().skip(1) {
             self.write_full_view_line(&format!("  {line}"));
         }
@@ -572,16 +575,23 @@ impl Output {
         }
     }
 
-    /// Adds a detail line, after the break that sets it apart, if one waits: cut on screen, since
-    /// a detail line can run long, and whole in the full view. A detail line is any line other
-    /// than the conversation itself, the user's words and Claude's prose.
-    ///
-    /// The cut here is the only one a detail line gets, so callers pass their text whole, and the
-    /// full view shows it as it was.
+    /// Adds a detail line, after the break that sets it apart, if one waits. A detail line is any
+    /// line other than the conversation itself, the user's words and Claude's prose.
     fn push_detail(&mut self, line: &str) {
         self.write_break();
+        self.emit(line);
+    }
+
+    /// Adds a noisy detail line: cut on screen, and whole in the full view. A noisy line shows a
+    /// tool's input or output as it is, so it can run to hundreds of columns, while its start
+    /// and end tell it from the next.
+    ///
+    /// The cut here is the only one a noisy line gets, so callers pass their text whole, and the
+    /// full view shows it as it was.
+    fn push_noisy(&mut self, line: &str) {
+        self.write_break();
         self.end_claude_line();
-        self.text.push_str(&cut(line, self.max_detail_columns));
+        self.text.push_str(&cut(line, self.max_noisy_line_columns));
         self.text.push('\n');
         self.write_full_view_line(line);
     }
@@ -817,7 +827,7 @@ mod tests {
     fn new_output() -> Output {
         Output::new(
             tempfile::tempfile().expect("the temporary directory takes a file"),
-            Config::default().max_detail_columns,
+            Config::default().max_noisy_line_columns,
         )
     }
 
@@ -979,7 +989,7 @@ mod tests {
         let file = tempfile::NamedTempFile::new().expect("the temporary directory takes a file");
         let mut output = Output::new(
             file.reopen().expect("the file opens again"),
-            Config::default().max_detail_columns,
+            Config::default().max_noisy_line_columns,
         );
         output.show_message("Hi");
         show(&mut output);
@@ -992,7 +1002,7 @@ mod tests {
         let file = tempfile::NamedTempFile::new().expect("the temporary directory takes a file");
         let mut output = Output::new(
             file.reopen().expect("the file opens again"),
-            Config::default().max_detail_columns,
+            Config::default().max_noisy_line_columns,
         );
         output.show_message("Hi");
         output.show_text("Two questions:");
@@ -1112,7 +1122,7 @@ mod tests {
     }
 
     #[test]
-    fn a_detail_line_is_cut_on_screen_and_whole_in_the_full_view() {
+    fn a_noisy_line_is_cut_on_screen_and_whole_in_the_full_view() {
         let path = "a".repeat(100);
         let mut screen = Vec::new();
         let lines = full_view_after(|output| {
@@ -1124,25 +1134,41 @@ mod tests {
             "{BOLD}○{RESET} {DIM}#00{RESET}{BOLD} Read{RESET} {}",
             code_span(&path)
         );
-        assert_eq!(screen[1], cut(&call, Config::default().max_detail_columns));
+        assert_eq!(
+            screen[1],
+            cut(&call, Config::default().max_noisy_line_columns)
+        );
         assert_ne!(screen[1], call);
         assert_eq!(lines[1], call);
     }
 
     #[test]
-    fn an_error_is_a_detail_line_and_an_answer_stays_whole() {
+    fn a_call_with_a_description_stays_whole() {
+        let description = "x".repeat(100);
+        let mut input = Map::new();
+        input.insert("command".to_string(), Value::String("ls".to_string()));
+        input.insert(
+            "description".to_string(),
+            Value::String(description.clone()),
+        );
+        let mut output = output_after_message();
+        output.show_tool_use(&ToolUse {
+            id: "1".to_string(),
+            name: "Bash".to_string(),
+            input,
+            is_subagent: false,
+        });
+        assert!(output.take_lines()[1].contains(&description));
+    }
+
+    #[test]
+    fn an_error_and_an_answer_stay_whole() {
         let long = "x".repeat(100);
         let mut output = output_after_message();
         output.show_error(&long);
         output.show_answer("Q", &long);
         let lines = output.take_lines();
-        assert_eq!(
-            lines[1],
-            cut(
-                &format!("{RED}{long}{RESET}"),
-                Config::default().max_detail_columns
-            )
-        );
+        assert_eq!(lines[1], format!("{RED}{long}{RESET}"));
         assert!(lines[2].contains(&long));
     }
 

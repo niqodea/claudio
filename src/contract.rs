@@ -7,6 +7,9 @@
 //! fails. The unit tests take what Claude Code writes from a check's
 //! fixture, which the check compares with what Claude Code writes, so they never drift apart.
 //!
+//! The README's "What claudio relies on" tells where the checks fit: what claudio shows is
+//! either promised by the SDK's types or observed by a check.
+//!
 //! A free check makes no call to the API. A paid one makes a few, with the cheapest model, and
 //! runs only with `--paid`.
 //! Ref: <https://martinfowler.com/bliki/ContractTest.html>, on checking a test double against

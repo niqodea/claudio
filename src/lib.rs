@@ -295,6 +295,9 @@ fn read_claude(from_claude: ChildStdout, shared: &Mutex<Shared>, forward: &dyn F
             match event {
                 Event::Text(text) => shared.output.show_text(&text),
                 Event::TextEnd => shared.output.show_text_end(),
+                Event::Unknown { part, name, line } => {
+                    shared.output.show_unknown(part, &name, &line);
+                }
                 Event::ApiError(text) => shared.output.show_error(&text),
                 Event::ToolUse(tool_use) => shared.output.show_tool_use(&tool_use),
                 Event::ToolResult(result) => shared.output.show_tool_result(&result),

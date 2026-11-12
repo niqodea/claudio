@@ -13,7 +13,7 @@ claudio install-claude-code
 
 claudio drives `claude -p`, and passes its arguments on to `claude`.
 
-claudio runs its own copy of Claude Code, of the one version it was checked against, since it relies on behaviour of Claude Code's that is undocumented.
+claudio runs its own copy of Claude Code, of the one version it was checked against, since it relies on what is only observed, as [What claudio relies on](#what-claudio-relies-on) tells.
 `claudio install-claude-code` downloads that copy into `claudio/claude-code` in `$XDG_DATA_HOME`, or in `~/.local/share` when that is unset, checks its sha256, and removes the copies of other versions.
 The copy never updates itself, and a `claude` you run apart from claudio keeps its own version.
 
@@ -21,7 +21,7 @@ To try another Claude Code, name it in `CLAUDIO_CLAUDE`, like `CLAUDIO_CLAUDE=cl
 When its version is not the one claudio was checked against, claudio warns in orange as it starts.
 When Claude Code refuses claudio's request for the context's usage, or answers it in a shape claudio cannot read, claudio stops as it starts, and says why.
 
-`claudio check-claude-code` checks each of those behaviours against the Claude Code that claudio runs, the one `CLAUDIO_CLAUDE` names too, so it tells whether a newer Claude Code still works with claudio.
+`claudio check-claude-code` runs the contract checks against the Claude Code that claudio runs, the one `CLAUDIO_CLAUDE` names too, so it tells whether a newer Claude Code still works with claudio.
 The checks that call the API run only with `--paid`, on the cheapest model, at a few cents in all.
 
 claudio supports only auto mode for now: it refuses every permission Claude Code asks for, and says so in red.
@@ -41,6 +41,25 @@ To always use the subscription, add this to `~/.claude/settings.json`, which emp
 
 Claude Code's [headless docs](https://code.claude.com/docs/en/headless#start-faster-with-bare-mode) say `--bare` will become the default for `-p` in a future release.
 Bare mode ignores the subscription login, as well as CLAUDE.md files, hooks, plugins and auto-memory, so from that release claudio needs whatever turns it back off.
+
+## What claudio relies on
+
+claudio does one of three things with each kind of message Claude Code sends:
+
+- it shows the kind, when it matters to you, like Claude's text or a tool call
+- it skips the kind on purpose, when it does not, like `tool_progress`, Claude Code's progress on a long tool call
+- it flags a kind it knows nothing of, like one a newer Claude Code adds, with a line in orange, once per session, and Ctrl-O shows what carried it
+
+The kinds claudio names come from what sessions sent, not from a list made in advance: a kind joins them, shown or skipped, once a session sends it and it is flagged.
+
+What claudio shows, it relies on, and each thing it relies on is either promised or observed:
+
+- promised: the types of the Agent SDK of the same version, `sdk.d.ts`, declare it, as Anthropic's published contract for what Claude Code sends
+- observed: nothing declares it, so a contract check sees it in the real Claude Code, and the code that relies on it links to the check with `Undocumented:`
+
+What claudio skips, it relies on in no way, so it needs neither.
+The flag stays as a last net, since Claude Code sends kinds its types never declare, like `session_title_changed`, and catches what neither the types nor the checks foresaw.
+A message that lacks what claudio reads, or holds a value its type has no room for, gets a line in red.
 
 ## Config
 

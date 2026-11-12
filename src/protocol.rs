@@ -23,6 +23,13 @@ pub enum Event {
     Text(String),
     /// The end of a block of the reply, whose pieces arrived as `Text`.
     TextEnd,
+    /// A kind of message, or of a part of one, that claudio knows nothing of, with the kind, as
+    /// `name` of `part`, and the line that carried it.
+    Unknown {
+        part: &'static str,
+        name: String,
+        line: String,
+    },
     /// A call to the API that failed, with Claude Code's words for it, in place of a reply.
     ApiError(String),
     ToolUse(ToolUse),
@@ -327,7 +334,7 @@ pub fn read_events(line: &str) -> Result<Vec<Event>, String> {
         Message::StreamEvent {
             event:
                 StreamEvent::ContentBlockDelta {
-                    delta: Delta::TextDelta { text },
+                    delta: Delta::Text { text },
                 },
             parent_tool_use_id: None,
         } => vec![Event::Text(text)],
@@ -348,42 +355,11 @@ pub fn read_events(line: &str) -> Result<Vec<Event>, String> {
             message,
             parent_tool_use_id,
             error: _,
-        } => message
-            .content
-            .into_blocks()
-            .into_iter()
-            .filter_map(|block| match block {
-                Block::Text { .. } if parent_tool_use_id.is_none() => Some(Event::TextEnd),
-                Block::ToolUse { id, name, input } => Some(Event::ToolUse(ToolUse {
-                    id,
-                    name,
-                    input,
-                    is_subagent: parent_tool_use_id.is_some(),
-                })),
-                Block::Text { .. } | Block::ToolResult { .. } | Block::Other => None,
-            })
-            .collect(),
+        } => read_assistant(message, parent_tool_use_id.is_some(), line),
         Message::User {
             message,
             parent_tool_use_id,
-        } => message
-            .content
-            .into_blocks()
-            .into_iter()
-            .filter_map(|block| match block {
-                Block::ToolResult {
-                    tool_use_id,
-                    content,
-                    is_error,
-                } => Some(Event::ToolResult(ToolResult {
-                    tool_use_id,
-                    text: content.map_or(Some(String::new()), ResultContent::into_text),
-                    is_error,
-                    is_subagent: parent_tool_use_id.is_some(),
-                })),
-                Block::Text { .. } | Block::ToolUse { .. } | Block::Other => None,
-            })
-            .collect(),
+        } => read_user(message, parent_tool_use_id.is_some(), line),
         Message::ControlRequest {
             request_id,
             request,
@@ -415,13 +391,97 @@ pub fn read_events(line: &str) -> Result<Vec<Event>, String> {
         Message::ConversationReset { session_id } => vec![Event::Reset {
             previous_session: session_id,
         }],
-        Message::System(system) => read_system(system),
-        Message::StreamEvent { .. } | Message::Other => vec![],
+        Message::System(system) => read_system(system, line),
+        Message::StreamEvent {
+            event: StreamEvent::Unknown,
+            ..
+        } => vec![unknown(line, "stream event", "/event/type")],
+        Message::StreamEvent {
+            event:
+                StreamEvent::ContentBlockDelta {
+                    delta: Delta::Unknown,
+                },
+            ..
+        } => vec![unknown(line, "streamed piece", "/event/delta/type")],
+        Message::Unknown => vec![unknown(line, "message", "/type")],
+        Message::StreamEvent { .. }
+        | Message::KeepAlive
+        | Message::ToolProgress
+        | Message::CommandLifecycle => vec![],
     };
     Ok(events)
 }
 
-fn read_system(system: System) -> Vec<Event> {
+/// The events of a reply's blocks, those of a subagent's when `is_subagent`, from `line`.
+fn read_assistant(message: Body, is_subagent: bool, line: &str) -> Vec<Event> {
+    (message.content.into_blocks().into_iter().enumerate())
+        .filter_map(|(index, block)| match block {
+            Block::Text { .. } if !is_subagent => Some(Event::TextEnd),
+            Block::ToolUse { id, name, input } => Some(Event::ToolUse(ToolUse {
+                id,
+                name,
+                input,
+                is_subagent,
+            })),
+            Block::Unknown => Some(unknown(line, "content block", &block_type(index))),
+            Block::Text { .. } | Block::Thinking | Block::ToolResult { .. } => None,
+        })
+        .collect()
+}
+
+/// The events of the tool results a user message carries, those of a subagent's when
+/// `is_subagent`, from `line`.
+fn read_user(message: Body, is_subagent: bool, line: &str) -> Vec<Event> {
+    (message.content.into_blocks().into_iter().enumerate())
+        .flat_map(|(index, block)| match block {
+            Block::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                let (text, unknown_block) =
+                    content.map_or((Some(String::new()), None), ResultContent::into_text);
+                let result = Event::ToolResult(ToolResult {
+                    tool_use_id,
+                    text,
+                    is_error,
+                    is_subagent,
+                });
+                let unknown_block = unknown_block.map(|inner| {
+                    let pointer = format!("/message/content/{index}/content/{inner}/type");
+                    unknown(line, "tool result block", &pointer)
+                });
+                [Some(result), unknown_block]
+                    .into_iter()
+                    .flatten()
+                    .collect()
+            }
+            Block::Unknown => vec![unknown(line, "content block", &block_type(index))],
+            Block::Text { .. } | Block::Thinking | Block::ToolUse { .. } => vec![],
+        })
+        .collect()
+}
+
+/// The kind of thing that `line` carries as `part`, which claudio knows nothing of, by the
+/// type that `pointer` points to in the line.
+fn unknown(line: &str, part: &'static str, pointer: &str) -> Event {
+    let value: Value = serde_json::from_str(line).unwrap_or_default();
+    let name = value
+        .pointer(pointer)
+        .map_or_else(|| "?".to_string(), Value::to_string);
+    Event::Unknown {
+        part,
+        name: name.trim_matches('"').to_string(),
+        line: line.to_string(),
+    }
+}
+
+/// The pointer to the type of the content block at `index` of a message.
+fn block_type(index: usize) -> String {
+    format!("/message/content/{index}/type")
+}
+
+fn read_system(system: System, line: &str) -> Vec<Event> {
     match system {
         System::Init {
             session_id,
@@ -434,7 +494,15 @@ fn read_system(system: System) -> Vec<Event> {
         System::BackgroundTasksChanged { tasks } => vec![Event::BackgroundTasks(
             tasks.into_iter().map(|task| task.description).collect(),
         )],
-        System::Other => vec![],
+        System::Unknown => vec![unknown(line, "system message", "/subtype")],
+        System::CompactBoundary
+        | System::Status
+        | System::ThinkingTokens
+        | System::SessionTitleChanged
+        | System::TaskStarted
+        | System::TaskUpdated
+        | System::TaskProgress
+        | System::TaskNotification => vec![],
     }
 }
 
@@ -573,6 +641,8 @@ pub(crate) fn read_request(request_id: String, request: Value) -> Result<Event, 
     }))
 }
 
+/// A kind of message Claude Code sends, which claudio shows, skips on purpose, or flags as
+/// `Unknown`, as the README's "What claudio relies on" tells. A kind joins once a session sends it.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Message {
@@ -610,8 +680,15 @@ enum Message {
     ConversationReset {
         session_id: String,
     },
+    /// A heartbeat, with nothing to show.
+    KeepAlive,
+    /// How long a tool has run, which its call and result tell enough of.
+    ToolProgress,
+    /// Where a message claudio sent is in Claude Code's queue, which the session's state tells
+    /// as the message's turn runs.
+    CommandLifecycle,
     #[serde(other)]
-    Other,
+    Unknown,
 }
 
 #[derive(Deserialize)]
@@ -638,12 +715,14 @@ struct Window {
     resets_at_seconds: Option<u64>,
 }
 
+/// Every status the SDK's types give, so a new one is a change of the field, which makes the
+/// line unreadable, as any other field that is not as typed.
 #[derive(Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum WindowStatus {
+    Allowed,
+    AllowedWarning,
     Rejected,
-    #[serde(other)]
-    Other,
 }
 
 impl From<Window> for Limit {
@@ -658,6 +737,8 @@ impl From<Window> for Limit {
     }
 }
 
+/// A kind of system message, shown, skipped on purpose, or flagged as `Unknown`, as for
+/// [`Message`].
 #[derive(Deserialize)]
 #[serde(tag = "subtype", rename_all = "snake_case")]
 enum System {
@@ -669,11 +750,28 @@ enum System {
     /// Sent as a turn starts and ends.
     ///
     /// Undocumented: [`crate::contract::session_state_comes_with_its_variable`]
-    SessionStateChanged { state: State },
+    SessionStateChanged {
+        state: State,
+    },
     /// Sent each time a task starts or ends, with every task that still runs.
-    BackgroundTasksChanged { tasks: Vec<BackgroundTask> },
+    BackgroundTasksChanged {
+        tasks: Vec<BackgroundTask>,
+    },
+    /// Sent once the context was compacted, which claudio does not show.
+    CompactBoundary,
+    /// What Claude Code does, like compacting, which the label row tells from the state.
+    Status,
+    /// How far Claude thinks, which claudio leaves out, with the thinking.
+    ThinkingTokens,
+    /// The title Claude Code gives the session, which claudio shows nowhere.
+    SessionTitleChanged,
+    // What `BackgroundTasksChanged` tells already
+    TaskStarted,
+    TaskUpdated,
+    TaskProgress,
+    TaskNotification,
     #[serde(other)]
-    Other,
+    Unknown,
 }
 
 #[derive(Deserialize)]
@@ -690,18 +788,30 @@ enum StreamEvent {
     ContentBlockDelta {
         delta: Delta,
     },
+    // The whole message that follows the stream tells what claudio shows of them
+    ContentBlockStart,
+    ContentBlockStop,
+    MessageDelta,
+    MessageStop,
     #[serde(other)]
-    Other,
+    Unknown,
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type")]
 enum Delta {
-    TextDelta {
-        text: String,
-    },
+    #[serde(rename = "text_delta")]
+    Text { text: String },
+    /// A piece of a tool's input, which shows whole with its call.
+    #[serde(rename = "input_json_delta")]
+    InputJson,
+    // Pieces of Claude's thinking, which claudio leaves out
+    #[serde(rename = "thinking_delta")]
+    Thinking,
+    #[serde(rename = "signature_delta")]
+    Signature,
     #[serde(other)]
-    Other,
+    Unknown,
 }
 
 #[derive(Deserialize)]
@@ -784,7 +894,10 @@ impl Content {
             .into_iter()
             .filter_map(|block| match block {
                 Block::Text { text } => Some(text),
-                Block::ToolUse { .. } | Block::ToolResult { .. } | Block::Other => None,
+                Block::Thinking
+                | Block::ToolUse { .. }
+                | Block::ToolResult { .. }
+                | Block::Unknown => None,
             })
             .collect();
         texts.join("\n")
@@ -808,8 +921,10 @@ enum Block {
         #[serde(default)]
         is_error: bool,
     },
+    /// Claude's thinking, which claudio leaves out.
+    Thinking,
     #[serde(other)]
-    Other,
+    Unknown,
 }
 
 #[derive(Deserialize)]
@@ -820,24 +935,27 @@ enum ResultContent {
 }
 
 impl ResultContent {
-    /// The content's text, none when it holds blocks but none of them text.
-    fn into_text(self) -> Option<String> {
+    /// The content's text, none when it holds blocks but none of them text, with the index of
+    /// the first block of a kind claudio knows nothing of.
+    fn into_text(self) -> (Option<String>, Option<usize>) {
         match self {
-            ResultContent::Text(text) => Some(text),
+            ResultContent::Text(text) => (Some(text), None),
             ResultContent::Blocks(blocks) => {
                 let has_blocks = !blocks.is_empty();
+                let unknown = blocks
+                    .iter()
+                    .position(|block| matches!(block, ResultBlock::Unknown));
                 let texts: Vec<String> = blocks
                     .into_iter()
                     .filter_map(|block| match block {
                         ResultBlock::Text { text } => Some(text),
-                        ResultBlock::Other => None,
+                        ResultBlock::Image | ResultBlock::ToolReference | ResultBlock::Unknown => {
+                            None
+                        }
                     })
                     .collect();
-                if has_blocks && texts.is_empty() {
-                    None
-                } else {
-                    Some(texts.join("\n"))
-                }
+                let text = (!has_blocks || !texts.is_empty()).then(|| texts.join("\n"));
+                (text, unknown)
             }
         }
     }
@@ -849,8 +967,11 @@ enum ResultBlock {
     Text {
         text: String,
     },
+    // Results without text, like an image the Read tool read, or the tools ToolSearch found
+    Image,
+    ToolReference,
     #[serde(other)]
-    Other,
+    Unknown,
 }
 
 #[derive(Deserialize)]
@@ -1262,5 +1383,86 @@ mod tests {
             panic!("an ask");
         };
         assert!(matches!(ask.kind, AskKind::Permission));
+    }
+
+    #[test]
+    fn a_kind_skipped_on_purpose_tells_nothing() {
+        let lines = [
+            json!({"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 5}),
+            json!({"type": "system", "subtype": "session_title_changed", "title": "A title"}),
+            json!({"type": "tool_progress", "tool_name": "Bash", "elapsed_time_seconds": 3}),
+        ];
+        for line in lines {
+            let events = read_events(&line.to_string()).expect("a readable line");
+            assert!(events.is_empty(), "{line}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_kind_is_named_at_any_depth() {
+        let cases = [
+            (json!({"type": "auth_status"}), "message", "auth_status"),
+            (
+                json!({"type": "system", "subtype": "api_retry"}),
+                "system message",
+                "api_retry",
+            ),
+            (
+                json!({
+                    "type": "stream_event",
+                    "event": {"type": "content_block_delta", "delta": {"type": "citations_delta"}},
+                    "parent_tool_use_id": null,
+                }),
+                "streamed piece",
+                "citations_delta",
+            ),
+            (
+                json!({
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "a"}, {"type": "redacted_thinking"}]},
+                    "parent_tool_use_id": null,
+                }),
+                "content block",
+                "redacted_thinking",
+            ),
+            (
+                json!({
+                    "type": "user",
+                    "message": {"content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "1",
+                        "content": [{"type": "text", "text": "a"}, {"type": "document"}],
+                    }]},
+                    "parent_tool_use_id": null,
+                }),
+                "tool result block",
+                "document",
+            ),
+        ];
+        for (line, expected_part, expected_name) in cases {
+            let events = read_events(&line.to_string()).expect("a readable line");
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    Event::Unknown { part, name, .. } if *part == expected_part && name == expected_name
+                )),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_known_kind_with_a_broken_field_is_unreadable() {
+        let line = json!({"type": "system", "subtype": "background_tasks_changed"});
+        assert!(read_events(&line.to_string()).is_err());
+    }
+
+    #[test]
+    fn an_unknown_limit_status_is_unreadable() {
+        let line = json!({
+            "type": "rate_limit_event",
+            "rate_limit_info": {"unifiedWindows": {"five_hour": {"utilization": 0.5, "status": "paused"}}},
+        });
+        assert!(read_events(&line.to_string()).is_err());
     }
 }

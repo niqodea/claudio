@@ -63,6 +63,8 @@ pub struct Output {
     /// Whether the last of Claude's text blocks ended, so that a text block right after it
     /// starts with the mark of its own.
     text_ended: bool,
+    /// The kinds of what Claude Code sends that claudio knows nothing of, and said so once.
+    unknown_kinds: HashSet<(&'static str, String)>,
     status: Status,
     /// The tool uses whose result repeats what the screen already shows.
     hidden_results: HashSet<String>,
@@ -154,6 +156,7 @@ impl Output {
             position: Position::Start,
             pending_break: None,
             text_ended: false,
+            unknown_kinds: HashSet::new(),
             status: Status::Idle,
             hidden_results: HashSet::new(),
             pending_calls: HashMap::new(),
@@ -213,6 +216,20 @@ impl Output {
         self.pending_break = None;
         self.emit(&session_line("cleared", Some(previous_session)));
         self.position = Position::Start;
+    }
+
+    /// Says once for each kind that claudio skips what Claude Code sent, `name` of `part`, which
+    /// claudio knows nothing of, so the user learns that Claude Code may show more than claudio.
+    /// The full view holds the `line` that carried it.
+    pub fn show_unknown(&mut self, part: &'static str, name: &str, line: &str) {
+        if !self.unknown_kinds.insert((part, name.to_string())) {
+            return;
+        }
+        self.begin(Section::Notice);
+        self.push_detail(&format!(
+            "{ORANGE}claudio skips Claude Code's {name} {part}s, a kind it does not know{RESET}"
+        ));
+        self.write_full_view_line(&format!("  {line}"));
     }
 
     /// Shows the user's answer to what a tool asks, after the question.
@@ -1235,5 +1252,15 @@ mod tests {
         let lines = output.take_lines();
         assert!(lines[256].contains("#ff"));
         assert!(lines[257].contains("#00"));
+    }
+
+    #[test]
+    fn an_unknown_kind_shows_once() {
+        let mut output = output_after_message();
+        output.show_unknown("system message", "api_retry", "{}");
+        output.show_unknown("system message", "api_retry", "{}");
+        let lines = output.take_lines();
+        let warnings = lines.iter().filter(|line| line.contains("api_retry"));
+        assert_eq!(warnings.count(), 1);
     }
 }

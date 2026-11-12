@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 
 use crossterm::event::{KeyCode, KeyEvent};
 
+use crate::keys::Input;
 use crate::render::markdown_lines;
 use crate::style::{DIM, GREEN, LIGHT_CYAN, RESET};
 
@@ -130,15 +131,6 @@ fn move_of(key: &KeyEvent) -> Option<Move> {
     }
 }
 
-/// What the keys depend on in the input box.
-#[derive(Clone, Copy)]
-pub struct InputBox {
-    /// Whether the box is in normal mode with no command half typed, where Esc, `]` and `[`
-    /// leave it instead of acting as vi keys. The questions' own keys stay vi keys there.
-    pub is_idle: bool,
-    pub is_empty: bool,
-}
-
 impl Draft {
     /// A question's draft before the user picks anything: the cursor on the first option.
     pub fn new() -> Self {
@@ -156,7 +148,7 @@ impl Draft {
 impl Pick {
     /// Acts on `key`, Enter among them, on a question of `choices` options that takes `form`,
     /// with `input` the state of the box.
-    pub fn press(&mut self, key: &KeyEvent, choices: usize, form: Form, input: InputBox) -> Effect {
+    pub fn press(&mut self, key: &KeyEvent, choices: usize, form: Form, input: Input) -> Effect {
         match self.cursor {
             Cursor::Writing => self.press_in_box(key, form, input),
             Cursor::Option(_) | Cursor::Own => self.press_on_list(key, choices, form),
@@ -278,7 +270,7 @@ impl Pick {
         }
     }
 
-    fn press_in_box(&mut self, key: &KeyEvent, form: Form, input: InputBox) -> Effect {
+    fn press_in_box(&mut self, key: &KeyEvent, form: Form, input: Input) -> Effect {
         match (key.code, form) {
             (KeyCode::Enter, Form::One) => Effect::Submit,
             // On a question of several options, the text is one more item, which Enter ticks
@@ -446,9 +438,10 @@ mod tests {
 
     use crossterm::event::KeyModifiers;
 
-    const IDLE: InputBox = InputBox {
+    const IDLE: Input = Input {
         is_idle: true,
         is_empty: false,
+        is_commanding: false,
     };
 
     fn pick(cursor: Cursor) -> Pick {
@@ -467,7 +460,7 @@ mod tests {
             .collect()
     }
 
-    fn press_code(pick: &mut Pick, form: Form, code: KeyCode, input: InputBox) -> Effect {
+    fn press_code(pick: &mut Pick, form: Form, code: KeyCode, input: Input) -> Effect {
         pick.press(&KeyEvent::new(code, KeyModifiers::NONE), 3, form, input)
     }
 
@@ -529,9 +522,10 @@ mod tests {
         );
         assert!(several.is_own_ticked);
         assert_eq!(several.cursor, Cursor::Own);
-        let typing = InputBox {
+        let typing = Input {
             is_idle: false,
             is_empty: false,
+            is_commanding: false,
         };
         let mut esc = pick(Cursor::Writing);
         assert_eq!(

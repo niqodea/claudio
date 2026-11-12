@@ -111,10 +111,23 @@ impl SessionKey {
     }
 }
 
+/// What the keys depend on in the input line.
+#[derive(Clone, Copy)]
+pub struct Input {
+    /// Whether the box is in normal mode with no command half typed, where some keys leave it
+    /// instead of acting as vi keys: `:` on a message, and Esc, `]` and `[` in the question view,
+    /// whose own keys stay vi keys there.
+    pub is_idle: bool,
+    /// Whether the box holds nothing but spaces.
+    pub is_empty: bool,
+    /// Whether the command line is open, which takes the keys that edit, in the box's place.
+    pub is_commanding: bool,
+}
+
 /// What the session holds that a press can lose.
 #[derive(Clone, Copy)]
 pub struct Stakes {
-    /// Whether the input has text, which Enter sends.
+    /// Whether what Enter sends or runs has text: the box, or the command line while open.
     pub has_text: bool,
     pub held: Held,
     /// Whether Claude works on a turn.
@@ -144,12 +157,20 @@ pub fn loss(phase: &Phase, action: Action, stakes: Stakes) -> Option<String> {
         }
         // Claude Code stops its background tasks too, and exits
         (Phase::Ending, Action::Session(SessionKey::Stop)) => Some("stops claude".to_string()),
-        (Phase::Writing { waiting }, Action::Send) if stakes.has_text => {
+        // Claude Code cancels the questions that wait for a message or a command. A command may
+        // call the API as a message does: some do, like /compact, and Claude Code hands one it
+        // does not know to Claude, so a typo becomes a call
+        (Phase::Writing { waiting }, Action::Send | Action::Run) if stakes.has_text => {
             let refusal = (*waiting > 0).then(|| format!("refuses {} and ", questions(*waiting)));
             let cache = (stakes.held == Held::Cold).then_some(" on a possibly cold cache");
+            let verb = if action == Action::Run {
+                "runs the command"
+            } else {
+                "sends"
+            };
             (refusal.is_some() || cache.is_some()).then(|| {
                 format!(
-                    "{}sends{}",
+                    "{}{verb}{}",
                     refusal.unwrap_or_default(),
                     cache.unwrap_or_default()
                 )
@@ -203,27 +224,40 @@ pub enum Action {
     Session(SessionKey),
     /// Sends the text, as a message or an answer.
     Send,
+    /// Opens the command line, for one of Claude Code's commands, as `:` opens vim's.
+    CommandLine,
+    /// Runs the command on the command line.
+    Run,
     /// Edits the text with the input box's vi keys, or in the question view, acts on the options
     /// or the input box.
     Edit,
     Ignore,
 }
 
-/// What `key` does in `phase`, with `is_empty` telling whether the input has no text. Enter and
-/// the session keys do their job even while a vi command is half typed, since they are not vi
-/// keys. Ctrl-D ends only an empty input, as in a shell, so a draft is never lost to it.
+/// What `key` does in `phase`, on `input`. Enter and the session keys do their job even while a
+/// vi command is half typed, since they are not vi keys. `:` on a message opens the command
+/// line from the idle box, as from vim's normal mode, and Enter runs it. Ctrl-D ends only an
+/// empty input, as in a shell, so a draft is never lost to it.
 /// Ref: <https://www.gnu.org/software/bash/manual/html_node/Commands-For-Text.html>, on Ctrl-D
 /// as the end of input only on an empty line
-pub fn action(phase: &Phase, key: &KeyEvent, is_empty: bool) -> Action {
+pub fn action(phase: &Phase, key: &KeyEvent, input: Input) -> Action {
     match (phase, SessionKey::of(key)) {
         (Phase::Ending, Some(SessionKey::Stop)) => Action::Session(SessionKey::Stop),
         (Phase::Ending, _)
         | (Phase::Answering(_), Some(SessionKey::Clear))
         | (Phase::Writing { waiting: 0, .. }, Some(SessionKey::Questions))
         | (Phase::Writing { .. }, Some(SessionKey::Down | SessionKey::Up)) => Action::Ignore,
-        (_, Some(SessionKey::End)) if !is_empty => Action::Ignore,
+        (_, Some(SessionKey::End)) if !input.is_empty => Action::Ignore,
         (_, Some(session_key)) => Action::Session(session_key),
+        (Phase::Writing { .. }, None) if key.code == KeyCode::Enter && input.is_commanding => {
+            Action::Run
+        }
         (_, None) if key.code == KeyCode::Enter => Action::Send,
+        (Phase::Writing { .. }, None)
+            if key.code == KeyCode::Char(':') && input.is_idle && !input.is_commanding =>
+        {
+            Action::CommandLine
+        }
         (_, None) => Action::Edit,
     }
 }
@@ -231,6 +265,15 @@ pub fn action(phase: &Phase, key: &KeyEvent, is_empty: bool) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The input of a box in insert mode, empty or not.
+    fn input(is_empty: bool) -> Input {
+        Input {
+            is_idle: false,
+            is_empty,
+            is_commanding: false,
+        }
+    }
 
     fn control(character: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
@@ -280,15 +323,56 @@ mod tests {
                 (plain(KeyCode::Esc), false, Action::Edit),
             ];
             for (key, is_empty, expected) in cases {
-                assert_eq!(action(&phase, &key, is_empty), expected);
+                assert_eq!(action(&phase, &key, input(is_empty)), expected);
             }
         }
     }
 
     #[test]
+    fn colon_opens_the_command_line_from_the_idle_box_of_a_message_and_enter_runs_it() {
+        let idle = Input {
+            is_idle: true,
+            ..input(false)
+        };
+        let colon = plain(KeyCode::Char(':'));
+        assert_eq!(action(&writing(0), &colon, idle), Action::CommandLine);
+        // A colon typed in insert mode, or as part of a vi command like `f:`, is text
+        assert_eq!(action(&writing(0), &colon, input(false)), Action::Edit);
+        assert_eq!(action(&answering(), &colon, idle), Action::Edit);
+        let commanding = Input {
+            is_commanding: true,
+            ..idle
+        };
+        assert_eq!(action(&writing(0), &colon, commanding), Action::Edit);
+        let enter = plain(KeyCode::Enter);
+        assert_eq!(action(&writing(0), &enter, commanding), Action::Run);
+    }
+
+    #[test]
+    fn a_command_names_the_questions_it_refuses_and_the_cold_cache() {
+        let cold = Stakes {
+            held: Held::Cold,
+            ..WARM
+        };
+        assert_eq!(loss(&writing(0), Action::Run, WARM), None);
+        assert_eq!(
+            loss(&writing(2), Action::Run, WARM).as_deref(),
+            Some("refuses 2 questions and runs the command")
+        );
+        assert_eq!(
+            loss(&writing(0), Action::Run, cold).as_deref(),
+            Some("runs the command on a possibly cold cache")
+        );
+        assert_eq!(
+            loss(&writing(2), Action::Run, cold).as_deref(),
+            Some("refuses 2 questions and runs the command on a possibly cold cache")
+        );
+    }
+
+    #[test]
     fn ctrl_y_opens_only_questions_that_wait_and_enter_still_sends() {
         let none = writing(0);
-        assert_eq!(action(&none, &control('y'), false), Action::Ignore);
+        assert_eq!(action(&none, &control('y'), input(false)), Action::Ignore);
         let waiting = writing(2);
         let cases = [
             (control('y'), Action::Session(SessionKey::Questions)),
@@ -298,7 +382,7 @@ mod tests {
             (plain(KeyCode::Char('y')), Action::Edit),
         ];
         for (key, expected) in cases {
-            assert_eq!(action(&waiting, &key, false), expected);
+            assert_eq!(action(&waiting, &key, input(false)), expected);
         }
     }
 
@@ -310,7 +394,7 @@ mod tests {
             (control('p'), Action::Session(SessionKey::Up)),
         ];
         for (key, expected) in cases {
-            assert_eq!(action(&answering(), &key, false), expected);
+            assert_eq!(action(&answering(), &key, input(false)), expected);
         }
     }
 
@@ -427,17 +511,20 @@ mod tests {
     fn ctrl_l_clears_from_the_message_with_text_too() {
         for is_empty in [false, true] {
             assert_eq!(
-                action(&writing(2), &control('l'), is_empty),
+                action(&writing(2), &control('l'), input(is_empty)),
                 Action::Session(SessionKey::Clear)
             );
         }
-        assert_eq!(action(&answering(), &control('l'), true), Action::Ignore);
+        assert_eq!(
+            action(&answering(), &control('l'), input(true)),
+            Action::Ignore
+        );
     }
 
     #[test]
     fn the_ending_takes_only_ctrl_c_which_stops() {
         assert_eq!(
-            action(&Phase::Ending, &control('c'), true),
+            action(&Phase::Ending, &control('c'), input(true)),
             Action::Session(SessionKey::Stop)
         );
         for key in [
@@ -449,7 +536,7 @@ mod tests {
             plain(KeyCode::Enter),
             plain(KeyCode::Char('a')),
         ] {
-            assert_eq!(action(&Phase::Ending, &key, true), Action::Ignore);
+            assert_eq!(action(&Phase::Ending, &key, input(true)), Action::Ignore);
         }
     }
 }

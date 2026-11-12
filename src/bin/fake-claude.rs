@@ -4,10 +4,11 @@
 //! call, as `tests/fake_claude.rs` checks.
 //!
 //! It answers each message with a described tool call of several lines, a call shown by its
-//! input, and their results, then two text blocks in a row, and the message `ask` with two questions of `AskUserQuestion`'s, whose turn
-//! ends once they are answered: one of one choice whose options have previews, and one of
-//! several choices. The message `ask one` asks only the first. `/clear` starts a new session. `FAKE_DELAY` is how many seconds each answer
-//! waits before it starts, none when unset.
+//! input, and their results, then two text blocks in a row, and the message `ask` with two
+//! questions of `AskUserQuestion`'s, whose turn ends once they are answered: one of one choice
+//! whose options have previews, and one of several choices. The message `ask one` asks only the
+//! first. `/clear` starts a new session, and `/compact` and `/cost` answer as Claude Code does.
+//! `FAKE_DELAY` is how many seconds each answer waits before it starts, none when unset.
 
 use std::env;
 use std::io::{self, BufRead};
@@ -85,6 +86,14 @@ impl Fake {
             "ask one" => return send(&ask(1).to_string()),
             _ => {}
         }
+        if message["client_composed"] != true
+            && let Some(lines) = command(text, &self.session_id())
+        {
+            for line in lines {
+                send(&line.to_string());
+            }
+            return self.state("idle");
+        }
         let delay = env::var("FAKE_DELAY")
             .ok()
             .and_then(|delay| delay.parse().ok())
@@ -109,6 +118,56 @@ impl Fake {
 
 fn send(line: &str) {
     println!("{line}");
+}
+
+/// What Claude Code writes for the command `text` in the session `session`, as 2.1.322 does,
+/// none for a text that is no command the fake knows. `/compact` reports its progress, starts
+/// the session again, marks the compaction, hands Claude the summary, and replays its output
+/// from Claude Code's history, with no answer of its own. `/cost` answers with a message that
+/// is never streamed, as any command that answers does.
+fn command(text: &str, session: &str) -> Option<Vec<Value>> {
+    let lines = match text {
+        "/compact" => vec![
+            json!({"type": "system", "subtype": "status", "status": "compacting"}),
+            json!({"type": "system", "subtype": "status", "status": null, "compact_result": "success"}),
+            serde_json::from_str(&contract::init(session)).expect("an init of JSON"),
+            json!({
+                "type": "system",
+                "subtype": "compact_boundary",
+                "compact_metadata": {"trigger": "manual", "pre_tokens": 19_812, "post_tokens": 6_578},
+            }),
+            json!({
+                "type": "user",
+                "message": {"role": "user", "content": "This session is being continued from a previous conversation that ran out of context."},
+                "parent_tool_use_id": null,
+                "isSynthetic": true,
+            }),
+            json!({
+                "type": "user",
+                "message": {"role": "user", "content": "<local-command-stdout>Compacted </local-command-stdout>"},
+                "parent_tool_use_id": null,
+                "isReplay": true,
+            }),
+        ],
+        "/cost" => vec![json!({
+            "type": "assistant",
+            "message": {
+                "model": "<synthetic>",
+                "content": [{
+                    "type": "text",
+                    "text": "You are currently using your subscription to power your Claude Code usage\n\nCurrent session: 26% used · resets 6pm",
+                }],
+            },
+            "parent_tool_use_id": null,
+        })],
+        _ => return None,
+    };
+    Some(
+        lines
+            .into_iter()
+            .chain([json!({"type": "result", "subtype": "success"})])
+            .collect(),
+    )
 }
 
 /// Answers the control request `message` with `response`.

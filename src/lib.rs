@@ -294,7 +294,8 @@ fn read_claude(from_claude: ChildStdout, shared: &Mutex<Shared>, forward: &dyn F
             let mut shared = lock(shared);
             match event {
                 Event::Text(text) => shared.output.show_text(&text),
-                Event::TextEnd => shared.output.show_text_end(),
+                Event::TextEnd(text) => shared.output.show_text_end(&text),
+                Event::Compacted { before, after } => shared.output.show_compacted(before, after),
                 Event::Unknown { part, name, line } => {
                     shared.output.show_unknown(part, &name, &line);
                 }

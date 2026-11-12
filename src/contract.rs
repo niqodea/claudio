@@ -194,8 +194,8 @@ pub fn initialize_response(account: &Value) -> String {
 /// calls.
 pub(crate) fn a_clear_resets_the_session(program: &Path) -> Result<(), String> {
     let mut run = Run::start(program, &[], &[], &[])?;
-    run.send(&protocol::Command::Clear)?;
-    run.send(&protocol::Command::Clear)?;
+    run.send(&protocol::Command::Run { command: "clear" })?;
+    run.send(&protocol::Command::Run { command: "clear" })?;
     run.close_input();
     let lines = run.read_to_end(FREE_TIMEOUT)?;
     let real = texts(&lines);
@@ -493,7 +493,7 @@ impl Run {
 
     /// Sends a `/clear`, and returns what Claude Code writes until it exits, its input closed.
     fn clear_once(mut self) -> Result<Vec<String>, String> {
-        self.send(&protocol::Command::Clear)?;
+        self.send(&protocol::Command::Run { command: "clear" })?;
         self.close_input();
         let lines = self.read_to_end(FREE_TIMEOUT)?;
         Ok(texts(&lines))

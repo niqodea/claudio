@@ -21,8 +21,15 @@ const USAGE_REQUEST_ID: &str = "usage";
 pub enum Event {
     /// A piece of the reply Claude is writing.
     Text(String),
-    /// The end of a block of the reply, whose pieces arrived as `Text`.
-    TextEnd,
+    /// The end of a block of the reply, with the block's whole text, whose pieces arrived as
+    /// `Text`, unless Claude Code made the block itself, as for a command's output.
+    TextEnd(String),
+    /// The context was compacted, from as many tokens as it held to as many as it holds after,
+    /// when Claude Code tells.
+    Compacted {
+        before: u64,
+        after: Option<u64>,
+    },
     /// A kind of message, or of a part of one, that claudio knows nothing of, with the kind, as
     /// `name` of `part`, and the line that carried it.
     Unknown {
@@ -193,9 +200,12 @@ pub enum Command<'a> {
         id: &'a str,
         text: &'a str,
     },
-    /// Clears the context, as Claude Code's `/clear` does, which starts a new session. Claude
-    /// Code runs the command right after a turn it was told to stop.
-    Clear,
+    /// Runs one of Claude Code's commands, written without its `/`, like `clear`, which clears
+    /// the context and starts a new session. Claude Code runs a command right after a turn it
+    /// was told to stop.
+    Run {
+        command: &'a str,
+    },
     Answer(&'a Ask, Answer),
     Interrupt {
         request_id: String,
@@ -250,10 +260,10 @@ impl Command<'_> {
             }),
             // Claude Code runs a message that starts with / as a command, so this one carries no
             // mark of a message composed by the client
-            Command::Clear => json!({
+            Command::Run { command } => json!({
                 "type": "user",
                 "session_id": "",
-                "message": {"role": "user", "content": "/clear"},
+                "message": {"role": "user", "content": format!("/{command}")},
                 "parent_tool_use_id": null,
             }),
             Command::Answer(ask, answer) => {
@@ -349,8 +359,7 @@ pub fn read_events(line: &str) -> Result<Vec<Event>, String> {
             parent_tool_use_id: None,
             error: Some(_),
         } => vec![Event::ApiError(message.content.into_text())],
-        // Claude Code sends each block whole once it has streamed it, so the text of a block
-        // already arrived piece by piece
+        // Claude Code sends each block whole once it has streamed it
         Message::Assistant {
             message,
             parent_tool_use_id,
@@ -359,6 +368,7 @@ pub fn read_events(line: &str) -> Result<Vec<Event>, String> {
         Message::User {
             message,
             parent_tool_use_id,
+            is_replay: false,
         } => read_user(message, parent_tool_use_id.is_some(), line),
         Message::ControlRequest {
             request_id,
@@ -404,7 +414,10 @@ pub fn read_events(line: &str) -> Result<Vec<Event>, String> {
             ..
         } => vec![unknown(line, "streamed piece", "/event/delta/type")],
         Message::Unknown => vec![unknown(line, "message", "/type")],
-        Message::StreamEvent { .. }
+        Message::User {
+            is_replay: true, ..
+        }
+        | Message::StreamEvent { .. }
         | Message::KeepAlive
         | Message::ToolProgress
         | Message::CommandLifecycle => vec![],
@@ -416,7 +429,7 @@ pub fn read_events(line: &str) -> Result<Vec<Event>, String> {
 fn read_assistant(message: Body, is_subagent: bool, line: &str) -> Vec<Event> {
     (message.content.into_blocks().into_iter().enumerate())
         .filter_map(|(index, block)| match block {
-            Block::Text { .. } if !is_subagent => Some(Event::TextEnd),
+            Block::Text { text } if !is_subagent => Some(Event::TextEnd(text)),
             Block::ToolUse { id, name, input } => Some(Event::ToolUse(ToolUse {
                 id,
                 name,
@@ -494,9 +507,12 @@ fn read_system(system: System, line: &str) -> Vec<Event> {
         System::BackgroundTasksChanged { tasks } => vec![Event::BackgroundTasks(
             tasks.into_iter().map(|task| task.description).collect(),
         )],
+        System::CompactBoundary { compact_metadata } => vec![Event::Compacted {
+            before: compact_metadata.pre_tokens,
+            after: compact_metadata.post_tokens,
+        }],
         System::Unknown => vec![unknown(line, "system message", "/subtype")],
-        System::CompactBoundary
-        | System::Status
+        System::Status
         | System::ThinkingTokens
         | System::SessionTitleChanged
         | System::TaskStarted
@@ -659,6 +675,10 @@ enum Message {
     User {
         message: Body,
         parent_tool_use_id: Option<String>,
+        /// Whether the message repeats what Claude Code's history holds, like a command's
+        /// output after `/compact`, which claudio skips, as it tells nothing new.
+        #[serde(rename = "isReplay", default)]
+        is_replay: bool,
     },
     ControlRequest {
         request_id: String,
@@ -757,8 +777,10 @@ enum System {
     BackgroundTasksChanged {
         tasks: Vec<BackgroundTask>,
     },
-    /// Sent once the context was compacted, which claudio does not show.
-    CompactBoundary,
+    /// Sent once the context was compacted, as by `/compact`.
+    CompactBoundary {
+        compact_metadata: CompactMetadata,
+    },
     /// What Claude Code does, like compacting, which the label row tells from the state.
     Status,
     /// How far Claude thinks, which claudio leaves out, with the thinking.
@@ -772,6 +794,12 @@ enum System {
     TaskNotification,
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Deserialize)]
+struct CompactMetadata {
+    pre_tokens: u64,
+    post_tokens: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -1300,13 +1328,6 @@ mod tests {
     }
 
     #[test]
-    fn a_clear_runs_as_a_command() {
-        let line: Value = serde_json::from_str(&Command::Clear.to_line()).expect("JSON");
-        assert_eq!(line["message"]["content"], "/clear");
-        assert!(line.get("client_composed").is_none());
-    }
-
-    #[test]
     fn a_new_session_tells_no_last_call() {
         let line = context_response(&Value::Null, 1_000_000, None);
         let events = read_events(&line).expect("a readable line");
@@ -1386,6 +1407,34 @@ mod tests {
     }
 
     #[test]
+    fn a_block_of_text_ends_with_its_whole_text() {
+        let line = json!({
+            "type": "assistant",
+            "message": {"model": "<synthetic>", "content": [{"type": "text", "text": "Usage"}]},
+            "parent_tool_use_id": null,
+        });
+        let events = read_events(&line.to_string()).expect("a readable line");
+        assert!(matches!(events.as_slice(), [Event::TextEnd(text)] if text == "Usage"));
+    }
+
+    #[test]
+    fn a_compaction_tells_the_tokens_before_and_after() {
+        let line = json!({
+            "type": "system",
+            "subtype": "compact_boundary",
+            "compact_metadata": {"trigger": "manual", "pre_tokens": 19_812, "post_tokens": 6_578},
+        });
+        let events = read_events(&line.to_string()).expect("a readable line");
+        assert!(matches!(
+            events.as_slice(),
+            [Event::Compacted {
+                before: 19_812,
+                after: Some(6_578)
+            }]
+        ));
+    }
+
+    #[test]
     fn a_kind_skipped_on_purpose_tells_nothing() {
         let lines = [
             json!({"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 5}),
@@ -1396,6 +1445,55 @@ mod tests {
             let events = read_events(&line.to_string()).expect("a readable line");
             assert!(events.is_empty(), "{line}");
         }
+    }
+
+    #[test]
+    fn a_compaction_shows_once_and_nothing_else_of_it_does() {
+        // As Claude Code 2.1.322 sends a /compact, its init and result left out
+        let lines = [
+            json!({"type": "system", "subtype": "status", "status": "compacting"}),
+            json!({"type": "system", "subtype": "status", "status": null, "compact_result": "success"}),
+            json!({
+                "type": "system",
+                "subtype": "compact_boundary",
+                "compact_metadata": {"trigger": "manual", "pre_tokens": 19_670, "post_tokens": 6_399},
+            }),
+            json!({
+                "type": "user",
+                "message": {"role": "user", "content": "This session is being continued from a previous conversation."},
+                "parent_tool_use_id": null,
+                "isSynthetic": true,
+            }),
+            json!({
+                "type": "user",
+                "message": {"role": "user", "content": "<local-command-stdout>Compacted </local-command-stdout>"},
+                "parent_tool_use_id": null,
+                "isReplay": true,
+            }),
+        ];
+        let events: Vec<Event> = lines
+            .iter()
+            .flat_map(|line| read_events(&line.to_string()).expect("a readable line"))
+            .collect();
+        assert!(matches!(
+            events.as_slice(),
+            [Event::Compacted {
+                before: 19_670,
+                after: Some(6_399)
+            }]
+        ));
+    }
+
+    #[test]
+    fn a_replay_tells_nothing() {
+        let line = json!({
+            "type": "user",
+            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "1", "content": "a"}]},
+            "parent_tool_use_id": null,
+            "isReplay": true,
+        });
+        let events = read_events(&line.to_string()).expect("a readable line");
+        assert!(events.is_empty());
     }
 
     #[test]
@@ -1464,5 +1562,13 @@ mod tests {
             "rate_limit_info": {"unifiedWindows": {"five_hour": {"utilization": 0.5, "status": "paused"}}},
         });
         assert!(read_events(&line.to_string()).is_err());
+    }
+
+    #[test]
+    fn a_command_runs_without_the_mark_of_the_client() {
+        let line: Value =
+            serde_json::from_str(&Command::Run { command: "compact" }.to_line()).expect("JSON");
+        assert_eq!(line["message"]["content"], "/compact");
+        assert!(line.get("client_composed").is_none());
     }
 }

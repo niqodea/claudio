@@ -225,10 +225,6 @@ impl Editor {
         self.text.iter().collect()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.text.is_empty()
-    }
-
     pub fn mode(&self) -> Mode {
         self.mode
     }

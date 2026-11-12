@@ -151,9 +151,7 @@ impl<'a> Conversation<'a> {
                 if text.trim().is_empty() {
                     (String::new(), None)
                 } else {
-                    for ask in questions.remove_all() {
-                        self.reply(&ask, Answer::Deny)?;
-                    }
+                    self.refuse_questions(questions)?;
                     self.send_message(&text)?;
                     (String::new(), None)
                 }
@@ -162,9 +160,7 @@ impl<'a> Conversation<'a> {
             // Claude's turn waits on its questions, so stopping it refuses them
             Outcome::Stop(text) => {
                 if !questions.is_empty() {
-                    for ask in questions.remove_all() {
-                        self.reply(&ask, Answer::Deny)?;
-                    }
+                    self.refuse_questions(questions)?;
                 } else if lock(&self.session.shared).output.status() != Status::Idle {
                     self.interrupt(Interruption::Stop)?;
                 }
@@ -172,6 +168,14 @@ impl<'a> Conversation<'a> {
             }
             Outcome::Clear(text) => {
                 self.clear(questions)?;
+                (text, None)
+            }
+            // Claude Code runs a command once the turn that runs ends, and cancels the questions
+            // that wait for it, as for a message
+            Outcome::Run(text, command) => {
+                self.refuse_questions(questions)?;
+                lock(&self.session.shared).output.show_command(&command);
+                self.send(&Command::Run { command: &command })?;
                 (text, None)
             }
             // Claude Code asked something, which the next round of the loop shows
@@ -192,11 +196,18 @@ impl<'a> Conversation<'a> {
                 self.interrupt(Interruption::Stop)?;
             }
         } else {
-            for ask in questions.remove_all() {
-                self.reply(&ask, Answer::Deny)?;
-            }
+            self.refuse_questions(questions)?;
         }
-        self.send(&Command::Clear)
+        self.send(&Command::Run { command: "clear" })
+    }
+
+    /// Refuses every question that waits. Claude Code cancels them for a message or a command
+    /// the user sends, and claudio keeps a cancelled question, so it refuses them first.
+    fn refuse_questions(&mut self, questions: &mut Questions) -> Result<(), String> {
+        for ask in questions.remove_all() {
+            self.reply(&ask, Answer::Deny)?;
+        }
+        Ok(())
     }
 
     /// Acts on how the user left the question at `index` in the question view, and returns the
@@ -245,15 +256,14 @@ impl<'a> Conversation<'a> {
             }
             Outcome::End => unreachable!("the session ends before"),
             Outcome::Clear(_) => unreachable!("the question view takes no Ctrl-L"),
+            Outcome::Run(..) => unreachable!("the question view takes no command"),
         })
     }
 
     /// Refuses what Claude asks, and closes Claude Code's input, as the end of input does a
     /// program's in the terminal, since the user has nothing more to say.
     fn end_input(mut self, questions: &mut Questions) -> Result<Option<Ending<'a>>, String> {
-        for ask in questions.remove_all() {
-            self.reply(&ask, Answer::Deny)?;
-        }
+        self.refuse_questions(questions)?;
         let Conversation {
             session,
             to_claude,
@@ -371,7 +381,8 @@ impl Ending<'_> {
                 | Outcome::Questions(_)
                 | Outcome::Go(..)
                 | Outcome::End
-                | Outcome::Clear(_) => {}
+                | Outcome::Clear(_)
+                | Outcome::Run(..) => {}
             }
         }
     }

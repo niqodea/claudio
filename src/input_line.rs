@@ -28,8 +28,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::context::COLD_COLOR;
 use crate::keys::{self, Action, Phase, SessionKey, View};
 use crate::limits::{Level, limit_level};
-use crate::picker::{self, Cursor, Draft, Form, InputBox, Move, Pick, question_name};
-use crate::render::{Output, Status, colors_at, cut, marks, session_line, start_bar_row};
+use crate::picker::{self, Cursor, Draft, Form, Move, Pick, question_name};
+use crate::render::{Output, Status, colors_at, cut, marks, start_bar_row, user_line};
 use crate::status;
 use crate::style::{GREEN, LIGHT_CYAN, ORANGE, RESET, REVERSE, STATUS_COLOR, UNREVERSE, YELLOW};
 use crate::terminal::{Settings, run_in_terminal};
@@ -75,6 +75,9 @@ pub enum Outcome<D> {
     End,
     /// The user clears the context, with the draft, which stays.
     Clear(D),
+    /// The user runs one of Claude Code's commands, written without its `/`, with the draft,
+    /// which stays.
+    Run(D, String),
     /// Claude Code asked something, which the main thread acts on first, with the draft.
     Break(D),
 }
@@ -89,6 +92,7 @@ impl Outcome<()> {
             Outcome::Go((), to) => Outcome::Go(draft, to),
             Outcome::End => Outcome::End,
             Outcome::Clear(()) => Outcome::Clear(draft),
+            Outcome::Run((), command) => Outcome::Run(draft, command),
             Outcome::Break(()) => Outcome::Break(draft),
         }
     }
@@ -107,6 +111,10 @@ pub struct InputLine {
     /// The rows the user chose for the input box, which a short screen gives fewer.
     input_rows: NonZeroU16,
     editor: Editor,
+    /// The field of the command of Claude Code's that the user writes after `:`, without its
+    /// `/`, while the message waits in the box, none while the command line is closed. It is a
+    /// field in insert mode, as the box can be, with no normal mode to leave to, so Esc closes it.
+    command_line: Option<Editor>,
     /// What the user picks on the question the question view shows.
     pick: Pick,
     /// Whether the last key's answer answered nothing, so the question view held it back, which
@@ -164,6 +172,7 @@ impl InputLine {
             original_settings,
             input_rows,
             editor: Editor::new(""),
+            command_line: None,
             pick: Draft::new().pick,
             is_empty_warned: false,
             confirming: None,
@@ -189,6 +198,7 @@ impl InputLine {
             self.editor.replace(draft);
         }
         let outcome = self.run(phase)?;
+        self.command_line = None;
         Ok(outcome.with(self.text()))
     }
 
@@ -306,7 +316,7 @@ impl InputLine {
         let phase = lock(&self.shared).phase.clone();
         self.is_empty_warned = false;
         let confirming = self.confirming.take();
-        let action = keys::action(&phase, &key, self.editor.is_empty());
+        let action = keys::action(&phase, &key, self.input());
         // Any key other than an edit cancels the half-typed vi command
         if action != Action::Edit {
             self.editor.cancel();
@@ -315,10 +325,20 @@ impl InputLine {
         if !self.goes_ahead(&key, confirming.as_ref(), loss, Some(action)) {
             return Ok(None);
         }
+        // A session key acts on the session, and closes the command line
+        if matches!(action, Action::Session(_)) {
+            self.command_line = None;
+        }
         match action {
             Action::Session(SessionKey::Stop) => return Ok(Some(Outcome::Stop(()))),
             Action::Session(SessionKey::End) => return Ok(Some(Outcome::End)),
             Action::Session(SessionKey::Clear) => return Ok(Some(Outcome::Clear(()))),
+            Action::CommandLine => self.command_line = Some(Editor::new("")),
+            Action::Run => {
+                let command = self.command_line.take().map(|line| line.text());
+                let command = command.as_deref().unwrap_or_default().trim();
+                return Ok((!command.is_empty()).then(|| Outcome::Run((), command.to_string())));
+            }
             Action::Session(SessionKey::Questions) => return Ok(Some(Outcome::Questions(()))),
             Action::Session(direction @ (SessionKey::Down | SessionKey::Up)) => {
                 if let Phase::Answering(view) = &phase
@@ -350,11 +370,24 @@ impl InputLine {
                 if action == Action::Send {
                     return Ok(Some(Outcome::Send(())));
                 }
-                self.editor.press(&key);
+                match &mut self.command_line {
+                    Some(_) if key.code == KeyCode::Esc => self.command_line = None,
+                    Some(line) => line.press(&key),
+                    None => self.editor.press(&key),
+                }
             }
             Action::Ignore => {}
         }
         Ok(None)
+    }
+
+    /// What the keys depend on in the input line.
+    fn input(&self) -> keys::Input {
+        keys::Input {
+            is_idle: self.editor.mode() == Mode::Normal && self.editor.pending().is_empty(),
+            is_empty: self.text().trim().is_empty(),
+            is_commanding: self.command_line.is_some(),
+        }
     }
 
     /// Whether `key` goes ahead: at once when it loses nothing, and else on its second press in
@@ -387,8 +420,12 @@ impl InputLine {
     /// What the session holds that a press can lose.
     fn stakes(&self) -> keys::Stakes {
         let shared = lock(&self.shared);
+        let text = self
+            .command_line
+            .as_ref()
+            .map_or_else(|| self.text(), Editor::text);
         keys::Stakes {
-            has_text: !self.text().trim().is_empty(),
+            has_text: !text.trim().is_empty(),
             held: shared.context.held(Instant::now()),
             is_working: shared.output.status() != Status::Idle,
         }
@@ -419,12 +456,10 @@ impl InputLine {
             return self.carry_out(Pick::press_submitted(key), key);
         }
         let text = self.text();
-        let input = InputBox {
-            is_idle: self.editor.mode() == Mode::Normal && self.editor.pending().is_empty(),
-            is_empty: text.trim().is_empty(),
-        };
         let before = self.pick.clone();
-        let effect = self.pick.press(key, view.choices.len(), view.form, input);
+        let effect = self
+            .pick
+            .press(key, view.choices.len(), view.form, self.input());
         if effect == picker::Effect::Submit && view.form != Form::Review {
             let is_empty = self.pick.chosen(view.form, &text).is_empty();
             let loss = self
@@ -473,6 +508,11 @@ impl InputLine {
     /// question open to answers.
     fn paste(&mut self, text: &str) {
         self.confirming = None;
+        // The command line holds one line
+        if let Some(line) = &mut self.command_line {
+            line.paste(&text.replace(|c: char| c.is_control(), " "));
+            return;
+        }
         let view = match &lock(&self.shared).phase {
             Phase::Answering(view) => Some(view.clone()),
             _ => None,
@@ -740,14 +780,23 @@ impl InputLine {
             row_widths.push(width);
         }
         let cursor_in_box = cursor_y - self.scroll;
-        let cursor_row = (box_top + cursor_in_box).min(layout.height.saturating_sub(1));
-        widths.extend(row_widths.iter().take(usize::from(cursor_in_box)));
+        // The command line ends the label row, where its cursor then is, as on vim's
+        let (cursor_column, cursor_row) = if let Some(line) = &self.command_line {
+            widths.clear();
+            let after: String = line.text().chars().skip(line.cursor()).collect();
+            let column = to_row(visible_width(&self.label).saturating_sub(visible_width(&after)));
+            (column.min(layout.width.saturating_sub(1)), label_row)
+        } else {
+            widths.extend(row_widths.iter().take(usize::from(cursor_in_box)));
+            let row = (box_top + cursor_in_box).min(layout.height.saturating_sub(1));
+            (cursor_x, row)
+        };
         // A resize on the alternate screen leaves the main screen's rows as the last draw there
         // left them
         if !self.in_view {
             self.drawn = Drawn {
                 widths_above_cursor: widths,
-                cursor_column: cursor_x,
+                cursor_column,
             };
         }
         // In the question view, the cursor shows only while the user writes in the box
@@ -756,10 +805,11 @@ impl InputLine {
             .is_none_or(|view| self.pick.cursor == Cursor::Writing && !view.is_submitted);
         if is_writing {
             let shape = match self.editor.mode() {
+                _ if self.command_line.is_some() => SetCursorStyle::SteadyBar,
                 Mode::Insert => SetCursorStyle::SteadyBar,
                 Mode::Normal | Mode::Visual | Mode::VisualLine => SetCursorStyle::SteadyBlock,
             };
-            put!(out, MoveTo(cursor_x, cursor_row), shape, Show);
+            put!(out, MoveTo(cursor_column, cursor_row), shape, Show);
         }
         out.extend(END_FRAME.as_bytes());
         write_out(&out)
@@ -911,6 +961,11 @@ impl InputLine {
         write_out(&out)
     }
 
+    /// The command line, in the label row's state while the user writes it, as on vim's.
+    fn command_line(&self) -> Option<String> {
+        (self.command_line.as_ref()).map(|line| format!("{RESET}:{}", line.text()))
+    }
+
     /// What the label row says while a key waits for its second press, in the color of a
     /// warning.
     fn confirmation(&self) -> Option<String> {
@@ -945,8 +1000,8 @@ impl InputLine {
                     limit_indicator('W', shared.limits.week().map(limit_level)),
                     waiting_indicator(*waiting),
                 );
-                let state = self
-                    .confirmation()
+                let state = (self.confirmation())
+                    .or_else(|| self.command_line())
                     .or_else(|| describe_work(&shared.output));
                 let state =
                     state.map_or_else(String::new, |state| format!(" {STATUS_COLOR}│ {state}"));
@@ -1201,7 +1256,8 @@ fn cannot_read_terminal(error: &io::Error) -> String {
 
 /// The last line of the session, on the bar, with the session's id once Claude Code told it.
 pub fn final_line(session_id: Option<&str>) -> String {
-    session_line("ended", session_id)
+    let session = session_id.map_or_else(String::new, |id| format!(" │ session {id}"));
+    user_line(&format!("ended{session}"))
 }
 
 /// A level, with ? for one not known yet.

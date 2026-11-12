@@ -174,7 +174,7 @@ impl Cell {
 }
 
 /// A number with its thousands set apart by commas, like 41,203.
-fn grouped(number: u64) -> String {
+pub fn grouped(number: u64) -> String {
     let digits = number.to_string();
     let mut text = String::new();
     for (index, digit) in digits.chars().enumerate() {

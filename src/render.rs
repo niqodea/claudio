@@ -16,6 +16,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::markdown::{Highlighter, code_span};
 use crate::protocol::{Ask, AskKind, Question, SettingsError, State, ToolResult, ToolUse};
+use crate::status::grouped;
 
 use crate::style::{BAR, BOLD, DIM, GREEN, LIGHT_CYAN, ORANGE, RED, RESET, STATUS_COLOR, YELLOW};
 
@@ -63,6 +64,8 @@ pub struct Output {
     /// Whether the last of Claude's text blocks ended, so that a text block right after it
     /// starts with the mark of its own.
     text_ended: bool,
+    /// Whether pieces of the text block that runs arrived, which its end then repeats.
+    has_streamed: bool,
     /// The kinds of what Claude Code sends that claudio knows nothing of, and said so once.
     unknown_kinds: HashSet<(&'static str, String)>,
     status: Status,
@@ -156,6 +159,7 @@ impl Output {
             position: Position::Start,
             pending_break: None,
             text_ended: false,
+            has_streamed: false,
             unknown_kinds: HashSet::new(),
             status: Status::Idle,
             hidden_results: HashSet::new(),
@@ -211,11 +215,32 @@ impl Output {
     /// Marks where the context was cleared, which ended the session with `previous_session`, so
     /// the conversation reads as a new one from there.
     pub fn show_reset(&mut self, previous_session: &str) {
+        self.show_user_line(&format!("cleared │ session {previous_session}"));
+    }
+
+    /// Marks a command the user runs, which Claude Code runs in place of Claude, so the
+    /// conversation reads what comes of it as the command's.
+    pub fn show_command(&mut self, command: &str) {
+        self.show_user_line(&format!("/{command}"));
+    }
+
+    /// Adds a line of what the user did, in the user's section, as a message, so what answers it
+    /// starts with the reply mark.
+    fn show_user_line(&mut self, what: &str) {
         self.end_text();
-        // The line follows the one before, as the user's message does
         self.pending_break = None;
-        self.emit(&session_line("cleared", Some(previous_session)));
-        self.position = Position::Start;
+        self.emit(&user_line(what));
+        self.position = Position::In(Section::Message);
+    }
+
+    /// Notes that Claude Code compacted the context, from `before` tokens to `after`, when known.
+    pub fn show_compacted(&mut self, before: u64, after: Option<u64>) {
+        let after = after.map_or_else(String::new, |after| format!(" to {}", grouped(after)));
+        self.begin(Section::Notice);
+        self.push_detail(&format!(
+            "{DIM}compacted from {}{after} tokens{RESET}",
+            grouped(before)
+        ));
     }
 
     /// Says once for each kind that claudio skips what Claude Code sent, `name` of `part`, which
@@ -261,6 +286,7 @@ impl Output {
     }
 
     pub fn show_text(&mut self, text: &str) {
+        self.has_streamed = true;
         self.begin(Section::Text);
         self.set_status(Status::Writing);
         // The break goes before the text, even before the highlighter settles any of it
@@ -269,7 +295,13 @@ impl Output {
         self.write(&colored);
     }
 
-    pub fn show_text_end(&mut self) {
+    /// Ends a block of Claude's text, whose whole `text` shows here when none of it streamed,
+    /// as for a command's output, which Claude Code writes itself.
+    pub fn show_text_end(&mut self, text: &str) {
+        if !std::mem::take(&mut self.has_streamed) && !text.is_empty() {
+            self.show_text(text);
+            self.has_streamed = false;
+        }
         self.end_text();
         self.text_ended = true;
         self.set_status(Status::Working);
@@ -597,15 +629,10 @@ impl Output {
     }
 }
 
-/// A line on the bar, as the label row shows its state, that marks the end of the session with
-/// `session_id`, by how it ended, as `--resume` takes the id to go back to it.
-pub fn session_line(how: &str, session_id: Option<&str>) -> String {
-    let session = session_id.map_or_else(String::new, |id| format!(" │ session {id}"));
-    format!(
-        "{}{} {STATUS_COLOR}{how}{session}{RESET}",
-        start_bar_row(),
-        marks()
-    )
+/// A line of what the user did, like a command or a clear, on the bar, where the user's lines
+/// are, in the style of the label row's state. Only the user's lines are on the bar.
+pub fn user_line(what: &str) -> String {
+    format!("{}{} {STATUS_COLOR}{what}{RESET}", start_bar_row(), marks())
 }
 
 /// The start of a row on the bar, which fills the whole row.
@@ -812,7 +839,7 @@ mod tests {
         output.show_text("One.\n\nTw");
         output.show_stderr("Failed");
         output.show_text("o.\n");
-        output.show_text_end();
+        output.show_text_end("");
         let lines = output.take_lines();
         assert_eq!(
             lines[..4],
@@ -919,9 +946,9 @@ mod tests {
     fn each_text_block_in_a_row_starts_with_the_mark() {
         let mut output = output_after_message();
         output.show_text("One.");
-        output.show_text_end();
+        output.show_text_end("");
         output.show_text("Two.");
-        output.show_text_end();
+        output.show_text_end("");
         assert_eq!(
             output.take_lines(),
             [
@@ -1252,6 +1279,36 @@ mod tests {
         let lines = output.take_lines();
         assert!(lines[256].contains("#ff"));
         assert!(lines[257].contains("#00"));
+    }
+
+    #[test]
+    fn a_text_block_that_never_streamed_shows_whole_at_its_end() {
+        let mut output = output_after_message();
+        output.show_text_end("Usage");
+        assert_eq!(output.take_lines(), [reply_mark(), "Usage".to_string()]);
+    }
+
+    #[test]
+    fn a_streamed_text_block_is_not_repeated_at_its_end() {
+        let mut output = output_after_message();
+        output.show_text("Hello.");
+        output.show_text_end("Hello.");
+        assert_eq!(output.take_lines(), [reply_mark(), "Hello.".to_string()]);
+    }
+
+    #[test]
+    fn a_compaction_answers_the_command_as_claude_code_s_notice() {
+        let mut output = output_after_message();
+        output.show_command("compact");
+        output.show_compacted(19_812, Some(6_578));
+        assert_eq!(
+            output.take_lines(),
+            [
+                user_line("/compact"),
+                reply_mark(),
+                format!("{DIM}compacted from 19,812 to 6,578 tokens{RESET}")
+            ]
+        );
     }
 
     #[test]

@@ -46,7 +46,7 @@ Bare mode ignores the subscription login, as well as CLAUDE.md files, hooks, plu
 
 claudio does one of three things with each kind of message Claude Code sends:
 
-- it shows the kind, when it matters to you, like Claude's text or a tool call
+- it shows the kind, when it matters to you, like Claude's text, a tool call or a compaction
 - it skips the kind on purpose, when it does not, like `tool_progress`, Claude Code's progress on a long tool call
 - it flags a kind it knows nothing of, like one a newer Claude Code adds, with a line in orange, once per session, and Ctrl-O shows what carried it
 
@@ -102,7 +102,7 @@ These keys are:
 - Ctrl-D
 - Ctrl-L, once the session had a call, which also refuses the questions that wait, or else stops Claude's turn
 - Ctrl-C on questions, and while the session ends, where it stops Claude's background tasks too
-- Enter on a message while questions wait, which refuses them, or when the cache may be cold, where the call writes the whole context to the cache again, at a price above that of new input: once its time to live passed, and while its age is unknown, as in a resumed session, or before Claude Code tells at startup whether the session is new
+- Enter on a message or a command while questions wait, which refuses them, or when the cache may be cold, where the call writes the whole context to the cache again, at a price above that of new input: once its time to live passed, and while its age is unknown, as in a resumed session, or before Claude Code tells at startup whether the session is new
 - a key that answers a question and leaves out your own text
 
 Ctrl-C stops Claude's turn at once, since a message tells Claude to go on.
@@ -111,6 +111,17 @@ Any other key, or a paste, cancels the wait, however long it lasted, and a loss 
 Ctrl-L starts a new session, as Claude Code's `/clear` does, and keeps your text in the box, ready to be the new session's first message.
 The conversation marks the new start with a line like `›› cleared │ session <id>`, which names the session it ended, and `claude --resume <id>` goes back to.
 Text you send that starts with `/` reaches Claude as written, so a `/clear` you type is a message like any other.
+
+## Commands
+
+`:` in normal mode writes one of Claude Code's commands on the label row, as vim's command line, while your text waits in the box.
+You write the command without its `/`, like `compact` or `model sonnet`.
+The line edits as the box does in insert mode, and having no normal mode, closes on Esc, as on the session keys. Enter runs it.
+The conversation marks the command as yours, with a line like `›› /model sonnet`, and Claude Code's answer as its reply, as written, like `Set model to Sonnet 5.5 for this session only`.
+claudio handles no command apart from the others, so what one sends shows by its kind, as [What claudio relies on](#what-claudio-relies-on) tells.
+`/compact` has no answer: the compaction shows instead, with a line like `compacted from 19,812 to 6,578 tokens`, as it does whenever Claude Code compacts the context.
+Claude Code runs a command once Claude's turn ends, and hands one it does not know to Claude, as a message.
+Enter waits for a second press as on a message: while questions wait, which a command cancels, and when the cache may be cold, since some commands call the API, like `/compact`, and a mistyped one reaches Claude as a message.
 
 ## Questions
 

@@ -105,8 +105,16 @@ pub enum Status {
     Idle,
     Working,
     Writing,
-    /// Claude runs the tool with this name.
-    Running(String),
+    /// Claude runs the tool named `tool`, in the tool use with the id `call`.
+    Running {
+        tool: String,
+        call: String,
+    },
+    /// A slow permission check of the tool use, as for `Running`, runs.
+    Checking {
+        tool: String,
+        call: String,
+    },
 }
 
 /// How the user stopped a turn.
@@ -285,6 +293,24 @@ impl Output {
         }
     }
 
+    /// Notes that a slow permission check of the tool use with `tool_use_id` started, when
+    /// `is_checking`, or ended. The label row shows the check only while it shows that tool use,
+    /// since Claude can run several tools at once.
+    pub fn note_permission_check(&mut self, tool_use_id: &str, is_checking: bool) {
+        let status = match (&self.status, is_checking) {
+            (Status::Running { tool, call }, true) if call == tool_use_id => Status::Checking {
+                tool: tool.clone(),
+                call: call.clone(),
+            },
+            (Status::Checking { tool, call }, false) if call == tool_use_id => Status::Running {
+                tool: tool.clone(),
+                call: call.clone(),
+            },
+            _ => return,
+        };
+        self.set_status(status);
+    }
+
     pub fn show_text(&mut self, text: &str) {
         self.has_streamed = true;
         self.begin(Section::Text);
@@ -329,7 +355,10 @@ impl Output {
 
     pub fn show_tool_use(&mut self, tool_use: &ToolUse) {
         if !tool_use.is_subagent {
-            self.set_status(Status::Running(tool_use.name.clone()));
+            self.set_status(Status::Running {
+                tool: tool_use.name.clone(),
+                call: tool_use.id.clone(),
+            });
         }
         // Its ask shows the questions, and the input line the answers
         if tool_use.name == "AskUserQuestion" {
@@ -1337,6 +1366,32 @@ mod tests {
                 format!("{DIM}compacted from 19,812 to 6,578 tokens{RESET}")
             ]
         );
+    }
+
+    #[test]
+    fn a_long_permission_check_shows_until_it_ends() {
+        let mut output = output_after_message();
+        output.show_tool_use(&read_call("1", "a.txt"));
+        output.note_permission_check("1", true);
+        assert!(matches!(output.status(), Status::Checking { tool, .. } if tool == "Read"));
+        output.note_permission_check("1", false);
+        assert!(matches!(output.status(), Status::Running { tool, .. } if tool == "Read"));
+    }
+
+    #[test]
+    fn the_permission_check_of_another_call_leaves_the_status() {
+        let mut output = output_after_message();
+        output.show_tool_use(&read_call("1", "a.txt"));
+        output.note_permission_check("1", true);
+        output.show_tool_use(&read_call("2", "b.txt"));
+        // The check of the first call ends while the second one shows
+        output.note_permission_check("1", false);
+        assert!(matches!(output.status(), Status::Running { call, .. } if call == "2"));
+        output.note_permission_check("2", true);
+        output.show_tool_result(&result("2", "b"));
+        // The check ends after its call did
+        output.note_permission_check("2", false);
+        assert!(output.status() == Status::Working);
     }
 
     #[test]

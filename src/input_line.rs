@@ -1402,7 +1402,8 @@ fn describe_work(output: &Output) -> Option<String> {
             Some("writing, stderr waiting".to_string())
         }
         Status::Writing => Some("writing".to_string()),
-        Status::Running(tool) => Some(format!("running {tool}")),
+        Status::Running { tool, .. } => Some(format!("running {tool}")),
+        Status::Checking { tool, .. } => Some(format!("checking {tool}")),
     }
 }
 

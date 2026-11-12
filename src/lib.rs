@@ -14,6 +14,7 @@ mod code;
 mod config;
 mod context;
 pub mod contract;
+mod fake_api;
 mod input_line;
 mod keys;
 mod limits;
@@ -319,6 +320,12 @@ fn read_claude(from_claude: ChildStdout, shared: &Mutex<Shared>, forward: &dyn F
                     shared.context.reset();
                 }
                 Event::State(state) => shared.output.note_state(state),
+                Event::PermissionCheck {
+                    tool_use_id,
+                    is_checking,
+                } => shared
+                    .output
+                    .note_permission_check(&tool_use_id, is_checking),
                 Event::Limits { session, week } => shared.limits.note(session, week),
                 Event::BackgroundTasks(tasks) => shared.output.note_background_tasks(tasks),
                 Event::Call(usage) => {

@@ -10,8 +10,8 @@
 //! The README's "What claudio relies on" tells where the checks fit: what claudio shows is
 //! either promised by the SDK's types or observed by a check.
 //!
-//! A free check makes no call to the API. A paid one makes a few, with the cheapest model, and
-//! runs only with `--paid`.
+//! A free check makes no call to the API, or calls the fake of `fake_api` instead. A paid one
+//! makes a few, with the cheapest model, and runs only with `--paid`.
 //! Ref: <https://martinfowler.com/bliki/ContractTest.html>, on checking a test double against
 //! the real service
 
@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use crate::claude_code;
+use crate::fake_api::FakeApi;
 use crate::protocol::{self, Event, read_events};
 
 /// A check, which fails with what Claude Code did instead.
@@ -35,7 +36,7 @@ pub struct Check {
     pub run: fn(&Path) -> Result<(), String>,
 }
 
-pub const CHECKS: [Check; 8] = [
+pub const CHECKS: [Check; 9] = [
     Check {
         name: "session state comes with its variable",
         is_paid: false,
@@ -55,6 +56,11 @@ pub const CHECKS: [Check; 8] = [
         name: "a clear resets the session",
         is_paid: false,
         run: a_clear_resets_the_session,
+    },
+    Check {
+        name: "a slow permission check is told",
+        is_paid: false,
+        run: a_slow_permission_check_is_told,
     },
     Check {
         name: "a rate limit event has every window",
@@ -237,6 +243,87 @@ pub fn init(session: &str) -> String {
     line.to_string()
 }
 
+/// Read in the schema of Claude Code 2.1.322, which marks it internal, and seen with it: in auto
+/// mode, once the classifier has not answered for 4 seconds whether a tool call needs the
+/// user's approval, Claude Code sends `permission_check_status` with `checking`, then with `done`
+/// as the classifier answers, both between the call and its result.
+///
+/// The check runs Claude Code against [`crate::fake_api`], whose classifier answers after 5
+/// seconds, with a config directory of its own, since the user's settings can set the API's
+/// address and key. The call runs `sh -c true`, since Claude Code allows a read-only command
+/// without the classifier.
+pub(crate) fn a_slow_permission_check_is_told(program: &Path) -> Result<(), String> {
+    let api = FakeApi::start(Duration::from_secs(5))?;
+    let config =
+        tempfile::tempdir().map_err(|error| format!("cannot create a directory: {error}"))?;
+    let config_path = config.path().to_string_lossy();
+    let mut run = Run::start(
+        program,
+        &["--model", MODEL, "--permission-mode", "auto"],
+        &[
+            ("ANTHROPIC_BASE_URL", &api.url),
+            ("ANTHROPIC_API_KEY", "claudio-check"),
+            ("CLAUDE_CONFIG_DIR", &config_path),
+        ],
+        &["ANTHROPIC_AUTH_TOKEN"],
+    )?;
+    run.send_message(SLOW_PERMISSION_CHECK_MESSAGE)?;
+    run.close_input();
+    let lines = run.read_to_end(FREE_TIMEOUT);
+    // A request that no rule covers explains a timeout too, as Claude Code then retries
+    api.all_covered()?;
+    compare(
+        &["tool use", "permission check", "tool result"],
+        &texts(&lines?),
+        &slow_permission_check(),
+    )
+}
+
+/// The message that the check of a slow permission check sends, which `fake-claude` answers
+/// with [`slow_permission_check`].
+pub const SLOW_PERMISSION_CHECK_MESSAGE: &str = "Run sh -c true with Bash";
+
+/// What Claude Code writes for a tool call whose permission check is slow, as 2.1.322 did,
+/// without the turn's other lines.
+#[must_use]
+pub fn slow_permission_check() -> Vec<String> {
+    let check = |status: &str| {
+        json!({
+            "type": "system",
+            "subtype": "permission_check_status",
+            "tool_use_id": "toolu_check",
+            "status": status,
+            "uuid": "a",
+            "session_id": "b",
+        })
+    };
+    let lines = [
+        json!({
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use",
+                "id": "toolu_check",
+                "name": "Bash",
+                "input": {"command": "sh -c true", "description": "Run sh -c true"},
+            }]},
+            "parent_tool_use_id": null,
+        }),
+        check("checking"),
+        check("done"),
+        json!({
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result",
+                "tool_use_id": "toolu_check",
+                "content": "",
+                "is_error": false,
+            }]},
+            "parent_tool_use_id": null,
+        }),
+    ];
+    lines.iter().map(Value::to_string).collect()
+}
+
 /// Read in the schema of Claude Code 2.1.316, which marks it internal: only `unifiedWindows`
 /// holds every limit of the plan, where the documented fields describe only the limit that
 /// applies now. The check needs a login to the subscription, whose plan has the limits.
@@ -403,6 +490,17 @@ fn summary(kinds: &[&str], events: &[Event]) -> Vec<String> {
             }
             Event::SessionId(session) => Some(("session", Some(session), String::new())),
             Event::TurnEnd { failure } => Some(("turn end", None, format!("{failure:?}"))),
+            Event::ToolUse(tool_use) => Some(("tool use", Some(&tool_use.id), String::new())),
+            Event::ToolResult(result) => {
+                Some(("tool result", Some(&result.tool_use_id), String::new()))
+            }
+            Event::PermissionCheck {
+                tool_use_id,
+                is_checking,
+            } => {
+                let status = if *is_checking { " checking" } else { " done" };
+                Some(("permission check", Some(tool_use_id), status.to_string()))
+            }
             Event::Limits { session, week } => Some((
                 "limits",
                 None,

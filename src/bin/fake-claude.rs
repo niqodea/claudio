@@ -7,7 +7,8 @@
 //! input, and their results, then two text blocks in a row, and the message `ask` with two
 //! questions of `AskUserQuestion`'s, whose turn ends once they are answered: one of one choice
 //! whose options have previews, and one of several choices. The message `ask one` asks only the
-//! first. `/clear` starts a new session, and `/compact` and `/cost` answer as Claude Code does.
+//! first. The message of the check of a slow permission check gets that check's tool call.
+//! `/clear` starts a new session, and `/compact` and `/cost` answer as Claude Code does.
 //! `FAKE_DELAY` is how many seconds each answer waits before it starts, none when unset.
 
 use std::env;
@@ -84,6 +85,13 @@ impl Fake {
         match text.trim() {
             "ask" => return send(&ask(2).to_string()),
             "ask one" => return send(&ask(1).to_string()),
+            contract::SLOW_PERMISSION_CHECK_MESSAGE => {
+                for line in contract::slow_permission_check() {
+                    send(&line);
+                }
+                send(&json!({"type": "result", "subtype": "success"}).to_string());
+                return self.state("idle");
+            }
             _ => {}
         }
         if message["client_composed"] != true

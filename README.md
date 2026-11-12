@@ -57,6 +57,11 @@ What claudio shows, it relies on, and each thing it relies on is either promised
 - promised: the types of the Agent SDK of the same version, `sdk.d.ts`, declare it, as Anthropic's published contract for what Claude Code sends
 - observed: nothing declares it, so a contract check sees it in the real Claude Code, and the code that relies on it links to the check with `Undocumented:`
 
+A check that needs the API to do what it does only now and then, like a slow answer, runs the real Claude Code against a fake of the API on localhost, whose Claude follows one plain rule for each kind of request.
+Such a check is free, works offline, and gives the same result on every run.
+It uses a fake rather than canned answers, since a fake behaves like the real API wherever a check meets it, as [Software Engineering at Google](https://abseil.io/resources/swe-book/html/ch13.html#faking-id00043) recommends.
+The fake's answers follow the API's docs, and Claude Code is what reads them, so a check fails once Claude Code stops accepting them.
+
 What claudio skips, it relies on in no way, so it needs neither.
 The flag stays as a last net, since Claude Code sends kinds its types never declare, like `session_title_changed`, and catches what neither the types nor the checks foresaw.
 A message that lacks what claudio reads, or holds a value its type has no room for, gets a line in red.

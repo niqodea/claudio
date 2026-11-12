@@ -44,6 +44,12 @@ pub enum Event {
     /// A tool that waits for the user's answer before it runs.
     Ask(Ask),
     State(State),
+    /// A slow permission check of the tool use with `tool_use_id` started, when `is_checking`,
+    /// or ended.
+    PermissionCheck {
+        tool_use_id: String,
+        is_checking: bool,
+    },
     /// What each of the tasks that run in the background does, in the order they started.
     BackgroundTasks(Vec<String>),
     /// How much of the plan's usage limits the account used, each none when Claude Code left it
@@ -511,6 +517,14 @@ fn read_system(system: System, line: &str) -> Vec<Event> {
             before: compact_metadata.pre_tokens,
             after: compact_metadata.post_tokens,
         }],
+        System::PermissionCheckStatus {
+            tool_use_id,
+            status,
+            agent_id: None,
+        } => vec![Event::PermissionCheck {
+            tool_use_id,
+            is_checking: status == CheckStatus::Checking,
+        }],
         System::Unknown => vec![unknown(line, "system message", "/subtype")],
         System::Status
         | System::ThinkingTokens
@@ -520,7 +534,11 @@ fn read_system(system: System, line: &str) -> Vec<Event> {
         | System::TaskProgress
         | System::TaskNotification
         | System::HookStarted
-        | System::HookResponse => vec![],
+        | System::HookResponse
+        // What a subagent does shows nowhere on the label row
+        | System::PermissionCheckStatus {
+            agent_id: Some(_), ..
+        } => vec![],
     }
 }
 
@@ -797,8 +815,26 @@ enum System {
     // When a hook of the user's settings starts and ends, which tells nothing of the conversation
     HookStarted,
     HookResponse,
+    /// Sent once the auto mode classifier has not answered for 4 seconds whether a tool use
+    /// needs the user's approval, and again as it answers, so the wait shows as a check rather
+    /// than as a slow tool.
+    ///
+    /// Undocumented: [`crate::contract::a_slow_permission_check_is_told`]
+    PermissionCheckStatus {
+        tool_use_id: String,
+        /// Set when a subagent's tool use waits.
+        agent_id: Option<String>,
+        status: CheckStatus,
+    },
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum CheckStatus {
+    Checking,
+    Done,
 }
 
 #[derive(Deserialize)]
@@ -1437,6 +1473,30 @@ mod tests {
                 after: Some(6_578)
             }]
         ));
+    }
+
+    #[test]
+    fn a_permission_check_of_an_unknown_status_is_unreadable() {
+        let line = json!({
+            "type": "system",
+            "subtype": "permission_check_status",
+            "tool_use_id": "toolu_1",
+            "status": "paused",
+        });
+        assert!(read_events(&line.to_string()).is_err());
+    }
+
+    #[test]
+    fn a_subagent_permission_check_tells_nothing() {
+        let line = json!({
+            "type": "system",
+            "subtype": "permission_check_status",
+            "tool_use_id": "toolu_1",
+            "agent_id": "agent_1",
+            "status": "checking",
+        });
+        let events = read_events(&line.to_string()).expect("a readable line");
+        assert!(events.is_empty());
     }
 
     #[test]

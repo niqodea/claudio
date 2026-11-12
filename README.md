@@ -44,11 +44,14 @@ Bare mode ignores the subscription login, as well as CLAUDE.md files, hooks, plu
 
 ## What claudio relies on
 
-claudio does one of three things with each kind of message Claude Code sends:
+claudio puts each kind of message Claude Code sends in one of three classes:
 
 - it shows the kind, when it matters to you, like Claude's text, a tool call or a compaction
 - it skips the kind on purpose, when it does not, like `tool_progress`, Claude Code's progress on a long tool call
 - it flags a kind it knows nothing of, like one a newer Claude Code adds, with a line in orange, once per session, and Ctrl+O shows what carried it
+
+A kind can take one class or another by what it holds, like a hook's response, shown only when the hook failed.
+`Class` in `src/protocol.rs` gives each kind its class, and each skip its reason.
 
 The kinds claudio names come from what sessions sent, not from a list made in advance: a kind joins them, shown or skipped, once a session sends it and it is flagged.
 

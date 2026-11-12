@@ -368,109 +368,151 @@ impl Command<'_> {
     }
 }
 
+/// What claudio does with a kind of what Claude Code sends, as the README's "What claudio
+/// relies on" tells. A kind can take one class or another by what it holds.
+enum Class {
+    /// It matters to the user, who sees these events of it.
+    Shown(Vec<Event>),
+    /// It tells the user nothing, for this reason.
+    Skipped(#[expect(dead_code, reason = "a skip must say why, for the reader")] &'static str),
+    /// claudio knows nothing of it, and this event says so.
+    Flagged(Event),
+}
+
+use Class::{Flagged, Shown, Skipped};
+
+impl Class {
+    fn into_events(self) -> Vec<Event> {
+        match self {
+            Shown(events) => events,
+            Skipped(_) => Vec::new(),
+            Flagged(event) => vec![event],
+        }
+    }
+}
+
 /// Reads the events in one line Claude Code wrote, none for a message that reports nothing a
 /// person reads or answers.
 pub fn read_events(line: &str) -> Result<Vec<Event>, String> {
     let message: Message = serde_json::from_str(line)
         .map_err(|error| format!("Unreadable message from Claude Code: {error}: {line}"))?;
-    let events = match message {
+    let class = match message {
         Message::StreamEvent {
-            event:
-                StreamEvent::ContentBlockDelta {
-                    delta: Delta::Text { text },
-                },
-            parent_tool_use_id: None,
-        } => vec![Event::Text(text)],
-        // A subagent calls the API with a context and cache of its own
-        Message::StreamEvent {
-            event: StreamEvent::MessageStart { message },
-            parent_tool_use_id: None,
-        } => vec![Event::Call(message.usage.into())],
+            event,
+            parent_tool_use_id,
+        } => read_stream_event(event, parent_tool_use_id.is_some(), line),
         // Claude Code sends an API error as a reply of its own making, whole and never streamed
         Message::Assistant {
             message,
             parent_tool_use_id: None,
             error: Some(_),
-        } => vec![Event::ApiError(message.content.into_text())],
+        } => Shown(vec![Event::ApiError(message.content.into_text())]),
         // Claude Code sends each block whole once it has streamed it
         Message::Assistant {
             message,
             parent_tool_use_id,
             error: _,
-        } => read_assistant(message, parent_tool_use_id.is_some(), line),
+        } => Shown(read_assistant(message, parent_tool_use_id.is_some(), line)),
+        Message::User {
+            is_replay: true, ..
+        } => Skipped("it repeats what Claude Code's history holds, like a command's output"),
         Message::User {
             message,
             parent_tool_use_id,
             is_replay: false,
-        } => read_user(message, parent_tool_use_id.is_some(), line),
+        } => Shown(read_user(message, parent_tool_use_id.is_some(), line)),
         Message::ControlRequest {
             request_id,
             request,
-        } => vec![read_request(request_id, request)?],
+        } => Shown(vec![read_request(request_id, request)?]),
         Message::ControlResponse {
             response:
                 Reply::Success {
                     request_id,
                     response,
                 },
-        } => read_response(&request_id, response)?,
+        } => Shown(read_response(&request_id, response)?),
         // The context's usage tells whether the cache may be cold, and claudio has nothing to
         // tell it by otherwise
         Message::ControlResponse {
             response: Reply::Error { request_id, error },
-        } if request_id == CONTEXT_REQUEST_ID => vec![Event::Incompatible(format!(
+        } if request_id == CONTEXT_REQUEST_ID => Shown(vec![Event::Incompatible(format!(
             "Claude Code refused the context's usage: {error}"
-        ))],
+        ))]),
         Message::ControlResponse {
             response: Reply::Error { request_id, error },
         } => return Err(format!("Claude Code refused request {request_id}: {error}")),
         Message::Result { subtype } if subtype == "success" => {
-            vec![Event::TurnEnd { failure: None }]
+            Shown(vec![Event::TurnEnd { failure: None }])
         }
-        Message::Result { subtype } => vec![Event::TurnEnd {
+        Message::Result { subtype } => Shown(vec![Event::TurnEnd {
             failure: Some(subtype),
-        }],
-        Message::RateLimitEvent { rate_limit_info } => vec![read_limits(rate_limit_info)],
-        Message::ConversationReset { session_id } => vec![Event::Reset {
+        }]),
+        Message::RateLimitEvent { rate_limit_info } => Shown(vec![read_limits(rate_limit_info)]),
+        Message::ConversationReset { session_id } => Shown(vec![Event::Reset {
             previous_session: session_id,
-        }],
+        }]),
         Message::System(system) => read_system(system, line),
-        Message::StreamEvent {
-            event: StreamEvent::Unknown,
-            ..
-        } => vec![unknown(line, "stream event", "/event/type")],
-        Message::StreamEvent {
-            event:
-                StreamEvent::ContentBlockDelta {
-                    delta: Delta::Unknown,
-                },
-            ..
-        } => vec![unknown(line, "streamed piece", "/event/delta/type")],
-        Message::Unknown => vec![unknown(line, "message", "/type")],
-        Message::User {
-            is_replay: true, ..
+        Message::KeepAlive => Skipped("a heartbeat has nothing to show"),
+        Message::ToolProgress => Skipped("a tool's call and result tell enough of how long it ran"),
+        Message::CommandLifecycle => {
+            Skipped("the session's state tells when the turn of a message claudio sent runs")
         }
-        | Message::StreamEvent { .. }
-        | Message::KeepAlive
-        | Message::ToolProgress
-        | Message::CommandLifecycle => vec![],
+        Message::Unknown => Flagged(unknown(line, "message", "/type")),
     };
-    Ok(events)
+    Ok(class.into_events())
+}
+
+/// What claudio does with a streamed piece of a reply, a subagent's when `is_subagent`, from
+/// `line`.
+fn read_stream_event(event: StreamEvent, is_subagent: bool, line: &str) -> Class {
+    match event {
+        StreamEvent::Unknown => Flagged(unknown(line, "stream event", "/event/type")),
+        StreamEvent::ContentBlockDelta {
+            delta: Delta::Unknown,
+        } => Flagged(unknown(line, "streamed piece", "/event/delta/type")),
+        _ if is_subagent => Skipped(
+            "a subagent's text shows in what it reports back to Claude, and it calls the API with a context and cache of its own",
+        ),
+        StreamEvent::ContentBlockDelta {
+            delta: Delta::Text { text },
+        } => Shown(vec![Event::Text(text)]),
+        StreamEvent::MessageStart { message } => Shown(vec![Event::Call(message.usage.into())]),
+        StreamEvent::ContentBlockDelta {
+            delta: Delta::InputJson,
+        } => Skipped("a tool's input shows whole with its call"),
+        StreamEvent::ContentBlockDelta {
+            delta: Delta::Thinking | Delta::Signature,
+        } => Skipped("claudio leaves Claude's thinking out"),
+        StreamEvent::ContentBlockStart
+        | StreamEvent::ContentBlockStop
+        | StreamEvent::MessageDelta
+        | StreamEvent::MessageStop => {
+            Skipped("the whole message that follows the stream tells what claudio shows of it")
+        }
+    }
 }
 
 /// The events of a reply's blocks, those of a subagent's when `is_subagent`, from `line`.
 fn read_assistant(message: Body, is_subagent: bool, line: &str) -> Vec<Event> {
     (message.content.into_blocks().into_iter().enumerate())
-        .filter_map(|(index, block)| match block {
-            Block::Text { text } if !is_subagent => Some(Event::TextEnd(text)),
-            Block::ToolUse { id, name, input } => Some(Event::ToolUse(ToolUse {
-                id,
-                name,
-                input,
-                is_subagent,
-            })),
-            Block::Unknown => Some(unknown(line, "content block", &block_type(index))),
-            Block::Text { .. } | Block::Thinking | Block::ToolResult { .. } => None,
+        .flat_map(|(index, block)| {
+            let class = match block {
+                Block::Text { text } if !is_subagent => Shown(vec![Event::TextEnd(text)]),
+                Block::Text { .. } => {
+                    Skipped("a subagent's text shows in what it reports back to Claude")
+                }
+                Block::ToolUse { id, name, input } => Shown(vec![Event::ToolUse(ToolUse {
+                    id,
+                    name,
+                    input,
+                    is_subagent,
+                })]),
+                Block::Thinking => Skipped("claudio leaves Claude's thinking out"),
+                Block::ToolResult { .. } => Skipped("a tool's result comes in a user message"),
+                Block::Unknown => Flagged(unknown(line, "content block", &block_type(index))),
+            };
+            class.into_events()
         })
         .collect()
 }
@@ -487,24 +529,28 @@ fn read_user(message: Body, is_subagent: bool, line: &str) -> Vec<Event> {
             } => {
                 let (text, unknown_block) =
                     content.map_or((Some(String::new()), None), ResultContent::into_text);
-                let result = Event::ToolResult(ToolResult {
+                let result = Shown(vec![Event::ToolResult(ToolResult {
                     tool_use_id,
                     text,
                     is_error,
                     is_subagent,
-                });
+                })]);
                 let unknown_block = unknown_block.map(|inner| {
                     let pointer = format!("/message/content/{index}/content/{inner}/type");
-                    unknown(line, "tool result block", &pointer)
+                    Flagged(unknown(line, "tool result block", &pointer))
                 });
                 [Some(result), unknown_block]
                     .into_iter()
                     .flatten()
                     .collect()
             }
-            Block::Unknown => vec![unknown(line, "content block", &block_type(index))],
-            Block::Text { .. } | Block::Thinking | Block::ToolUse { .. } => vec![],
+            Block::Text { .. } => vec![Skipped("the user's own text shows as they sent it")],
+            Block::Thinking | Block::ToolUse { .. } => {
+                vec![Skipped("only Claude's messages carry them")]
+            }
+            Block::Unknown => vec![Flagged(unknown(line, "content block", &block_type(index)))],
         })
+        .flat_map(Class::into_events)
         .collect()
 }
 
@@ -527,65 +573,67 @@ fn block_type(index: usize) -> String {
     format!("/message/content/{index}/type")
 }
 
-fn read_system(system: System, line: &str) -> Vec<Event> {
+fn read_system(system: System, line: &str) -> Class {
     match system {
         System::Init {
             session_id,
             claude_code_version,
-        } => vec![
+        } => Shown(vec![
             Event::SessionId(session_id),
             Event::Version(claude_code_version),
-        ],
-        System::SessionStateChanged { state } => vec![Event::State(state)],
-        System::BackgroundTasksChanged { tasks } => vec![Event::BackgroundTasks(
+        ]),
+        System::SessionStateChanged { state } => Shown(vec![Event::State(state)]),
+        System::BackgroundTasksChanged { tasks } => Shown(vec![Event::BackgroundTasks(
             tasks.into_iter().map(|task| task.description).collect(),
-        )],
-        System::CompactBoundary { compact_metadata } => vec![Event::Compacted {
+        )]),
+        System::CompactBoundary { compact_metadata } => Shown(vec![Event::Compacted {
             before: compact_metadata.pre_tokens,
             after: compact_metadata.post_tokens,
-        }],
+        }]),
+        System::PermissionCheckStatus {
+            agent_id: Some(_), ..
+        } => Skipped("the label row shows what Claude does, not what its subagents do"),
         System::PermissionCheckStatus {
             tool_use_id,
             status,
             agent_id: None,
-        } => vec![Event::PermissionCheck {
+        } => Shown(vec![Event::PermissionCheck {
             tool_use_id,
             is_checking: status == CheckStatus::Checking,
-        }],
+        }]),
+        System::HookResponse {
+            outcome: HookOutcome::Success,
+            ..
+        } => Skipped("a hook that succeeded needs nothing from the user"),
         System::HookResponse {
             hook_name,
-            outcome: outcome @ (HookOutcome::Error | HookOutcome::Cancelled),
+            outcome,
             exit_code,
             stderr,
-        } => vec![Event::HookFailed {
+        } => Shown(vec![Event::HookFailed {
             hook: hook_name,
             exit_code,
             stderr,
             is_cancelled: outcome == HookOutcome::Cancelled,
-        }],
-        System::Informational { content, level } => vec![Event::Notice {
+        }]),
+        System::Informational { content, level } => Shown(vec![Event::Notice {
             text: content,
             level,
-        }],
-        System::Unknown => vec![unknown(line, "system message", "/subtype")],
-        System::Status
-        | System::ThinkingTokens
-        | System::SessionTitleChanged
-        | System::TaskStarted
+        }]),
+        System::Status => {
+            Skipped("the label row tells what Claude Code does from the session's state")
+        }
+        System::ThinkingTokens => Skipped("claudio leaves Claude's thinking out"),
+        System::SessionTitleChanged => Skipped("claudio shows the session's title nowhere"),
+        System::TaskStarted
         | System::TaskUpdated
         | System::TaskProgress
-        | System::TaskNotification
-        | System::HookStarted
-        | System::HookProgress
-        | System::HookResponse {
-            outcome: HookOutcome::Success,
-            ..
+        | System::TaskNotification => Skipped("background_tasks_changed tells the same"),
+        System::HookStarted | System::HookProgress => {
+            Skipped("how a hook ends tells all that matters of it")
         }
-        | System::PermissionDenied
-        // What a subagent does shows nowhere on the label row
-        | System::PermissionCheckStatus {
-            agent_id: Some(_), ..
-        } => vec![],
+        System::PermissionDenied => Skipped("the tool's failed result shows the refusal"),
+        System::Unknown => Flagged(unknown(line, "system message", "/subtype")),
     }
 }
 
@@ -724,8 +772,8 @@ pub(crate) fn read_request(request_id: String, request: Value) -> Result<Event, 
     }))
 }
 
-/// A kind of message Claude Code sends, which claudio shows, skips on purpose, or flags as
-/// `Unknown`, as the README's "What claudio relies on" tells. A kind joins once a session sends it.
+/// A kind of message Claude Code sends, whose [`Class`] the reading gives. A kind joins once a
+/// session sends it.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Message {
@@ -743,7 +791,7 @@ enum Message {
         message: Body,
         parent_tool_use_id: Option<String>,
         /// Whether the message repeats what Claude Code's history holds, like a command's
-        /// output after `/compact`, which claudio skips, as it tells nothing new.
+        /// output after `/compact`.
         #[serde(rename = "isReplay", default)]
         is_replay: bool,
     },
@@ -767,12 +815,11 @@ enum Message {
     ConversationReset {
         session_id: String,
     },
-    /// A heartbeat, with nothing to show.
+    /// A heartbeat.
     KeepAlive,
-    /// How long a tool has run, which its call and result tell enough of.
+    /// How long a tool has run.
     ToolProgress,
-    /// Where a message claudio sent is in Claude Code's queue, which the session's state tells
-    /// as the message's turn runs.
+    /// Where a message claudio sent is in Claude Code's queue.
     CommandLifecycle,
     #[serde(other)]
     Unknown,
@@ -848,21 +895,19 @@ enum System {
     CompactBoundary {
         compact_metadata: CompactMetadata,
     },
-    /// What Claude Code does, like compacting, which the label row tells from the state.
+    /// What Claude Code does, like compacting.
     Status,
-    /// How far Claude thinks, which claudio leaves out, with the thinking.
+    /// How far Claude thinks.
     ThinkingTokens,
-    /// The title Claude Code gives the session, which claudio shows nowhere.
+    /// The title Claude Code gives the session.
     SessionTitleChanged,
-    // What `BackgroundTasksChanged` tells already
     TaskStarted,
     TaskUpdated,
     TaskProgress,
     TaskNotification,
-    // A hook of the user's settings that starts or runs, which tells nothing of the conversation
     HookStarted,
     HookProgress,
-    /// How a hook of the user's settings ended, shown when it failed.
+    /// How a hook of the user's settings ended.
     HookResponse {
         hook_name: String,
         outcome: HookOutcome,
@@ -874,7 +919,7 @@ enum System {
         content: String,
         level: Level,
     },
-    /// A tool use that auto mode refused, which the tool's failed result shows already.
+    /// A tool use that auto mode refused.
     PermissionDenied,
     /// Sent once the auto mode classifier has not answered for 4 seconds whether a tool use
     /// needs the user's approval, and again as it answers, so the wait shows as a check rather
@@ -926,7 +971,6 @@ enum StreamEvent {
     ContentBlockDelta {
         delta: Delta,
     },
-    // The whole message that follows the stream tells what claudio shows of them
     ContentBlockStart,
     ContentBlockStop,
     MessageDelta,
@@ -940,10 +984,10 @@ enum StreamEvent {
 enum Delta {
     #[serde(rename = "text_delta")]
     Text { text: String },
-    /// A piece of a tool's input, which shows whole with its call.
+    /// A piece of a tool's input.
     #[serde(rename = "input_json_delta")]
     InputJson,
-    // Pieces of Claude's thinking, which claudio leaves out
+    // Pieces of Claude's thinking
     #[serde(rename = "thinking_delta")]
     Thinking,
     #[serde(rename = "signature_delta")]
@@ -1059,7 +1103,7 @@ enum Block {
         #[serde(default)]
         is_error: bool,
     },
-    /// Claude's thinking, which claudio leaves out.
+    /// Claude's thinking.
     Thinking,
     #[serde(other)]
     Unknown,

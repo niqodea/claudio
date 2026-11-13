@@ -192,7 +192,7 @@ claudio only ever appends to the conversation, in characters on screen, so it co
 Its lines don't depend on the terminal's size, so they read the same at any width, with the terminal wrapping a line wider than the screen.
 A noisy line, which shows a tool's input or output as it is, is cut in the middle to a fixed width, since its start and end tell it from the next and Ctrl+O shows it whole.
 Every other line, like an error or a warning, stays whole, to be read in full.
-Below the conversation, the label row and the input box are drawn again on every key and every resize, and never reach the scrollback, so they may use the terminal's size.
+Below the conversation, the label row and the input box are drawn again on every key and every resize, and reach the scrollback only as [Resizing](#resizing) tells, so they may use the terminal's size.
 The input line's editing state, like vi's mode, may even show without characters, like with the cursor's shape: only the person typing needs it, and only while typing.
 The test is whether it would matter to someone reading the scrollback later.
 
@@ -204,6 +204,42 @@ A command that runs in the background, as Claude asks or as a message you send w
 Its result line says `◌ #00 Bash: running in background`, and once it ends, a line says how, like `✓ #00 Bash: completed`, or `✗` with `failed` or `stopped`.
 A call that names the task, like TaskStop's, names it by that tag too.
 Ctrl+O shows what Claude Code told Claude of the task, like the file its output goes to, which `tail -f` follows.
+
+## Resizing
+
+The conversation is printed once, a whole line at a time, and never touched again, so the terminal wraps it again on a resize, as it does any output.
+Below it are the live rows: the line Claude is still writing, the label row and the input box, which claudio erases and draws again on every key, every new text and every resize.
+
+The terminal applies a resize at once, but claudio hears of it only later, so what claudio already sent, drawn for the old size, can land on the new one.
+So claudio never names a row by its number: each redraw finds its way back to the first live row from the cursor, which the terminal keeps on its character as it wraps the rows again.
+As claudio starts, it checks whether a backspace at a row's start goes up only onto a row that wrapped into it, as [tmux's does](https://github.com/tmux/tmux/blob/3.5a/screen-write.c#L983).
+Then backspaces stop exactly at the start of each live row, however the terminal wrapped it, and a resize leaves nothing behind.
+tmux 3.5 passes the check, and is the only terminal checked so far.
+In a terminal that fails it, claudio warns in orange as it starts, and each redraw goes up as many rows as the live rows took.
+A narrower screen splits rows into more, so the conversation is never erased, but stray copies of the label row and the box can stay in the scrollback.
+
+One limit holds in any terminal: live rows taller than the screen push the screen's top into the scrollback, where claudio can no longer erase it.
+The line Claude is still writing can grow that tall, and a shrink while it does leaves a copy of its first rows in the scrollback.
+The line itself still prints once, whole, when it ends, and nothing is ever lost.
+
+No redraw can avoid this, given three things claudio wants:
+
+1. the terminal wraps Claude's lines, so they wrap again on a resize, and copy whole
+2. the real cursor stays in the input box
+3. a resize never leaves copies in the scrollback
+
+Each pair rules out the third:
+
+- To go on writing a line, claudio needs to get back to the line's end. Once the terminal wraps text again, only a cursor resting there finds it: a backspace finds a line's start, as above, and no sequence finds its end. So with the cursor in the box, the line Claude is still writing stays among the live rows, which can grow taller than the screen: 1 and 2 rule out 3.
+- Printing each row of Claude's reply as it fills keeps the live rows short, as [Codex](https://github.com/openai/codex/blob/rust-v0.169.0/codex-rs/tui/src/insert_history.rs) and [oh-my-pi](https://github.com/can1357/oh-my-pi/pull/16117) do, but then claudio breaks the lines itself: 2 and 3 rule out 1.
+- A cursor resting at the end of the line Claude writes can always go on from there, but then the box needs a cursor drawn in its place: 1 and 3 rule out 2.
+
+claudio keeps 1 and 2. Claude Code draws its live rows at the bottom of the terminal too, and its users report the same copies on a resize, in [tmux](https://github.com/anthropics/claude-code/issues/52660) and [elsewhere](https://github.com/anthropics/claude-code/issues/51828).
+
+The way out is in the terminal, which applies the resize and so knows where every row went.
+kitty, for one, [erases a shell's prompt itself on a resize](https://sw.kovidgoyal.net/kitty/shell-integration/), from the marks of [OSC 133](https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md), so the shell draws it again with no race.
+A terminal that did the same for a program's live rows, or that could move the cursor to the end of a wrapped line, would lift the limit.
+[Resizes reported in band](https://gist.github.com/rockorager/e695fb2924d36b2bcf1fff4a3704bd83), mode 2048, would not: they reach the program in order with the keys typed, but its output can still be on its way when the terminal resizes.
 
 ## Colors
 

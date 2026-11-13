@@ -650,6 +650,15 @@ impl Output {
         ));
     }
 
+    /// Warns that a resize can leave copies of the live rows in the scrollback, since frames can
+    /// only count their way back to the first of them in this terminal.
+    pub fn show_inexact_redraw(&mut self) {
+        self.begin(Section::Notice);
+        self.push_detail(&format!(
+            "{ORANGE}a resize in this terminal can leave copies of the label row and the box in the scrollback, which tmux 3.5 avoids{RESET}"
+        ));
+    }
+
     pub fn show_paying_key(&mut self, key: &str) {
         self.begin(Section::Notice);
         self.push_detail(&format!(

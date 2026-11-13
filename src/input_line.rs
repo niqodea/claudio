@@ -5,7 +5,11 @@
 //! The label row and the box follow the conversation's end, as a shell's prompt follows the output,
 //! down to the bottom of the terminal, where they stay once the conversation fills the rows above.
 //! The box has a fixed number of rows and scrolls its text to keep the cursor in view, so it never
-//! grows over the conversation. The conversation is only ever appended to.
+//! grows over the conversation.
+//!
+//! The conversation is only ever appended to, a whole line at a time. The line Claude is still
+//! writing shows above the label row until it ends, and together they are the live rows, which
+//! each frame erases and draws again, after climbing back to the first of them as `climb` tells.
 
 use std::env;
 use std::fs;
@@ -17,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use crossterm::cursor::{self, Hide, MoveTo, SetCursorStyle, Show};
+use crossterm::cursor::{self, Hide, MoveRight, MoveTo, SetCursorStyle, Show};
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
     KeyModifiers,
@@ -25,6 +29,7 @@ use crossterm::event::{
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::climb::{self, Climb};
 use crate::context::COLD_COLOR;
 use crate::keys::{self, Action, Phase, SessionKey, View};
 use crate::limits::{Level, limit_level};
@@ -37,8 +42,8 @@ use crate::vi::{Editor, Mode};
 use crate::wrap;
 use crate::{Shared, lock};
 
-/// The rows the conversation keeps at least, since tmux ignores a scroll region of one row.
-const MIN_CONVERSATION_ROWS: u16 = 2;
+/// The rows the conversation keeps at least, above the label row and the box.
+const MIN_CONVERSATION_ROWS: u16 = 1;
 
 /// How long the input waits for a key before it looks again for output and a changed label.
 const TICK: Duration = Duration::from_millis(25);
@@ -125,11 +130,13 @@ pub struct InputLine {
     layout: Layout,
     /// The first row of the text the box shows.
     scroll: u16,
-    end: End,
-    /// Text that waits for a screen with the rows to scroll it.
-    held: String,
-    /// What the last draw left above the cursor, which a resize moves before the client hears
-    /// of it.
+    /// The conversation's text not printed yet: whole lines, which wait for the main screen and
+    /// for a screen with rows to show them, then the line Claude still writes, which shows among
+    /// the live rows until it ends.
+    pending: String,
+    /// How each frame gets back to the first live row.
+    climb: Climb,
+    /// Where the last frame left the cursor among the live rows.
     drawn: Drawn,
     /// The label last drawn, which the input line redraws when it changes.
     label: String,
@@ -137,15 +144,14 @@ pub struct InputLine {
     /// the scrollback, since a question matters only while it is answered, and the
     /// conversation's new lines wait for the main screen to come back.
     in_view: bool,
-    /// The size of the last resize while the question view showed, which reaches the main
-    /// screen once it comes back.
-    resized_in_view: Option<(u16, u16)>,
     is_closed: bool,
 }
 
 impl InputLine {
-    /// The label row and the box, from the row the cursor is on, where the conversation starts.
-    /// A screen with too few rows below the cursor scrolls up to make them.
+    /// The label row and the box, from the row the cursor is on, where the conversation starts,
+    /// or the row below when the cursor is past the row's start. A screen with too few rows below
+    /// that row scrolls up to make them. Then it checks how frames can climb back to the live
+    /// rows, and warns when they can only count their way back.
     pub fn new(
         editor_command: String,
         full_view: PathBuf,
@@ -155,15 +161,32 @@ impl InputLine {
         shared: Arc<Mutex<Shared>>,
     ) -> Result<Self, String> {
         let (width, height) = terminal::size().map_err(|error| cannot_read_terminal(&error))?;
-        let (_, row) = cursor::position().map_err(|error| cannot_read_terminal(&error))?;
+        let (column, row) = cursor::position().map_err(|error| cannot_read_terminal(&error))?;
+        let row = if column > 0 {
+            write_out(b"\r\n")?;
+            cursor::position()
+                .map_err(|error| cannot_read_terminal(&error))?
+                .1
+        } else {
+            row
+        };
         let layout = Layout::new(width, height, input_rows);
         let mut out = Vec::new();
         let lowest = layout.lowest_label_row();
         if row > lowest {
             scroll_screen(&mut out, layout, row - lowest);
         }
-        put!(out, EnableBracketedPaste);
+        put!(out, MoveTo(0, row.min(lowest)), EnableBracketedPaste);
         write_out(&out)?;
+        // The check needs a row below the cursor, which a screen of one row lacks
+        let climb = if height >= 2 {
+            climb::check()?
+        } else {
+            Climb::Counted
+        };
+        if climb == Climb::Counted {
+            lock(&shared).output.show_inexact_redraw();
+        }
         Ok(InputLine {
             shared,
             break_signal,
@@ -178,12 +201,15 @@ impl InputLine {
             confirming: None,
             layout,
             scroll: 0,
-            end: End::Before(row.min(lowest)),
-            held: String::new(),
-            drawn: Drawn::default(),
+            pending: String::new(),
+            climb,
+            // No live rows yet: the cursor is where the first one goes
+            drawn: Drawn {
+                lines_above_cursor: 0,
+                width: layout.width,
+            },
             label: String::new(),
             in_view: false,
-            resized_in_view: None,
             is_closed: false,
         })
     }
@@ -249,16 +275,16 @@ impl InputLine {
                     }
                 }
                 Event::Paste(text) if lock(&self.shared).phase.takes_text() => self.paste(&text),
-                Event::Resize(width, height) => self.resize(width, height)?,
+                Event::Resize(width, height) => self.resize(width, height),
                 _ => continue,
             }
             self.draw()?;
         }
     }
 
-    /// Takes the bottom of the terminal away, once the session ended, and leaves the cursor where
-    /// the rest of the conversation follows: at the end of its last line when the line is open,
-    /// and else at the start of the row below.
+    /// Takes the bottom of the terminal away, once the session ended, and prints the rest of the
+    /// conversation. It leaves the cursor where the conversation goes on: at the end of the line
+    /// Claude was writing, if any, and else at the start of the row below the last line.
     pub fn close(&mut self) -> Result<(), String> {
         if self.is_closed {
             return Ok(());
@@ -268,16 +294,18 @@ impl InputLine {
             self.switch_screen()?;
         }
         let mut out = Vec::new();
-        put!(
-            out,
-            MoveTo(0, self.label_row()),
-            Clear(ClearType::FromCursorDown),
-            SetCursorStyle::DefaultUserShape,
-            DisableBracketedPaste,
+        climb::write(
+            &mut out,
+            self.climb,
+            self.drawn.lines_above_cursor,
+            self.drawn.width,
         );
-        let held = std::mem::take(&mut self.held);
-        if continue_conversation(&mut out, &self.end, &held, self.layout.width).is_none() {
-            out.extend(b"\r\n");
+        out.extend(climb::ERASE_DOWN.as_bytes());
+        put!(out, SetCursorStyle::DefaultUserShape, DisableBracketedPaste);
+        let pending = std::mem::take(&mut self.pending);
+        out.extend(pending.replace('\n', "\r\n").as_bytes());
+        if self.climb == Climb::Exact {
+            out.extend(climb::BACKSPACE_WRAPS_OFF.as_bytes());
         }
         put!(out, Show);
         write_out(&out)
@@ -287,15 +315,9 @@ impl InputLine {
         self.editor.text()
     }
 
-    /// The row of the label: right below the conversation's end, down to the lowest row the
-    /// label row and the box fit above.
-    fn label_row(&self) -> u16 {
-        self.end.next_row().min(self.layout.lowest_label_row())
-    }
-
-    /// Goes to the question view's screen, or back from it to the conversation's. The
-    /// conversation stays as it was on the main screen, and a resize meanwhile reaches it once
-    /// it comes back.
+    /// Goes to the question view's screen, or back from it to the conversation's, which comes
+    /// back as it was, with the cursor where it was, and draws itself again for any resize
+    /// meanwhile.
     fn switch_screen(&mut self) -> Result<(), String> {
         let mut out = Vec::new();
         if self.in_view {
@@ -305,10 +327,7 @@ impl InputLine {
         }
         write_out(&out)?;
         self.in_view = !self.in_view;
-        match self.resized_in_view.take() {
-            Some((width, height)) if !self.in_view => self.resize(width, height),
-            _ => Ok(()),
-        }
+        Ok(())
     }
 
     /// Acts on a key, with an outcome for one that ends the reading.
@@ -599,10 +618,10 @@ impl InputLine {
             put!(out, LeaveAlternateScreen);
         }
         let left = write_out(&out);
-        match shown? {
-            Some((width, height)) => left.and_then(|()| self.resize(width, height)),
-            None => left,
+        if let Some((width, height)) = shown? {
+            self.resize(width, height);
         }
+        left
     }
 
     /// Draws `lines` on the alternate screen until a key or a question from Claude Code closes
@@ -681,147 +700,185 @@ impl InputLine {
         Ok(status)
     }
 
-    /// Prints the conversation's new text above the label row, in a scroll region over the
-    /// conversation's rows, so the lines that leave the screen go to the scrollback.
+    /// Takes the conversation's new text, and draws the frame that prints it, once the main
+    /// screen shows.
     fn print_output(&mut self) -> Result<(), String> {
         let text = lock(&self.shared).output.take_text();
-        self.held.push_str(&text);
-        if self.held.is_empty() || self.in_view || !self.layout.shows_conversation() {
+        if text.is_empty() {
             return Ok(());
         }
-        let mut out = Vec::new();
-        out.extend(BEGIN_FRAME.as_bytes());
-        // The lines can take the rows of the label and the box, which follow them once drawn again
-        put!(
-            out,
-            Hide,
-            MoveTo(0, self.label_row()),
-            Clear(ClearType::FromCursorDown)
-        );
-        // Setting the region puts the cursor home, so the moves follow it
-        let conversation_rows = self.layout.conversation_rows();
-        out.extend(format!("\x1b[1;{conversation_rows}r").as_bytes());
-        let end = match &self.end {
-            // The label was at the bottom, below the region, so the first line scrolls the
-            // region's rows up and starts its last row, as if a line ended on the row above
-            End::Before(row) if *row >= conversation_rows => End::On {
-                row: conversation_rows - 1,
-                open: None,
-            },
-            end => end.clone(),
-        };
-        let held = std::mem::take(&mut self.held);
-        let open = continue_conversation(&mut out, &end, &held, self.layout.width);
-        write_out(&out)?;
-        // The cursor is where the last line ends: past its last character, or on it when the
-        // line ends at the row's end
-        let (_, row) = cursor::position().map_err(|error| cannot_read_terminal(&error))?;
-        self.end = End::On { row, open };
-        // The frame ends with the label and the box drawn below the lines
-        write_out(b"\x1b[r")?;
+        self.pending.push_str(&text);
+        if self.in_view {
+            return Ok(());
+        }
         self.draw()
     }
 
-    /// Draws the label row and the input box, with the cursor in the box. The question view also
-    /// draws the question above the label row, and its options between the label row and the
-    /// box, where the options' pointer stands for the cursor while it is on them.
+    /// Draws the screen the user is on: the question view, or the main screen.
     fn draw(&mut self) -> Result<(), String> {
         self.label = self.make_label();
+        let view = match &lock(&self.shared).phase {
+            Phase::Answering(view) if self.in_view => Some(view.clone()),
+            _ => None,
+        };
+        match view {
+            Some(view) => self.draw_view(&view),
+            None => self.draw_main(),
+        }
+    }
+
+    /// Draws a frame of the main screen. It climbs back to the first live row and erases from
+    /// there down, prints the conversation's whole lines that wait, then draws the live rows,
+    /// each as a line of its own, as `climb` needs: the line Claude still writes, the label row
+    /// and the box. Last, it climbs from the end of the last live row to the cursor's row, and
+    /// moves along it to the cursor. No step names a row by its number, so the frame lands where
+    /// it should even when a resize reaches the terminal first.
+    fn draw_main(&mut self) -> Result<(), String> {
         let layout = self.layout;
         let mut out = Vec::new();
         out.extend(BEGIN_FRAME.as_bytes());
         put!(out, Hide);
-        let view = match &lock(&self.shared).phase {
-            Phase::Answering(view) => Some(view.clone()),
-            _ => None,
-        };
-        let view_rows = view
-            .as_ref()
-            .map(|view| ViewRows::new(layout, view.choices.len()));
-        let label_row = view_rows.map_or_else(|| self.label_row(), |rows| rows.label);
-        if let (Some(view), Some(rows)) = (&view, view_rows) {
-            self.draw_question(&mut out, view, rows);
-        }
-        let mut widths = Vec::new();
-        if layout.label_rows > 0 {
-            widths.push(self.draw_label(&mut out, label_row, view.as_ref()));
-        }
-        let box_top = view_rows.map_or(label_row + layout.label_rows, |rows| rows.box_top);
-        let text = self.text();
-        let wrapped = wrap::wrap(
-            &text,
-            self.editor.cursor(),
-            self.editor.selection(),
-            usize::from(layout.width),
+        climb::write(
+            &mut out,
+            self.climb,
+            self.drawn.lines_above_cursor,
+            self.drawn.width,
         );
-        let to_row = |index: usize| u16::try_from(index).unwrap_or(u16::MAX);
-        let (cursor_x, cursor_y) = (to_row(wrapped.cursor_column), to_row(wrapped.cursor_row));
-        let used_rows = to_row(wrapped.rows.len());
-        // The box scrolls as little as keeps the cursor in it, and shows no empty rows below the
-        // text that the text above could fill
-        let rows = layout.input_rows;
-        self.scroll = self
-            .scroll
-            .min(used_rows.max(cursor_y + 1).saturating_sub(rows))
-            .min(cursor_y)
-            .max((cursor_y + 1).saturating_sub(rows));
-        let mut row_widths = Vec::new();
-        for y in 0..rows {
-            let row = box_top + y;
-            if row >= layout.height {
-                break;
-            }
-            put!(out, MoveTo(0, row));
-            let (text, width) = wrapped
-                .rows
-                .get(usize::from(self.scroll + y))
-                .map_or(("", 0), |row| (row.text.as_str(), row.width));
-            out.extend(format!("{}{text}{RESET}", start_bar_row()).as_bytes());
-            row_widths.push(width);
+        out.extend(climb::ERASE_DOWN.as_bytes());
+        // Each whole line ends with its line break, so the live rows start on a line of their own
+        let shows_conversation = layout.shows_conversation();
+        if shows_conversation && let Some(end) = self.pending.rfind('\n') {
+            let lines: String = self.pending.drain(..=end).collect();
+            out.extend(lines.replace('\n', "\r\n").as_bytes());
         }
-        let cursor_in_box = cursor_y - self.scroll;
-        // The command line ends the label row, where its cursor then is, as on vim's
-        let (cursor_column, cursor_row) = if let Some(line) = &self.command_line {
-            widths.clear();
-            let after: String = line.text().chars().skip(line.cursor()).collect();
-            let column = to_row(visible_width(&self.label).saturating_sub(visible_width(&after)));
-            (column.min(layout.width.saturating_sub(1)), label_row)
+        let width = usize::from(layout.width);
+        let label_rows: Vec<String> = if layout.label_rows > 0 {
+            terminal_rows(&self.label_line(None), width)
+                .iter()
+                .map(|row| bar_row(row))
+                .collect()
         } else {
-            widths.extend(row_widths.iter().take(usize::from(cursor_in_box)));
-            let row = (box_top + cursor_in_box).min(layout.height.saturating_sub(1));
-            (cursor_x, row)
+            Vec::new()
         };
-        // A resize on the alternate screen leaves the main screen's rows as the last draw there
-        // left them
-        if !self.in_view {
-            self.drawn = Drawn {
-                widths_above_cursor: widths,
-                cursor_column,
-            };
+        let (box_rows, cursor_row_in_box, cursor_column_in_box) = self.box_rows();
+        let open_rows = if shows_conversation {
+            let room = usize::from(layout.height).saturating_sub(label_rows.len() + box_rows.len());
+            open_line_rows(&self.pending, width, room)
+        } else {
+            Vec::new()
+        };
+        let to_u16 = |index: usize| u16::try_from(index).unwrap_or(u16::MAX);
+        // The command line ends the label row, where its cursor then is, as on vim's
+        let (cursor_line, cursor_column) = if let Some(line) = &self.command_line {
+            let after: String = line.text().chars().skip(line.cursor()).collect();
+            let column = visible_width(&self.label).saturating_sub(visible_width(&after));
+            (open_rows.len(), to_u16(column).min(layout.width - 1))
+        } else {
+            (
+                open_rows.len() + label_rows.len() + cursor_row_in_box,
+                cursor_column_in_box,
+            )
+        };
+        let lines: Vec<String> = [open_rows, label_rows, box_rows].concat();
+        out.extend(lines.join("\r\n").as_bytes());
+        let lines_below_cursor = lines.len().saturating_sub(cursor_line + 1);
+        climb::write(
+            &mut out,
+            self.climb,
+            to_u16(lines_below_cursor),
+            layout.width,
+        );
+        if cursor_column > 0 {
+            put!(out, MoveRight(cursor_column));
         }
-        // In the question view, the cursor shows only while the user writes in the box
-        let is_writing = view
-            .as_ref()
-            .is_none_or(|view| self.pick.cursor == Cursor::Writing && !view.is_submitted);
-        if is_writing {
-            let shape = match self.editor.mode() {
-                _ if self.command_line.is_some() => SetCursorStyle::SteadyBar,
-                Mode::Insert => SetCursorStyle::SteadyBar,
-                Mode::Normal | Mode::Visual | Mode::VisualLine => SetCursorStyle::SteadyBlock,
-            };
-            put!(out, MoveTo(cursor_column, cursor_row), shape, Show);
+        self.drawn = Drawn {
+            lines_above_cursor: to_u16(cursor_line),
+            width: layout.width,
+        };
+        put!(out, self.cursor_shape(), Show);
+        out.extend(END_FRAME.as_bytes());
+        write_out(&out)
+    }
+
+    /// Draws the question view on the alternate screen, which has no scrollback and keeps its
+    /// rows as they are on a resize, so it places its parts at fixed rows: the question above the
+    /// label row, the options between the label row and the box, where the options' pointer
+    /// stands for the cursor while it is on them, and the box at the bottom.
+    fn draw_view(&mut self, view: &View) -> Result<(), String> {
+        let layout = self.layout;
+        let mut out = Vec::new();
+        out.extend(BEGIN_FRAME.as_bytes());
+        put!(out, Hide);
+        let rows = ViewRows::new(layout, view.choices.len());
+        self.draw_question(&mut out, view, rows);
+        if layout.label_rows > 0 {
+            put_bar_line(&mut out, rows.label, &self.label_line(Some(view)));
+        }
+        let (box_rows, cursor_row_in_box, cursor_column) = self.box_rows();
+        for (row, line) in (rows.box_top..layout.height).zip(&box_rows) {
+            put!(out, MoveTo(0, row));
+            out.extend(line.as_bytes());
+        }
+        // The cursor shows only while the user writes in the box
+        if self.pick.cursor == Cursor::Writing && !view.is_submitted {
+            let row = (rows.box_top + u16::try_from(cursor_row_in_box).unwrap_or(u16::MAX))
+                .min(layout.height.saturating_sub(1));
+            put!(out, MoveTo(cursor_column, row), self.cursor_shape(), Show);
         }
         out.extend(END_FRAME.as_bytes());
         write_out(&out)
     }
 
-    /// Draws the label row at `label_row`, and returns the width of its text. The row shows the
-    /// keys of a half-typed vi command at its right edge, where vim's `showcmd` shows them, so
-    /// nothing else on the row moves when they appear or go, and the question view the batch's
-    /// progress. Keys wider than the screen wrap onto the box's first row.
-    fn draw_label(&self, out: &mut Vec<u8>, label_row: u16, view: Option<&View>) -> usize {
-        let width = self.layout.width;
-        put_bar_line(out, label_row, &self.label);
+    /// The box's rows, on the bar, with the row and the column of the cursor among them. The box
+    /// scrolls as little as keeps the cursor in it, and shows no empty rows below the text that
+    /// the text above could fill.
+    fn box_rows(&mut self) -> (Vec<String>, usize, u16) {
+        let wrapped = wrap::wrap(
+            &self.text(),
+            self.editor.cursor(),
+            self.editor.selection(),
+            usize::from(self.layout.width),
+        );
+        let to_u16 = |index: usize| u16::try_from(index).unwrap_or(u16::MAX);
+        let cursor_y = to_u16(wrapped.cursor_row);
+        let used_rows = to_u16(wrapped.rows.len());
+        let rows = self.layout.input_rows;
+        self.scroll = self
+            .scroll
+            .min(used_rows.max(cursor_y + 1).saturating_sub(rows))
+            .min(cursor_y)
+            .max((cursor_y + 1).saturating_sub(rows));
+        let lines = (0..rows)
+            .map(|y| {
+                let text = wrapped
+                    .rows
+                    .get(usize::from(self.scroll + y))
+                    .map_or("", |row| row.text.as_str());
+                format!("{}{text}{RESET}", start_bar_row())
+            })
+            .collect();
+        (
+            lines,
+            usize::from(cursor_y - self.scroll),
+            to_u16(wrapped.cursor_column),
+        )
+    }
+
+    /// The cursor's shape: a bar to insert text, as in the command line, and a block for vi's
+    /// other modes.
+    fn cursor_shape(&self) -> SetCursorStyle {
+        match self.editor.mode() {
+            _ if self.command_line.is_some() => SetCursorStyle::SteadyBar,
+            Mode::Insert => SetCursorStyle::SteadyBar,
+            Mode::Normal | Mode::Visual | Mode::VisualLine => SetCursorStyle::SteadyBlock,
+        }
+    }
+
+    /// The label row's line: the label, and at the right edge the keys of a half-typed vi
+    /// command, where vim's `showcmd` shows them, so nothing else on the row moves when they
+    /// appear or go, and the question view's progress through the batch. On a screen too narrow
+    /// for both, the keys follow the label after a space, and wrap onto the next row.
+    fn label_line(&self, view: Option<&View>) -> String {
         let pending = self.editor.pending();
         let pending = (!pending.is_empty()).then(|| format!("{STATUS_COLOR}{pending}"));
         let right: Vec<String> = [pending, view.and_then(progress)]
@@ -830,14 +887,12 @@ impl InputLine {
             .collect();
         let right = right.join(" ");
         if right.is_empty() {
-            return visible_width(&self.label);
+            return self.label.clone();
         }
-        let column = width.saturating_sub(u16::try_from(visible_width(&right)).unwrap_or(u16::MAX));
-        put!(out, MoveTo(column, label_row));
-        out.extend(format!("{}{right}{RESET}", start_bar_row()).as_bytes());
-        // The row's text now reaches the right edge, so a narrower screen splits the whole row,
-        // not only the label
-        usize::from(width)
+        let room = usize::from(self.layout.width)
+            .saturating_sub(visible_width(&self.label) + visible_width(&right))
+            .max(1);
+        format!("{}{}{right}", self.label, " ".repeat(room))
     }
 
     /// Draws the question of `view` in `rows`: the question above the label row, and on a
@@ -915,51 +970,10 @@ impl InputLine {
         put_bar_line(out, rows.own, &cut(&own, columns));
     }
 
-    /// Puts the bottom of the terminal back in place after a resize. The terminal moved it
-    /// with the cursor before the client heard of the resize: a narrower screen splits each of
-    /// its rows wider than the screen, and a taller one can leave it in the middle.
-    ///
-    /// A screen shrunk to no more rows than the label row and the box's rows above the cursor
-    /// takes those rows into the scrollback, where copies of them stay.
-    fn resize(&mut self, width: u16, height: u16) -> Result<(), String> {
-        // The question view draws its whole screen again, and the main screen waits
-        if self.in_view {
-            self.layout = Layout::new(width, height, self.input_rows);
-            self.resized_in_view = Some((width, height));
-            return Ok(());
-        }
-        let (_, cursor_row) = cursor::position().map_err(|error| cannot_read_terminal(&error))?;
-        let width_now = usize::from(width.max(1));
-        let rows_above: usize = self
-            .drawn
-            .widths_above_cursor
-            .iter()
-            .map(|width| width.div_ceil(width_now).max(1))
-            .sum::<usize>()
-            + usize::from(self.drawn.cursor_column) / width_now;
-        let label_row = cursor_row.saturating_sub(u16::try_from(rows_above).unwrap_or(u16::MAX));
-        let mut out = Vec::new();
-        put!(out, MoveTo(0, label_row), Clear(ClearType::FromCursorDown));
+    /// Lays the screen out for its new size, which the frame after it draws. The main screen
+    /// needs nothing else, since a frame finds the live rows wherever the resize moved them.
+    fn resize(&mut self, width: u16, height: u16) {
         self.layout = Layout::new(width, height, self.input_rows);
-        // The label row is right below the conversation's end. The terminal wrapped the open
-        // line again at the new width, which its next text continues from. On a screen too
-        // short to show any of the conversation, the next text starts a line of its own
-        match &mut self.end {
-            End::Before(row) => *row = label_row,
-            End::On { row, .. } if label_row > 0 => *row = label_row - 1,
-            End::On { .. } => self.end = End::Before(0),
-        }
-        // A shorter screen has the conversation reach into the rows the label row and the box
-        // take, so it scrolls up
-        let lowest = self.layout.lowest_label_row();
-        if self.end.next_row() > lowest {
-            let rows = self.end.next_row() - lowest;
-            scroll_screen(&mut out, self.layout, rows);
-            match &mut self.end {
-                End::Before(row) | End::On { row, .. } => *row -= rows,
-            }
-        }
-        write_out(&out)
     }
 
     /// The command line, in the label row's state while the user writes it, as on vim's.
@@ -1128,78 +1142,48 @@ impl Layout {
     }
 }
 
-/// Where the conversation ends on screen, which its next text continues.
-#[derive(Clone)]
-enum End {
-    /// Nothing printed yet: the first line goes on this row, an empty one.
-    Before(u16),
-    /// The last line printed ends on this row. The line break after a line that ended waits for
-    /// the text after it, so the label row stays right below the line. The line, when it is
-    /// still open, is in `open`, for its next text to continue.
-    On { row: u16, open: Option<String> },
+/// Where the last frame left the cursor among the live rows, which the next frame climbs from.
+struct Drawn {
+    /// The live rows above the cursor's.
+    lines_above_cursor: u16,
+    /// The screen's width then, which no live row was wider than.
+    width: u16,
 }
 
-impl End {
-    /// The first row below the conversation.
-    fn next_row(&self) -> u16 {
-        match self {
-            End::Before(row) => *row,
-            End::On { row, .. } => row + 1,
-        }
+/// The rows of the line Claude still writes, the text after the last line break in `pending`,
+/// as the terminal will wrap it on a screen `width` wide once it ends, so it moves to the
+/// conversation as it shows. At most `room` rows show: a taller line shows its end, after a row
+/// that says its start is cut, and shows whole once it ends.
+fn open_line_rows(pending: &str, width: usize, room: usize) -> Vec<String> {
+    let open = pending
+        .rfind('\n')
+        .map_or(pending, |end| &pending[end + 1..]);
+    if open.is_empty() || room == 0 {
+        return Vec::new();
     }
-}
-
-/// Writes to `out` what continues the conversation with `text`, from where it ends at `end` on
-/// a screen `width` columns wide, and returns the line it leaves open: none when `text` ends a
-/// line, whose line break then waits.
-fn continue_conversation(out: &mut Vec<u8>, end: &End, text: &str, width: u16) -> Option<String> {
-    let mut line = match end {
-        End::Before(row) => {
-            put!(out, MoveTo(0, *row));
-            String::new()
-        }
-        End::On { row, open: None } => {
-            put!(out, MoveTo(0, *row));
-            out.extend(b"\r\n");
-            String::new()
-        }
-        // Printed again, the row puts the cursor back where the line ends, also right after a
-        // character in its last column, where the terminal waits to wrap the next one
-        End::On {
-            row,
-            open: Some(open),
-        } => {
-            put!(out, MoveTo(0, *row));
-            out.extend(last_row(open, usize::from(width)).as_bytes());
-            open.clone()
-        }
-    };
-    let (body, ends_line) = match text.strip_suffix('\n') {
-        Some(body) => (body, true),
-        None => (text, false),
-    };
-    for (index, part) in body.split('\n').enumerate() {
-        if index > 0 {
-            out.extend(b"\r\n");
-            line.clear();
-        }
-        out.extend(part.as_bytes());
-        line.push_str(part);
+    let rows = terminal_rows(open, width);
+    let rows: Vec<String> = rows
+        .into_iter()
+        .map(|row| format!("{row}{RESET}"))
+        .collect();
+    if rows.len() <= room {
+        return rows;
     }
-    (!ends_line).then_some(line)
+    let shown = room - 1;
+    let cut = format!("{STATUS_COLOR}… its start shows once it ends{RESET}");
+    [vec![cut], rows[rows.len() - shown..].to_vec()].concat()
 }
 
-/// The last row the terminal wraps `line` onto at `width` columns, after the color codes the
-/// rows before set, so that printed from the row's first column it shows the row as before, and
-/// leaves the cursor at the line's end. A character too wide for the rest of a row starts the
-/// next row, and a line that fills its last row keeps it as the last.
+/// The rows the terminal wraps `line` onto at `width` columns, each after the color codes the
+/// rows before it set, so that printed on rows of their own they show as the line would. A
+/// character too wide for the rest of a row starts the next row.
 ///
 /// Assumes the terminal gives each character the width unicode-width gives it, and that the
 /// line holds no tab, which moves the cursor to a tab stop. A character the terminal gives
-/// another width, or a tab, puts the row's start elsewhere, and the line continues off its end.
-fn last_row(line: &str, width: usize) -> String {
+/// another width, or a tab, ends a row elsewhere, which the terminal then wraps.
+fn terminal_rows(line: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
-    let mut row_start = 0;
+    let mut starts = vec![0];
     let mut column = 0;
     let mut characters = line.char_indices();
     while let Some((index, character)) = characters.next() {
@@ -1210,21 +1194,27 @@ fn last_row(line: &str, width: usize) -> String {
         }
         let character_width = character.width().unwrap_or(0);
         if column + character_width > width && column > 0 {
-            row_start = index;
+            starts.push(index);
             column = 0;
         }
         column += character_width;
     }
-    format!("{}{}", colors_at(line, row_start), &line[row_start..])
+    let ends = starts.iter().skip(1).copied().chain([line.len()]);
+    starts
+        .iter()
+        .zip(ends)
+        .map(|(&start, end)| format!("{}{}", colors_at(line, start), &line[start..end]))
+        .collect()
 }
 
-/// What the last draw left above the cursor.
-#[derive(Default)]
-struct Drawn {
-    /// The widths of the text on the label row and on the box's rows above the cursor, which
-    /// a narrower screen splits into the rows that text then takes.
-    widths_above_cursor: Vec<usize>,
-    cursor_column: u16,
+/// `line` on the bar, whose background fills the row. A reset inside the line ends the bar,
+/// which then starts again.
+fn bar_row(line: &str) -> String {
+    let bar = start_bar_row();
+    format!(
+        "{bar}{}{RESET}",
+        line.replace(RESET, &format!("{RESET}{bar}"))
+    )
 }
 
 /// The columns `text` takes on screen, without its escape sequences.
@@ -1254,7 +1244,7 @@ fn scroll_screen(out: &mut Vec<u8>, layout: Layout, rows: u16) {
     }
 }
 
-fn write_out(out: &[u8]) -> Result<(), String> {
+pub(crate) fn write_out(out: &[u8]) -> Result<(), String> {
     let mut stdout = io::stdout();
     stdout
         .write_all(out)
@@ -1262,7 +1252,7 @@ fn write_out(out: &[u8]) -> Result<(), String> {
         .map_err(|error| format!("cannot write to the terminal: {error}"))
 }
 
-fn cannot_read_terminal(error: &io::Error) -> String {
+pub(crate) fn cannot_read_terminal(error: &io::Error) -> String {
     format!("cannot read the terminal: {error}")
 }
 
@@ -1369,9 +1359,8 @@ fn put_line(out: &mut Vec<u8>, row: u16, line: &str) {
 /// Writes `line` on `row` on the bar, like `put_line`. A reset inside the line ends the bar, which
 /// then starts again.
 fn put_bar_line(out: &mut Vec<u8>, row: u16, line: &str) {
-    let bar = start_bar_row();
-    let line = line.replace(RESET, &format!("{RESET}{bar}"));
-    put_line(out, row, &format!("{bar}{line}"));
+    put!(out, MoveTo(0, row));
+    out.extend(bar_row(line).as_bytes());
 }
 
 /// The rows of the question view, from the bottom of the screen up: the input box, the user's own
@@ -1450,62 +1439,49 @@ mod tests {
     use crate::style::BOLD;
 
     #[test]
-    fn the_last_row_of_a_line_that_fits_is_the_line() {
-        assert_eq!(last_row("abc", 5), "abc");
+    fn a_line_that_fits_takes_one_row() {
+        assert_eq!(terminal_rows("abc", 5), ["abc"]);
+        assert_eq!(terminal_rows("", 5), [""]);
     }
 
     #[test]
-    fn the_last_row_starts_where_the_terminal_wraps() {
-        assert_eq!(last_row("abcdefg", 3), "g");
+    fn rows_end_where_the_terminal_wraps() {
+        assert_eq!(terminal_rows("abcdefg", 3), ["abc", "def", "g"]);
+        assert_eq!(terminal_rows("abcdef", 3), ["abc", "def"]);
     }
 
     #[test]
-    fn a_line_that_fills_its_last_row_keeps_it_as_the_last() {
-        assert_eq!(last_row("abcdef", 3), "def");
+    fn a_wide_character_that_does_not_fit_starts_the_next_row() {
+        assert_eq!(terminal_rows("ab日", 3), ["ab", "日"]);
     }
 
     #[test]
-    fn a_wide_character_that_does_not_fit_starts_the_last_row() {
-        assert_eq!(last_row("ab日", 3), "日");
-    }
-
-    #[test]
-    fn the_last_row_starts_with_the_colors_set_before_it() {
+    fn each_row_starts_with_the_colors_set_before_it() {
         let line = format!("a{BOLD}bc{RESET}d{BOLD}efg");
-        assert_eq!(last_row(&line, 3), format!("{BOLD}g"));
-        let line = format!("a{BOLD}b{RESET}cdefg");
-        assert_eq!(last_row(&line, 3), "g");
-    }
-
-    fn continued(end: &End, text: &str) -> (String, Option<String>) {
-        let mut out = Vec::new();
-        let open = continue_conversation(&mut out, end, text, 80);
-        (String::from_utf8(out).expect("the text is UTF-8"), open)
-    }
-
-    #[test]
-    fn text_that_ends_a_line_leaves_its_line_break_waiting() {
-        let (out, open) = continued(&End::Before(4), "a\nb\n");
-        assert_eq!(out, "\x1b[5;1Ha\r\nb");
-        assert_eq!(open, None);
+        assert_eq!(
+            terminal_rows(&line, 3),
+            [
+                format!("a{BOLD}bc{RESET}"),
+                format!("d{BOLD}ef"),
+                format!("{BOLD}g")
+            ]
+        );
     }
 
     #[test]
-    fn the_line_break_that_waits_comes_before_the_next_text() {
-        let end = End::On { row: 4, open: None };
-        let (out, open) = continued(&end, "c");
-        assert_eq!(out, "\x1b[5;1H\r\nc");
-        assert_eq!(open, Some("c".to_string()));
+    fn the_open_line_is_the_text_after_the_last_line_break() {
+        assert_eq!(
+            open_line_rows("done\nabcd", 2, 9),
+            [format!("ab{RESET}"), format!("cd{RESET}")]
+        );
+        assert_eq!(open_line_rows("done\n", 2, 9), Vec::<String>::new());
     }
 
     #[test]
-    fn an_open_line_continues_after_its_last_row_printed_again() {
-        let end = End::On {
-            row: 4,
-            open: Some(format!("{BOLD}He")),
-        };
-        let (out, open) = continued(&end, "llo\n");
-        assert_eq!(out, format!("\x1b[5;1H{BOLD}Hello"));
-        assert_eq!(open, None);
+    fn an_open_line_taller_than_the_room_shows_its_end() {
+        let rows = open_line_rows("abcdef", 2, 2);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].contains('…'));
+        assert_eq!(rows[1], format!("ef{RESET}"));
     }
 }

@@ -10,6 +10,7 @@
 //! files, which keeps the client small and its assumptions on how Claude Code works few.
 
 mod claude_code;
+mod climb;
 mod code;
 mod config;
 mod context;

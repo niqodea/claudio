@@ -11,8 +11,12 @@
 //! lines, and an interrupt, send now's too, gets the rest of a call that waits for one.
 //! `/clear` starts a new session, and `/compact` and `/cost` answer as Claude Code does.
 //! `FAKE_DELAY` is how many seconds each answer waits before it starts, none when unset.
+//! The message `Write a long line` gets a line of 200 words, streamed in two parts: when
+//! `FAKE_GATE` names a pipe, the second part waits until someone writes to it, so a test can
+//! act while the line is unfinished.
 
 use std::env;
+use std::fs;
 use std::io::{self, BufRead};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,6 +28,9 @@ const BLOCKS: [&str; 2] = [
     "The first block of text.",
     "The second block, right after the first.",
 ];
+
+const LONG_LINE_MESSAGE: &str = "Write a long line";
+const LONG_LINE_END: &str = " and that is the end of the long line.";
 
 const ASK_REQUEST_ID: &str = "fake-ask";
 
@@ -108,6 +115,7 @@ impl Fake {
                 return self.send_turn(&contract::stopped_background_task()[..4]);
             }
             contract::REPLY_OK_MESSAGE => return self.send_turn(&[text_line("ok")]),
+            LONG_LINE_MESSAGE => return self.send_long_line(),
             contract::MOVED_CALL_MESSAGE => {
                 return self.wait_for_interrupt(&contract::moved_call());
             }
@@ -146,6 +154,21 @@ impl Fake {
         self.end_turn();
     }
 
+    /// Sends the long line's start, waits for `FAKE_GATE`, and sends its end, as a turn.
+    fn send_long_line(&self) {
+        let start = (1..=200)
+            .map(|n| format!("w{n:03}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        send(&text_delta(0, &start).to_string());
+        if let Some(gate) = env::var_os("FAKE_GATE") {
+            // Returns once the writer closes the pipe
+            fs::read(gate).expect("the gate is a pipe to read");
+        }
+        send(&text_delta(0, LONG_LINE_END).to_string());
+        self.send_turn(&[text_line(&format!("{start}{LONG_LINE_END}"))]);
+    }
+
     /// Sends the lines of a background task: up to the call's result as a turn, and the task's
     /// end after it, at once.
     fn send_task(&self, lines: &[String]) {
@@ -181,6 +204,19 @@ impl Fake {
 
 fn send(line: &str) {
     println!("{line}");
+}
+
+/// A part of Claude's reply as it streams, in the block `index`.
+fn text_delta(index: usize, text: &str) -> Value {
+    json!({
+        "type": "stream_event",
+        "event": {
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {"type": "text_delta", "text": text},
+        },
+        "parent_tool_use_id": null,
+    })
 }
 
 /// A reply of Claude's that is `text` alone.
@@ -406,15 +442,7 @@ fn turn() -> Vec<Value> {
         }),
     ];
     for (index, text) in BLOCKS.into_iter().enumerate() {
-        lines.push(json!({
-            "type": "stream_event",
-            "event": {
-                "type": "content_block_delta",
-                "index": index,
-                "delta": {"type": "text_delta", "text": text},
-            },
-            "parent_tool_use_id": null,
-        }));
+        lines.push(text_delta(index, text));
         lines.push(json!({
             "type": "assistant",
             "message": {"content": [{"type": "text", "text": text}]},

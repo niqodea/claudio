@@ -34,9 +34,7 @@ use crate::context::COLD_COLOR;
 use crate::keys::{self, Action, BLOCK_ROWS, Field, Mark, Phase, SessionKey, Tone, View};
 use crate::limits::{Level, limit_level};
 use crate::picker::{self, Cursor, Draft, Form, Move, Pick, question_name, request_name};
-use crate::render::{
-    Output, Status, colors_at, cut_end, cut_middle, marks, start_bar_row, user_line,
-};
+use crate::render::{Output, Status, colors_at, cut, cut_path, marks, start_bar_row, user_line};
 use crate::status;
 use crate::style::{
     ATTENTION, DONE_OR_ADDED, FAILED_OR_REMOVED, RESET, REVERSE, STRONG, SUBDUED, SUBDUED_ON_BAR,
@@ -910,7 +908,7 @@ impl InputLine {
     /// top of the screen, between an edge titled with the option and a rule above the question,
     /// as fzf's preview window with a label, so only the preview changes as the cursor moves.
     /// Below the label row go the options, on the bar, and the user's own answer right above the
-    /// box. Each option and preview line takes one row, and loses its middle to `…` when it is
+    /// box. Each option and preview line takes one row, and loses its end to `…` when it is
     /// wider than the screen, since a line that wrapped would push the rows below it out of
     /// place. The limit of noisy lines is for the scrollback, which this screen never reaches.
     fn draw_question(&self, out: &mut Vec<u8>, view: &View, rows: ViewRows) {
@@ -918,8 +916,7 @@ impl InputLine {
         put!(out, Clear(ClearType::All));
         let columns = NonZeroUsize::new(usize::from(width)).unwrap_or(NonZeroUsize::MIN);
         let preview = picker::preview(&view.choices, &self.pick);
-        // An edge across the screen, with `title` in it, as fzf's preview label, cut at its end
-        // as a name is
+        // An edge across the screen, with `title` in it, as fzf's preview label
         let rule = |title: &str| {
             let title = if title.is_empty() {
                 String::new()
@@ -928,7 +925,7 @@ impl InputLine {
                 let room = NonZeroUsize::new(room).unwrap_or(NonZeroUsize::MIN);
                 format!(
                     "── {}{RESET}{SUBDUED} ",
-                    cut_end(&format!("{STRONG}{title}"), room)
+                    cut(&format!("{STRONG}{title}"), room)
                 )
             };
             let fill = "─".repeat(usize::from(width).saturating_sub(visible_width(&title)));
@@ -962,7 +959,7 @@ impl InputLine {
             };
             let mut lines: Vec<String> = preview.lines[..shown]
                 .iter()
-                .map(|line| cut_middle(line, columns))
+                .map(|line| cut(line, columns))
                 .collect();
             if is_cut && room > 0 {
                 lines.push(format!("{SUBDUED}… Ctrl+O shows it whole"));
@@ -986,10 +983,10 @@ impl InputLine {
         for row in rows.options..rows.own {
             let line = options
                 .next()
-                .map_or_else(String::new, |line| cut_middle(line, columns));
+                .map_or_else(String::new, |line| cut(line, columns));
             put_bar_line(out, row, &line);
         }
-        put_bar_line(out, rows.own, &cut_middle(&own, columns));
+        put_bar_line(out, rows.own, &cut(&own, columns));
     }
 
     /// Lays the screen out for its new size, which the frame after it draws. The main screen
@@ -1413,7 +1410,7 @@ fn draw_lines_above(out: &mut Vec<u8>, lines: &[String], width: u16, bottom: u16
     row
 }
 
-/// The columns a field's name takes at most, cut in the middle when longer.
+/// The columns a field's name takes at most, cut at its end when longer.
 const NAME_WIDTH: usize = 10;
 
 /// The columns of a field's name, the `:` and the space after it, so that every value shown by
@@ -1423,9 +1420,9 @@ const NAME_COLUMNS: usize = NAME_WIDTH + ": ".len();
 /// The rows of the block under the rule: each field's mark, then its value from a column that
 /// depends on the mark alone, so that a value starts in the same column on every call of a
 /// tool, in the rows the field takes. A sign takes 2 columns, and a name `NAME_COLUMNS`, losing
-/// its middle when longer than `NAME_WIDTH`. A value of one row shows its line breaks as `↵`, and loses its middle
-/// to `…` when it is too wide. A value of more rows wraps, and when it still does not fit, its
-/// last row counts the rows left out. Rows a value leaves empty stay empty, so the block always
+/// its end when longer than `NAME_WIDTH`. A value of one row shows its line breaks as `↵`, and
+/// when it is too wide, loses its end to `…`, or its middle if it is a path. A value of more
+/// rows wraps, and when it still does not fit, its last row counts the rows left out. Rows a value leaves empty stay empty, so the block always
 /// takes `BLOCK_ROWS` rows.
 fn block_lines(fields: &[Field], columns: NonZeroUsize) -> Vec<String> {
     let mut lines = Vec::new();
@@ -1456,7 +1453,7 @@ fn block_lines(fields: &[Field], columns: NonZeroUsize) -> Vec<String> {
             Mark::Name(name) => {
                 // The name holds its color, which the cut sets again after the `…`
                 let width = NonZeroUsize::new(NAME_WIDTH).unwrap_or(NonZeroUsize::MIN);
-                let name = format!("{}:", cut_end(&format!("{SUBDUED}{name}"), width));
+                let name = format!("{}:", cut(&format!("{SUBDUED}{name}"), width));
                 let pad = " ".repeat(NAME_COLUMNS.saturating_sub(visible_width(&name)));
                 (format!("{name}{RESET}{pad}"), false)
             }
@@ -1467,13 +1464,13 @@ fn block_lines(fields: &[Field], columns: NonZeroUsize) -> Vec<String> {
         let value = field.value.trim_end_matches('\n');
         // Each row, and whether it shows the value, rather than counting the rows left out
         let rows: Vec<(String, bool)> = if field.rows == 1 {
-            vec![(
-                cut_middle(
-                    &format!("{tone}{}", value.replace('\n', "↵")),
-                    value_columns,
-                ),
-                true,
-            )]
+            let line = format!("{tone}{}", value.replace('\n', "↵"));
+            let line = if field.is_path {
+                cut_path(&line, value_columns)
+            } else {
+                cut(&line, value_columns)
+            };
+            vec![(line, true)]
         } else {
             let wrapped = word_rows(value, value_columns.get());
             if wrapped.len() <= field.rows {
@@ -1486,10 +1483,7 @@ fn block_lines(fields: &[Field], columns: NonZeroUsize) -> Vec<String> {
                     .map(|row| (format!("{tone}{row}"), true))
                     .collect();
                 let more = more_lines(wrapped.len() - shown);
-                rows.push((
-                    cut_middle(&format!("{SUBDUED}{more}"), value_columns),
-                    false,
-                ));
+                rows.push((cut(&format!("{SUBDUED}{more}"), value_columns), false));
                 rows
             }
         };
@@ -1786,10 +1780,30 @@ mod tests {
     }
 
     #[test]
+    fn a_value_too_wide_for_its_row_keeps_its_start_and_a_path_its_end() {
+        let field = |value: &str, is_path| Field {
+            mark: Mark::None,
+            value: value.to_string(),
+            is_path,
+            tone: Tone::Plain,
+            rows: 1,
+        };
+        let fields = [
+            field("cargo test --release --all-targets", false),
+            field("/home/user/src/greet.js", true),
+        ];
+        let columns = NonZeroUsize::new(20).expect("20 is not zero");
+        let lines = block_lines(&fields, columns);
+        assert!(lines[0].contains("cargo test") && !lines[0].contains("targets"));
+        assert!(lines[1].contains("/home") && lines[1].contains("greet.js"));
+    }
+
+    #[test]
     fn the_block_starts_values_in_the_column_of_their_mark_and_counts_the_rows_left_out() {
         let field = |mark: Mark, value: &str, rows| Field {
             mark,
             value: value.to_string(),
+            is_path: false,
             tone: Tone::Plain,
             rows,
         };

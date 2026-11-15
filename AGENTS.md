@@ -28,8 +28,8 @@ Each rule names its source, or says it is claudio's own.
 ## Cutting
 
 - Cut only a noisy line, which shows a tool's input or output as it is, and keep every other line in the conversation whole, like an error, a warning or Claude's description of a call: claudio's own rule, whose reason the README's Design section gives
-- Cut a value, like a path, a command or a field's value, in the middle, with `…`, so both the start and the end stay, since its end often tells it apart, and keep the whole line in the full view: `cut_middle`. [PatternFly](https://v5-archive.patternfly.org/ux-writing/truncation)
-- Cut a name or a title, like a field's name or the rule's title, at its end, with `…`, since it reads from its start, where what matters most comes first: `cut_end`. claudio's own rule
+- Cut a line at its end, with `…`, since text reads from its start and the eye finds an `…` that is always in the same place, and keep the whole line in the full view: `cut`. [PatternFly](https://www.patternfly.org/components/truncate/design-guidelines)
+- Cut a file's path or a URL in the middle instead, with `…`, since paths often start the same and their last part is the file or the page: `cut_path`. [PatternFly](https://www.patternfly.org/components/truncate/design-guidelines), [PatternFly](https://v5-archive.patternfly.org/ux-writing/truncation)
 - On the question screen, cut each line at the screen's width, since a line there takes exactly one row: claudio's own rule
 
 ## Label row

@@ -48,6 +48,9 @@ pub struct Field {
     pub mark: Mark,
     /// The value, with its line breaks.
     pub value: String,
+    /// Whether the value is a file's path or a URL, which a row too narrow for it cuts in the
+    /// middle, where any other value is cut at its end.
+    pub is_path: bool,
     pub tone: Tone,
     pub rows: usize,
 }

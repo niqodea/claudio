@@ -412,8 +412,7 @@ impl Output {
         );
         self.write_break();
         self.end_claude_line();
-        self.text
-            .push_str(&cut_middle(&line, self.max_noisy_line_columns));
+        self.text.push_str(&cut(&line, self.max_noisy_line_columns));
         self.text.push_str(FILL_ROW);
         self.text.push_str(RESET);
         self.text.push('\n');
@@ -883,16 +882,14 @@ impl Output {
     }
 
     /// Adds a noisy detail line: cut on screen, and whole in the full view. A noisy line shows a
-    /// tool's input or output as it is, so it can run to hundreds of columns, while its start
-    /// and end tell it from the next.
+    /// tool's input or output as it is, so it can run to hundreds of columns.
     ///
     /// The cut here is the only one a noisy line gets, so callers pass their text whole, and the
     /// full view shows it as it was.
     fn push_noisy(&mut self, line: &str) {
         self.write_break();
         self.end_claude_line();
-        self.text
-            .push_str(&cut_middle(line, self.max_noisy_line_columns));
+        self.text.push_str(&cut(line, self.max_noisy_line_columns));
         self.text.push('\n');
         self.write_full_view_line(line);
     }
@@ -968,11 +965,14 @@ fn reply_mark() -> String {
     format!("{MARK}‹‹{RESET}")
 }
 
-/// `line` cut at its end to take at most `columns` columns on screen, with `…` where it is cut,
-/// for a name or a title, which reads from its start, as the part that matters most comes
-/// first. `cut_middle` cuts a value instead, whose end tells it apart.
-/// The line holds its own colors, as for `cut_middle`.
-pub fn cut_end(line: &str, columns: NonZeroUsize) -> String {
+/// `line` cut at its end to take at most `columns` columns on screen, with `…` where it is cut.
+/// Text reads from its start, and an `…` at the end is always in the same place, where the eye
+/// finds it, so every line is cut this way but a path's: `cut_path`.
+/// Ref: <https://www.patternfly.org/components/truncate/design-guidelines>, whose default
+/// truncation is at the end of the text
+///
+/// The line holds its own colors, as for `cut_path`.
+pub fn cut(line: &str, columns: NonZeroUsize) -> String {
     let mut width = 0;
     let mut rest = line.char_indices();
     let mut start_end = None;
@@ -1002,25 +1002,29 @@ pub fn cut_end(line: &str, columns: NonZeroUsize) -> String {
     }
 }
 
-/// `line` cut in the middle to take at most `columns` columns on screen, with `…` where it is
-/// cut, for a value, like a path or a command. Both its start and its end stay, since the part
-/// that tells one value from the next is often at the end, like the file a command ends with:
-/// <https://v5-archive.patternfly.org/ux-writing/truncation>. `cut_end` cuts a name instead.
-/// The line holds its own colors, since the `…` and the end take the colors in effect where the
-/// line has them, and know nothing of colors set before it.
-pub fn cut_middle(line: &str, columns: NonZeroUsize) -> String {
+/// `path`, a file's path or a URL, cut in the middle to take at most `columns` columns on screen,
+/// with `…` where it is cut. Paths often start the same, like `/home/…` or `https://`, and their
+/// last part is the file or the page, so both the start and the end stay.
+/// Ref: <https://www.patternfly.org/components/truncate/design-guidelines>, which cuts in the
+/// middle a text whose end cannot be cut, like a long URL
+/// Ref: <https://v5-archive.patternfly.org/ux-writing/truncation>, which cuts where the part
+/// that tells one text from the next is not
+///
+/// The path holds its own colors, since the `…` and the end take the colors in effect where the
+/// path has them, and know nothing of colors set before it.
+pub fn cut_path(path: &str, columns: NonZeroUsize) -> String {
     let mut characters = Vec::new();
-    let mut rest = line.char_indices();
+    let mut rest = path.char_indices();
     while let Some((index, character)) = rest.next() {
         if character == '\x1b' {
-            // Every sequence a line holds is a CSI, which ends with a letter and takes no column
+            // Every sequence a path holds is a CSI, which ends with a letter and takes no column
             rest.find(|(_, next)| next.is_ascii_alphabetic());
             continue;
         }
         characters.push((index, character, character.width().unwrap_or(0)));
     }
     if characters.iter().map(|(_, _, width)| width).sum::<usize>() <= columns.get() {
-        return line.to_string();
+        return path.to_string();
     }
     // The `…` takes a column, and the start takes the odd one of the rest
     let kept_columns = columns.get() - 1;
@@ -1032,7 +1036,7 @@ pub fn cut_middle(line: &str, columns: NonZeroUsize) -> String {
         start_width += width;
         start_end = index + character.len_utf8();
     }
-    let (mut end_start, mut end_width) = (line.len(), 0);
+    let (mut end_start, mut end_width) = (path.len(), 0);
     for (index, _, width) in characters.iter().rev() {
         if end_width + width > kept_columns / 2 {
             break;
@@ -1045,16 +1049,16 @@ pub fn cut_middle(line: &str, columns: NonZeroUsize) -> String {
         .iter()
         .find(|(index, _, _)| *index >= start_end)
         .map_or(start_end, |(index, _, _)| *index);
-    let end = &line[end_start..];
+    let end = &path[end_start..];
     let end = if end.is_empty() {
         String::new()
     } else {
-        format!("{}{end}", colors_at(line, end_start))
+        format!("{}{end}", colors_at(path, end_start))
     };
     format!(
         "{}{RESET}{}…{RESET}{end}",
-        &line[..start_end],
-        colors_at(line, cut_start),
+        &path[..start_end],
+        colors_at(path, cut_start),
     )
 }
 
@@ -1165,6 +1169,7 @@ mod tests {
 
     use super::*;
     use crate::config::Config;
+    use crate::style::CODE;
 
     fn new_output() -> Output {
         Output::new(
@@ -1433,13 +1438,13 @@ mod tests {
 
     #[test]
     fn a_line_that_fits_stays_whole() {
-        assert_eq!(cut_middle("abc", columns(3)), "abc");
+        assert_eq!(cut_path("abc", columns(3)), "abc");
     }
 
     #[test]
-    fn a_line_too_long_keeps_its_start_and_its_end() {
+    fn a_path_too_long_keeps_its_start_and_its_end() {
         assert_eq!(
-            cut_middle("abcdefgh", columns(6)),
+            cut_path("abcdefgh", columns(6)),
             format!("abc{RESET}…{RESET}gh")
         );
     }
@@ -1447,11 +1452,11 @@ mod tests {
     #[test]
     fn the_end_kept_starts_with_the_colors_in_effect_there() {
         assert_eq!(
-            cut_middle(&format!("{SUBDUED}abcdef"), columns(4)),
+            cut_path(&format!("{SUBDUED}abcdef"), columns(4)),
             format!("{SUBDUED}ab{RESET}{SUBDUED}…{RESET}{SUBDUED}f")
         );
         assert_eq!(
-            cut_middle(&format!("{STRONG}ab{RESET}cdefgh"), columns(4)),
+            cut_path(&format!("{STRONG}ab{RESET}cdefgh"), columns(4)),
             format!("{STRONG}ab{RESET}…{RESET}h")
         );
     }
@@ -1459,31 +1464,25 @@ mod tests {
     #[test]
     fn the_ellipsis_takes_the_colors_of_the_text_it_replaces() {
         assert_eq!(
-            cut_middle(&format!("ab{SUBDUED}cdefgh"), columns(4)),
+            cut_path(&format!("ab{SUBDUED}cdefgh"), columns(4)),
             format!("ab{RESET}{SUBDUED}…{RESET}{SUBDUED}h")
         );
     }
 
     #[test]
-    fn a_name_too_long_keeps_its_start_and_its_colors() {
-        assert_eq!(cut_end("abcdef", columns(6)), "abcdef");
+    fn a_line_too_long_keeps_its_start_and_its_colors() {
+        assert_eq!(cut("abcdef", columns(6)), "abcdef");
+        assert_eq!(cut("abcdefgh", columns(6)), format!("abcde{RESET}…{RESET}"));
         assert_eq!(
-            cut_end("abcdefgh", columns(6)),
-            format!("abcde{RESET}…{RESET}")
-        );
-        assert_eq!(
-            cut_end(&format!("{SUBDUED}abcdef"), columns(4)),
+            cut(&format!("{SUBDUED}abcdef"), columns(4)),
             format!("{SUBDUED}abc{RESET}{SUBDUED}…{RESET}")
         );
-        assert_eq!(cut_end("ab日本", columns(4)), format!("ab{RESET}…{RESET}"));
+        assert_eq!(cut("ab日本", columns(4)), format!("ab{RESET}…{RESET}"));
     }
 
     #[test]
     fn a_wide_character_that_does_not_fit_is_cut_whole() {
-        assert_eq!(
-            cut_middle("ab日本", columns(4)),
-            format!("ab{RESET}…{RESET}")
-        );
+        assert_eq!(cut_path("ab日本", columns(4)), format!("ab{RESET}…{RESET}"));
     }
 
     #[test]
@@ -1501,7 +1500,7 @@ mod tests {
         );
         assert_eq!(
             screen[1],
-            cut_middle(&call, Config::default().max_noisy_line_columns)
+            cut(&call, Config::default().max_noisy_line_columns)
         );
         assert_ne!(screen[1], call);
         assert_eq!(lines[1], call);
@@ -1753,7 +1752,8 @@ mod tests {
         let lines = output.take_lines();
         let line = lines.last().expect("the call's line");
         assert_eq!(line.matches('…').count(), 1);
-        assert!(line.ends_with(&format!("x\"}}`{RESET}")));
+        // The `…` keeps the style of the code it stands for
+        assert!(line.ends_with(&format!("x{RESET}{CODE}…{RESET}")));
     }
 
     #[test]

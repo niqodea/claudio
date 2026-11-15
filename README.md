@@ -82,7 +82,7 @@ input_rows = 3
 max_noisy_line_columns = 88
 ```
 
-A noisy line wider than that loses its middle to `…`, and Ctrl+O shows it whole.
+A noisy line wider than that loses its end to `…`, and Ctrl+O shows it whole.
 A setting claudio does not know, or a 0, stops claudio with an error that names it.
 
 ## Keys
@@ -194,7 +194,7 @@ The signs come from a shell and a diff: Bash shows `$` before its command, `#` b
 A field the call leaves out shows what that means in grey, like `t default` or `& in foreground`.
 A call of another tool, like an MCP tool's, shows each field on a row of its own, after its name, which loses its end past 10 columns, so all its values start in one column.
 Each field takes the same rows on every call of its tool, and a short value leaves them empty, so a field stays in its place from one call to the next, and each value starts in the column its mark sets.
-A longer value ends in `… N more lines · Ctrl+O shows it whole`, a value of one row is cut in the middle with `…`, and the fields that do not fit end in `… N more fields · Ctrl+O shows them`.
+A longer value ends in `… N more lines · Ctrl+O shows it whole`, a value of one row loses its end to `…`, or its middle if it is a file's path or a URL, and the fields that do not fit end in `… N more fields · Ctrl+O shows them`.
 A call that Claude Code deems dangerous opens on `n`, as Claude Code's own prompt does, and its option to allow reads `allow (dangerous)`, in orange, and waits for a second Enter, which the label row asks for.
 The conversation shows each decision with the call's tag, like `allowed #01 Bash Run the tests`, then your words, when you gave them.
 
@@ -213,7 +213,7 @@ So claudio leaves out on purpose:
 
 claudio only ever appends to the conversation, in characters on screen, so it copies along with the rest of the scrollback.
 Its lines don't depend on the terminal's size, so they read the same at any width, with the terminal wrapping a line wider than the screen.
-A noisy line, which shows a tool's input or output as it is, is cut in the middle to a fixed width, since its start and end tell it from the next and Ctrl+O shows it whole.
+A noisy line, which shows a tool's input or output as it is, is cut at its end to a fixed width, since Ctrl+O shows it whole.
 Every other line, like an error or a warning, stays whole, to be read in full.
 Below the conversation, the label row and the input box are drawn again on every key and every resize, and reach the scrollback only as [Resizing](#resizing) tells, so they may use the terminal's size.
 The input line's editing state, like vi's mode, may even show without characters, like with the cursor's shape: only the person typing needs it, and only while typing.

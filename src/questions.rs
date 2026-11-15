@@ -214,6 +214,8 @@ struct Laid {
     sign: char,
     every_row: bool,
     tone: Tone,
+    /// Whether the value is a file's path or a URL.
+    is_path: bool,
     /// claudio's note when the call leaves the field out.
     missing: &'static str,
     /// The value as it shows.
@@ -221,7 +223,7 @@ struct Laid {
 }
 
 impl Laid {
-    /// A field that shows its value as it is, and `not given` when left out.
+    /// A field that shows its value as it is, which is no path, and `not given` when left out.
     const fn new(name: &'static str, rows: usize, sign: char, every_row: bool, tone: Tone) -> Self {
         Self {
             name,
@@ -229,6 +231,7 @@ impl Laid {
             sign,
             every_row,
             tone,
+            is_path: false,
             missing: "not given",
             show: value_text,
         }
@@ -293,7 +296,10 @@ const LAYOUTS: [(&str, &[Laid]); 4] = [
     (
         "Edit",
         &[
-            Laid::new("file_path", 1, '@', false, Tone::Plain),
+            Laid {
+                is_path: true,
+                ..Laid::new("file_path", 1, '@', false, Tone::Plain)
+            },
             Laid::new("old_string", 3, '-', true, Tone::Removed),
             Laid::new("new_string", 3, '+', true, Tone::Added),
         ],
@@ -301,14 +307,20 @@ const LAYOUTS: [(&str, &[Laid]); 4] = [
     (
         "Write",
         &[
-            Laid::new("file_path", 1, '@', false, Tone::Plain),
+            Laid {
+                is_path: true,
+                ..Laid::new("file_path", 1, '@', false, Tone::Plain)
+            },
             Laid::new("content", 6, '│', true, Tone::Plain),
         ],
     ),
     (
         "WebFetch",
         &[
-            Laid::new("url", 1, '@', false, Tone::Plain),
+            Laid {
+                is_path: true,
+                ..Laid::new("url", 1, '@', false, Tone::Plain)
+            },
             Laid::new("prompt", 6, '│', true, Tone::Plain),
         ],
     ),
@@ -324,6 +336,7 @@ fn call_fields(tool: &str, input: &Map<String, Value>, reason: Option<&str>) -> 
     let field = |mark, value: String, tone, rows| Field {
         mark,
         value,
+        is_path: false,
         tone,
         rows,
     };
@@ -361,7 +374,10 @@ fn call_fields(tool: &str, input: &Map<String, Value>, reason: Option<&str>) -> 
     for laid in layout {
         let mark = sign(laid.sign, laid.every_row, laid.tone);
         let mut shown = match input.get(laid.name) {
-            Some(value) => field(mark, (laid.show)(value), laid.tone, laid.rows),
+            Some(value) => Field {
+                is_path: laid.is_path,
+                ..field(mark, (laid.show)(value), laid.tone, laid.rows)
+            },
             None => field(mark, laid.missing.to_string(), Tone::Note, laid.rows),
         };
         if laid.name == "file_path" && input.get("replace_all") == Some(&Value::Bool(true)) {
@@ -443,6 +459,7 @@ fn text_field(text: &str) -> Field {
     Field {
         mark: Mark::None,
         value: text.to_string(),
+        is_path: false,
         tone: Tone::Bold,
         rows: BLOCK_ROWS,
     }

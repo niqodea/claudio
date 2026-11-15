@@ -98,9 +98,6 @@ pub struct View {
     /// The request's name, which the rule above the question shows: its kind, and the subagent
     /// that asked.
     pub title: String,
-    /// The request's place among the requests, like ` · 2/3`, when more than one waits, which
-    /// the rule shows whole after the title.
-    pub place: String,
     /// What Ctrl+C refuses: the request shown, like `the call` or `2 questions`.
     pub refusal: String,
     /// Which request it is, from 0.
@@ -113,8 +110,10 @@ pub struct View {
     /// What the block of `BLOCK_ROWS` rows under the rule shows: a question's text, or a call's
     /// reason and fields. None on a plan.
     pub fields: Vec<Field>,
-    /// The lines right above the options, like the question that asks to allow a call.
-    pub lines: Vec<String>,
+    /// The line right above the options, like the question that asks to allow a call, empty on
+    /// a question, whose text is in the block. It is one line on every request, so the rule and
+    /// the block keep their rows from one request to the next.
+    pub question: String,
     /// The question's options, or the approval and the refusal of a call or a plan.
     pub choices: Vec<Choice>,
     /// What the item of the user's own answer says.
@@ -365,13 +364,12 @@ mod tests {
         Phase::Answering(Box::new(View {
             label: "plan".to_string(),
             title: "Questions".to_string(),
-            place: String::new(),
             refusal: "2 questions".to_string(),
             request_index: 0,
             requests: vec![false],
             details: vec![],
             fields: vec![],
-            lines: vec![],
+            question: String::new(),
             choices: vec![],
             own_label: String::new(),
             form: Form::One,

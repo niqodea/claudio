@@ -919,15 +919,15 @@ impl InputLine {
         let columns = NonZeroUsize::new(usize::from(width)).unwrap_or(NonZeroUsize::MIN);
         let preview = picker::preview(&view.choices, &self.pick);
         // An edge across the screen, with `title` in it, as fzf's preview label, cut at its end
-        // as a name is, before `place`, which stays whole
-        let rule = |title: &str, place: &str| {
+        // as a name is
+        let rule = |title: &str| {
             let title = if title.is_empty() {
                 String::new()
             } else {
-                let room = usize::from(width).saturating_sub("──  ".len() + visible_width(place));
+                let room = usize::from(width).saturating_sub("──  ".len());
                 let room = NonZeroUsize::new(room).unwrap_or(NonZeroUsize::MIN);
                 format!(
-                    "── {}{RESET}{SUBDUED}{place} ",
+                    "── {}{RESET}{SUBDUED} ",
                     cut_end(&format!("{STRONG}{title}"), room)
                 )
             };
@@ -937,23 +937,20 @@ impl InputLine {
         // The rule above the question names the request, which the label row names the question
         // of
         let top = if view.details.is_empty() {
-            let mut lines = vec![rule(&view.title, &view.place)];
+            let mut lines = vec![rule(&view.title)];
             lines.extend(block_lines(&view.fields, columns));
-            lines.extend(view.lines.iter().cloned());
+            lines.push(view.question.clone());
             draw_lines_above(out, &lines, width, rows.label)
         } else {
             // The call or the plan from the top, so the rule and the question stay in place
-            let top = draw_lines_above(out, &view.lines, width, rows.label);
-            put_line(out, 0, &rule(&view.title, &view.place));
+            let top =
+                draw_lines_above(out, std::slice::from_ref(&view.question), width, rows.label);
+            put_line(out, 0, &rule(&view.title));
             draw_lines_below(out, &view.details, width, 1, top.saturating_sub(1));
             top
         };
         if let Some(preview) = preview {
-            put_line(
-                out,
-                0,
-                &rule(preview.title.as_deref().unwrap_or_default(), ""),
-            );
+            put_line(out, 0, &rule(preview.title.as_deref().unwrap_or_default()));
             // The rows between the edge and the rule above the question, less a blank row
             // above the rule. A cut keeps the last of them for the …
             let room = usize::from(top.saturating_sub(2));
@@ -1299,20 +1296,28 @@ fn limit_indicator(letter: char, level: Option<Level>) -> String {
     format!("{color}{letter}{}", show_level(level.map(Level::to_number)))
 }
 
-/// The question view's progress: the names of the requests that wait, then those of the
-/// questions of the request shown, each level only when it has more than one item.
+/// The question view's progress: the names of the questions of the request shown, then those
+/// of the requests that wait, each level only when it has more than one item.
 fn progress(view: &View) -> Option<String> {
     let requests = request_names(view);
     let questions = names(&view.progress, view.index, question_name);
-    let levels: Vec<String> = [requests, questions].into_iter().flatten().collect();
+    // The questions change with each request, so they go left of the requests, where they move
+    // nothing when they change
+    let levels: Vec<String> = [questions, requests].into_iter().flatten().collect();
     (!levels.is_empty()).then(|| levels.join(&format!("{SUBDUED_ON_BAR} │ ")))
 }
 
 /// The names of the requests that wait, as for the questions of a batch, where those after the
 /// fourth, which have no key, show as how many they are, like `+2`, in reverse video when one of
-/// them shows.
+/// them shows. After them goes the place of the request shown, like `2/3`, its number padded to
+/// the width of the count, so the place keeps one width from one request to the next.
 fn request_names(view: &View) -> Option<String> {
     let count = view.requests.len();
+    let place = format!(
+        " {SUBDUED_ON_BAR}{:>width$}/{count}",
+        view.request_index + 1,
+        width = count.to_string().len()
+    );
     let keyed = count.min(picker::REQUEST_KEYS.len());
     let mut shown = names(&view.requests[..keyed], view.request_index, |index| {
         request_name(index).expect("a named request")
@@ -1327,7 +1332,7 @@ fn request_names(view: &View) -> Option<String> {
         let rest = count - keyed;
         shown = format!("{shown} {SUBDUED_ON_BAR}{on}+{rest}{off}");
     }
-    Some(shown)
+    Some(format!("{shown}{place}"))
 }
 
 /// The names of the items of one level of the question view, like the questions of a batch:
@@ -1672,13 +1677,12 @@ mod tests {
         let view = |requests: usize, request_index: usize, questions: usize| View {
             label: String::new(),
             title: String::new(),
-            place: String::new(),
             refusal: String::new(),
             request_index,
             requests: vec![false; requests],
             details: vec![],
             fields: vec![],
-            lines: vec![],
+            question: String::new(),
             choices: vec![],
             own_label: String::new(),
             form: Form::One,
@@ -1702,9 +1706,14 @@ mod tests {
             plain
         };
         let six = progress(&view(6, 5, 2)).expect("names");
-        assert_eq!(plain(six.clone()), "q w e r +2 │ a s");
+        assert_eq!(plain(six.clone()), "a s │ q w e r +2 6/6");
         assert!(six.contains(&format!("{REVERSE}+2")));
-        assert_eq!(plain(progress(&view(2, 0, 1)).expect("names")), "q w");
+        assert_eq!(plain(progress(&view(2, 0, 1)).expect("names")), "q w 1/2");
+        // The place keeps the width of the count, so the names keep their columns
+        assert_eq!(
+            plain(progress(&view(10, 2, 1)).expect("names")),
+            "q w e r +6  3/10"
+        );
     }
 
     use crate::style::STRONG;

@@ -139,12 +139,12 @@ Enter waits for a second press as on a message: while questions wait, which a co
 
 Claude asks in three kinds of requests: the questions of a call of `AskUserQuestion`, a plan to carry out, from plan mode, and a call to allow, which Claude Code asks you about when its permission mode and rules leave it to you.
 Each request waits until you open it, so no key meant for your message answers one.
-`Y` on the label row counts them, up to 9 and then `+`, in orange while any waits.
+`Y` on the label row counts them, a call's questions as one request, up to 9 and then `+`, in orange while any waits.
 Meanwhile, Enter on a message refuses them, so it waits for a second press.
 Ctrl+Y shows them one at a time, and Ctrl+Y goes back to the message, as Esc does on the list.
-A rule above the question names its request: its kind, like `Questions`, `Plan` or the tool of the call, as Claude Code names it for a person, with its MCP server, if any, the subagent that asked, if one did, and its place among the requests, when more than one waits, like `── Bash · Explore the code · 2/3` or `── Search Files · claude.ai Google Drive · 1/2`.
-A title too long for the rule loses its end, and the place stays whole.
-The right end of the label row names the requests `q`, `w`, `e` and `r`, and those after the fourth as how many they are, like `+2`, then the request's questions `a`, `s`, `d` and `f`, green once submitted, each with the one shown in reverse, and each only when it has more than one, like `q w e │ a s`.
+A rule above the question names its request: its kind, like `Questions`, `Plan` or the tool of the call, as Claude Code names it for a person, with its MCP server, if any, and the subagent that asked, if one did, like `── Bash · Explore the code` or `── Search Files · claude.ai Google Drive`.
+A title too long for the rule loses its end.
+When more than one request waits, the right end of the label row shows the place of the one shown, like `2/3`, then names the requests `q`, `w`, `e` and `r`, and those after the fourth as how many they are, like `+2`, then the request's questions `a`, `s`, `d` and `f`, green once submitted, each with the one shown in reverse, and each only when it has more than one, like `2/3 q w e │ a s`.
 Each request goes to Claude Code as soon as you answer it, apart from the others.
 A question shows in a block of 8 rows under the rule, whatever its length, so the options never move while you answer.
 A longer question ends in `… N more lines · Ctrl+O shows it whole`: Ctrl+O there opens the whole conversation at the question, to read with less's keys, and `q` brings you back to answer.

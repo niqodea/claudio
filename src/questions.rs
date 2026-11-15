@@ -452,12 +452,9 @@ impl Questions {
         });
     }
 
-    /// How many questions wait, where a plan and a permission are one each.
+    /// How many requests wait. A call's questions count as one request.
     pub fn count(&self) -> usize {
-        self.requests
-            .iter()
-            .map(|request| request.entries.len())
-            .sum()
+        self.requests.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -535,21 +532,15 @@ impl Questions {
         let requests: Vec<bool> = self.requests.iter().map(Request::is_submitted).collect();
         let agent =
             (request.agent.as_ref()).map_or_else(String::new, |agent| format!(" · {agent}"));
-        let place = if requests.len() > 1 {
-            format!(" · {}/{}", self.shown + 1, requests.len())
-        } else {
-            String::new()
-        };
-        let view = |label: String, lines, choices, own_label: &str, form| View {
+        let view = |label: String, question, choices, own_label: &str, form| View {
             label,
             title: format!("{}{agent}", request.kind()),
-            place: place.clone(),
             refusal: request.refusal(),
             request_index: self.shown,
             requests: requests.clone(),
             details: Vec::new(),
             fields: Vec::new(),
-            lines,
+            question,
             choices,
             own_label: own_label.to_string(),
             form,
@@ -568,13 +559,7 @@ impl Questions {
             return View {
                 details,
                 fields,
-                ..view(
-                    request.kind(),
-                    vec![question],
-                    choices,
-                    own_label,
-                    Form::One,
-                )
+                ..view(request.kind(), question, choices, own_label, Form::One)
             };
         }
         if index == request.entries.len() {
@@ -583,7 +568,13 @@ impl Questions {
                 .collect();
             return View {
                 fields: vec![text_field("Send these answers?")],
-                ..view("Review".to_string(), Vec::new(), choices, "", Form::Review)
+                ..view(
+                    "Review".to_string(),
+                    String::new(),
+                    choices,
+                    "",
+                    Form::Review,
+                )
             };
         }
         let question = &request.questions()[index];
@@ -599,7 +590,7 @@ impl Questions {
             fields: vec![text_field(&question.text)],
             ..view(
                 question.header.clone(),
-                Vec::new(),
+                String::new(),
                 choices,
                 own_label,
                 form,
@@ -786,7 +777,7 @@ mod tests {
     fn the_view_offers_a_questions_options_in_its_form() {
         let mut questions = Questions::default();
         questions.add(two_questions("a"), None, vec![1, 2]);
-        assert_eq!(questions.count(), 2);
+        assert_eq!(questions.count(), 1);
         let view = questions.view(0);
         assert_eq!(view.label, "Database");
         assert_eq!(view.form, Form::One);
@@ -915,22 +906,17 @@ mod tests {
         }
     }
 
-    /// The rule's text: the request's title, then its place.
-    fn title(view: &View) -> String {
-        format!("{}{}", view.title, view.place)
-    }
-
     #[test]
     fn requests_wait_each_on_its_own_and_the_view_moves_between_them() {
         let mut questions = Questions::default();
         questions.add(two_questions("a"), None, vec![1, 2]);
         questions.add(one_question("b"), Some("Explore".to_string()), vec![3]);
         questions.add(permission("c", false), None, vec![4]);
-        assert_eq!(questions.count(), 4);
-        assert_eq!(title(&questions.view(0)), "Questions · 1/3");
+        assert_eq!(questions.count(), 3);
+        assert_eq!(questions.view(0).title, "Questions");
         assert_eq!(questions.go(0, Move::ToRequest(1)), 0);
         let view = questions.view(0);
-        assert_eq!(title(&view), "Questions · Explore · 2/3");
+        assert_eq!(view.title, "Questions · Explore");
         assert_eq!(view.label, "Cache");
         assert_eq!(view.request_index, 1);
         assert_eq!(questions.go(0, Move::PreviousRequest), 0);
@@ -940,7 +926,8 @@ mod tests {
         assert_eq!(questions.remove_shown().tool_use_id, "b");
         // The view stays in place, on the request that slid into it
         assert_eq!(questions.first(), Some(0));
-        assert_eq!(title(&questions.view(0)), "Bash · 2/2");
+        let view = questions.view(0);
+        assert_eq!((view.title.as_str(), view.request_index), ("Bash", 1));
         assert_eq!(questions.remove_shown().tool_use_id, "c");
         assert_eq!(questions.first(), Some(0));
         assert_eq!(questions.view(0).label, "Database");
@@ -979,8 +966,7 @@ mod tests {
                 .iter()
                 .any(|field| field.value == "rm -rf build")
         );
-        assert_eq!(view.lines.len(), 1);
-        assert!(view.lines[0].contains("Allow this Bash call?"));
+        assert!(view.question.contains("Allow this Bash call?"));
     }
 
     #[test]
@@ -1067,7 +1053,7 @@ mod tests {
         questions.add(*ask, None, vec![1]);
         let view = questions.view(0);
         assert_eq!(view.title, "Search Files · claude.ai Google Drive");
-        assert!(view.lines[0].contains("Allow this Search Files call?"));
+        assert!(view.question.contains("Allow this Search Files call?"));
         // Without a name for a person, the tool's own name
         let mut questions = Questions::default();
         questions.add(permission("b", false), None, vec![2]);

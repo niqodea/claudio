@@ -433,7 +433,8 @@ fn ask_all() -> Vec<Value> {
     };
     let plan = "# Plan: add a greeting\n\n\
         ## Steps\n\n\
-        1. Add `greet` to `src/greet.js`, as an arrow function.\n\
+        1. Add `greet` to `src/greet.js`, as an arrow function that takes a name and returns the \
+        greeting.\n\
         2. Export it from `src/index.js`.\n\
         3. Add a test in `test/greet.test.js` that greets `World`.\n\n\
         ## Checks\n\n\

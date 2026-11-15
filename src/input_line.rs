@@ -902,8 +902,8 @@ impl InputLine {
         format!("{}{}{right}", self.label, " ".repeat(room))
     }
 
-    /// Draws the question of `view` in `rows`: the question above the label row, with the call
-    /// or the plan it asks about from the top of the screen, under the rule. On a question whose
+    /// Draws the question of `view` in `rows`: the rule, the block under it, and the question,
+    /// right above the label row. On a question whose
     /// options have previews, it draws the preview of the option the cursor is on from the
     /// top of the screen, between an edge titled with the option and a rule above the question,
     /// as fzf's preview window with a label, so only the preview changes as the cursor moves.
@@ -933,19 +933,10 @@ impl InputLine {
         };
         // The rule above the question names the request, which the label row names the question
         // of
-        let top = if view.details.is_empty() {
-            let mut lines = vec![rule(&view.title)];
-            lines.extend(block_lines(&view.fields, columns));
-            lines.push(view.question.clone());
-            draw_lines_above(out, &lines, width, rows.label)
-        } else {
-            // The call or the plan from the top, so the rule and the question stay in place
-            let top =
-                draw_lines_above(out, std::slice::from_ref(&view.question), width, rows.label);
-            put_line(out, 0, &rule(&view.title));
-            draw_lines_below(out, &view.details, width, 1, top.saturating_sub(1));
-            top
-        };
+        let mut lines = vec![rule(&view.title)];
+        lines.extend(block_lines(&view.fields, columns));
+        lines.push(view.question.clone());
+        let top = draw_lines_above(out, &lines, width, rows.label);
         if let Some(preview) = preview {
             put_line(out, 0, &rule(preview.title.as_deref().unwrap_or_default()));
             // The rows between the edge and the rule above the question, less a blank row
@@ -1555,30 +1546,6 @@ fn more_lines(count: usize) -> String {
     format!("… {count} more {lines} · Ctrl+O shows it whole")
 }
 
-/// Draws `lines` from `top` down, each taking the rows it wraps to, and ends before `bottom`.
-/// Lines that do not fit give their place to a `…` line that says how to see them whole.
-fn draw_lines_below(out: &mut Vec<u8>, lines: &[String], width: u16, top: u16, bottom: u16) {
-    let mut row = top;
-    for (index, line) in lines.iter().enumerate() {
-        let line_rows = rows_of(line, width);
-        // A cut keeps a row for the …
-        let room = if index + 1 == lines.len() {
-            bottom.saturating_sub(row)
-        } else {
-            bottom.saturating_sub(row).saturating_sub(1)
-        };
-        if line_rows > room {
-            if row < bottom {
-                let hidden: u16 = lines[index..].iter().map(|line| rows_of(line, width)).sum();
-                put_line(out, row, &format!("{SUBDUED}{}", more_lines(hidden.into())));
-            }
-            return;
-        }
-        put_line(out, row, line);
-        row += line_rows;
-    }
-}
-
 /// Writes `line` on `row`, from its start, and resets the colors after it, so they reach nothing
 /// drawn next.
 fn put_line(out: &mut Vec<u8>, row: u16, line: &str) {
@@ -1674,7 +1641,6 @@ mod tests {
             refusal: String::new(),
             request_index,
             requests: vec![false; requests],
-            details: vec![],
             fields: vec![],
             question: String::new(),
             choices: vec![],

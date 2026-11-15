@@ -24,7 +24,6 @@ use serde_json::{Map, Value};
 use crate::keys::{BLOCK_ROWS, Field, Mark, Tone, View, questions};
 use crate::picker::{Choice, Cursor, Draft, Form, Move, Pick};
 use crate::protocol::{Answer, Ask, AskKind, Permission, Question};
-use crate::render::markdown_lines;
 use crate::style::{RESET, STRONG};
 
 #[derive(Default)]
@@ -146,18 +145,15 @@ impl Request {
         }
     }
 
-    /// What the question view shows of a plan or a permission: the plan, from the top of the
-    /// screen, or the call's reason and fields, in the block under the rule, then the question,
-    /// right above the options.
-    fn decision_view(&self) -> (Vec<String>, Vec<Field>, String, Vec<Choice>) {
-        let (details, fields, question) = match &self.ask.kind {
+    /// What the question view shows of a plan or a permission: the plan, or the call's reason and
+    /// fields, in the block under the rule, then the question, right above the options.
+    fn decision_view(&self) -> (Vec<Field>, String, Vec<Choice>) {
+        let (fields, question) = match &self.ask.kind {
             AskKind::Plan(plan) => (
-                markdown_lines(plan),
-                Vec::new(),
+                vec![text_field(plan, Tone::Plain)],
                 "Carry out this plan?".to_string(),
             ),
             AskKind::Permission(permission) => (
-                Vec::new(),
                 call_fields(
                     &self.ask.tool_name,
                     &self.ask.input,
@@ -181,12 +177,7 @@ impl Request {
             _ => keyed("allow", 'y'),
         };
         let choices = vec![approval, keyed("refuse, and stop Claude", 'n')];
-        (
-            details,
-            fields,
-            format!("{STRONG}{question}{RESET}"),
-            choices,
-        )
+        (fields, format!("{STRONG}{question}{RESET}"), choices)
     }
 
     /// The answer that `draft` gives to a plan or a permission, none when it gives none, like
@@ -454,13 +445,14 @@ fn all_ticked(count: usize) -> Draft {
     }
 }
 
-/// The block under the rule of a question, or of the review: its text, in all the block's rows.
-fn text_field(text: &str) -> Field {
+/// The block under the rule of a question, of the review or of a plan: its text, in `tone`, in
+/// all the block's rows.
+fn text_field(text: &str, tone: Tone) -> Field {
     Field {
         mark: Mark::None,
         value: text.to_string(),
         is_path: false,
-        tone: Tone::Bold,
+        tone,
         rows: BLOCK_ROWS,
     }
 }
@@ -581,7 +573,6 @@ impl Questions {
             refusal: request.refusal(),
             request_index: self.shown,
             requests: requests.clone(),
-            details: Vec::new(),
             fields: Vec::new(),
             question,
             choices,
@@ -597,10 +588,9 @@ impl Questions {
                 .is_some_and(|entry| entry.is_submitted),
         };
         if request.is_decision() {
-            let (details, fields, question, choices) = request.decision_view();
+            let (fields, question, choices) = request.decision_view();
             let own_label = "refuse, and tell Claude why";
             return View {
-                details,
                 fields,
                 ..view(request.kind(), question, choices, own_label, Form::One)
             };
@@ -610,7 +600,7 @@ impl Questions {
                 .map(|(header, answer)| Choice::new(&format!("{header}: {answer}"), "", None))
                 .collect();
             return View {
-                fields: vec![text_field("Send these answers?")],
+                fields: vec![text_field("Send these answers?", Tone::Bold)],
                 ..view(
                     "Review".to_string(),
                     String::new(),
@@ -630,7 +620,7 @@ impl Questions {
             ("your own answer", Form::One)
         };
         View {
-            fields: vec![text_field(&question.text)],
+            fields: vec![text_field(&question.text, Tone::Bold)],
             ..view(
                 question.header.clone(),
                 String::new(),
@@ -1052,13 +1042,33 @@ mod tests {
         assert!(view.sends_at_once);
         assert_eq!(view.choices[0].key, Some('y'));
         // The call shows in the block under the rule, and only the question above the options
-        assert_eq!(view.details, Vec::<String>::new());
         assert!(
             view.fields
                 .iter()
                 .any(|field| field.value == "rm -rf build")
         );
         assert!(view.question.contains("Allow this Bash call?"));
+    }
+
+    #[test]
+    fn a_plan_shows_as_written_in_the_block_under_the_rule() {
+        let request = json!({
+            "subtype": "can_use_tool",
+            "tool_name": "ExitPlanMode",
+            "input": {"plan": "# Plan\n\n1. Add `greet`"},
+            "tool_use_id": "b",
+        });
+        let Ok(crate::protocol::Event::Ask(plan)) = read_request("request-b".to_string(), request)
+        else {
+            panic!("a plan");
+        };
+        let mut questions = Questions::default();
+        questions.add(*plan, None, vec![1]);
+        let view = questions.view();
+        assert_eq!(view.fields.len(), 1);
+        assert_eq!(view.fields[0].value, "# Plan\n\n1. Add `greet`");
+        assert_eq!(view.fields[0].rows, BLOCK_ROWS);
+        assert!(view.question.contains("Carry out this plan?"));
     }
 
     #[test]

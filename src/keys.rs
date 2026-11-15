@@ -107,11 +107,8 @@ pub struct View {
     pub request_index: usize,
     /// Whether each request that waits has all its questions submitted.
     pub requests: Vec<bool>,
-    /// The plan asked about, which shows from the top of the screen, under the rule, so the
-    /// question and the rule stay in place whatever its length. None on anything else.
-    pub details: Vec<String>,
-    /// What the block of `BLOCK_ROWS` rows under the rule shows: a question's text, or a call's
-    /// reason and fields. None on a plan.
+    /// What the block of `BLOCK_ROWS` rows under the rule shows: a question's text, a plan, or
+    /// a call's reason and fields.
     pub fields: Vec<Field>,
     /// The line right above the options, like the question that asks to allow a call, empty on
     /// a question, whose text is in the block. It is one line on every request, so the rule and
@@ -370,7 +367,6 @@ mod tests {
             refusal: "2 questions".to_string(),
             request_index: 0,
             requests: vec![false],
-            details: vec![],
             fields: vec![],
             question: String::new(),
             choices: vec![],

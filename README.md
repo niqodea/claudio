@@ -188,7 +188,7 @@ Each request remembers the question you were on, and the review remembers what y
 A plan or a call to allow is a request of one question, whose options are named `y` and `n`, as command-line prompts answer a yes-or-no question.
 `y` and `n` only move the cursor, as numbers do, and Enter answers: allow allows it, and `refuse, and stop Claude` refuses it and stops Claude's turn, as Ctrl+C does.
 Your own answer refuses it too, but Claude reads your words and goes on from them, in the same turn.
-A plan shows whole, from the top of the screen, so the question stays right above the options whatever its length.
+A plan shows in the same 8 rows as a question, as written, and a longer plan ends in `… N more lines · Ctrl+O shows it whole`.
 A call shows in the same 8 rows as a question: first the fields of its input that matter most, each after a sign that reads as what it is, then the others, by name, and on the last row, after `?`, why Claude Code asks, as it sends it: its words, or else the kind of check that asks, like `A rule in your settings asks before this call`, or else the path that made it ask, and `no reason given` when it sends none of them.
 The signs come from a shell and a diff: Bash shows `$` before its command, `#` before its description, `t` before its timeout and `&` before where it runs, like `& in background`, an Edit shows `-` and `+` before what it takes out and puts in, in red and green, `@` comes before a file or a URL, and `│` before a Write's content or a WebFetch's prompt.
 A field the call leaves out shows what that means in grey, like `t default` or `& in foreground`.

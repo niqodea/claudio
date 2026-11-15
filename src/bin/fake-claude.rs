@@ -8,8 +8,11 @@
 //! questions of `AskUserQuestion`'s, whose turn ends once they are answered: one of one choice
 //! whose options have previews, and one of several choices. The message `ask one` asks only the
 //! first. The message `ask guarded` asks to allow a call that Claude Code deems dangerous. The
-//! messages of the checks of a slow permission check and of tasks get those checks'
-//! lines, and an interrupt, send now's too, gets the rest of a call that waits for one.
+//! message `ask all` sends one request of each kind at once, to see them side by side: the two
+//! questions, a plan, and calls to allow of Bash, Edit, Write, `WebFetch` and an MCP tool. A turn
+//! that asks ends once all its requests are answered. The messages of the checks of a slow
+//! permission check and of tasks get those checks' lines, and an interrupt, send now's too, gets
+//! the rest of a call that waits for one.
 //! `/clear` starts a new session, and `/compact` and `/cost` answer as Claude Code does.
 //! `FAKE_DELAY` is how many seconds each answer waits before it starts, none when unset.
 //! The message `Write a long line` gets a line of 200 words, streamed in two parts: when
@@ -41,6 +44,7 @@ fn main() {
         has_started: false,
         sends_states: env::var_os("CLAUDE_CODE_SDK_READS_SESSION_STATE").is_some(),
         on_interrupt: Vec::new(),
+        asks_waiting: 0,
     };
     for line in io::stdin().lock().lines().map_while(Result::ok) {
         let Ok(message) = serde_json::from_str::<Value>(&line) else {
@@ -59,6 +63,8 @@ struct Fake {
     sends_states: bool,
     /// The lines of a turn that waits for an interrupt, which ends it.
     on_interrupt: Vec<String>,
+    /// How many requests of the turn that asks wait for their answers.
+    asks_waiting: usize,
 }
 
 impl Fake {
@@ -76,10 +82,14 @@ impl Fake {
             }
             _ => {}
         }
-        // The answers to the questions end the turn that asked them
-        if message["response"]["request_id"] == ASK_REQUEST_ID {
-            send(&json!({"type": "result", "subtype": "success"}).to_string());
-            self.state("idle");
+        // The last answer to a turn's requests ends the turn
+        let answered = message["response"]["request_id"].as_str();
+        if answered.is_some_and(|id| id.starts_with(ASK_REQUEST_ID)) {
+            self.asks_waiting -= 1;
+            if self.asks_waiting == 0 {
+                send(&json!({"type": "result", "subtype": "success"}).to_string());
+                self.state("idle");
+            }
         }
         if message["type"] != "user" {
             return;
@@ -100,10 +110,17 @@ impl Fake {
             self.has_started = true;
             send(&contract::init(&self.session_id()));
         }
+        let asks = match text.trim() {
+            "ask" => vec![ask(2)],
+            "ask one" => vec![ask(1)],
+            "ask guarded" => vec![ask_guarded()],
+            "ask all" => ask_all(),
+            _ => Vec::new(),
+        };
+        if !asks.is_empty() {
+            return self.send_asks(asks);
+        }
         match text.trim() {
-            "ask" => return send(&ask(2).to_string()),
-            "ask one" => return send(&ask(1).to_string()),
-            "ask guarded" => return send(&ask_guarded().to_string()),
             contract::SLOW_PERMISSION_CHECK_MESSAGE => {
                 return self.send_turn(&contract::slow_permission_check());
             }
@@ -146,6 +163,19 @@ impl Fake {
             send(&line.to_string());
         }
         self.state("idle");
+    }
+
+    /// Sends the requests of a turn that asks, which ends once all are answered.
+    fn send_asks(&mut self, asks: Vec<Value>) {
+        self.asks_waiting = asks.len();
+        for (number, request) in asks.into_iter().enumerate() {
+            let control = json!({
+                "type": "control_request",
+                "request_id": format!("{ASK_REQUEST_ID}-{number}"),
+                "request": request,
+            });
+            send(&control.to_string());
+        }
     }
 
     /// Sends `lines` as a turn, and ends it.
@@ -367,14 +397,10 @@ fn ask(count: usize) -> Value {
         }),
     ];
     json!({
-        "type": "control_request",
-        "request_id": ASK_REQUEST_ID,
-        "request": {
-            "subtype": "can_use_tool",
-            "tool_name": "AskUserQuestion",
-            "tool_use_id": "fake-ask-call",
-            "input": {"questions": &questions[..count]},
-        },
+        "subtype": "can_use_tool",
+        "tool_name": "AskUserQuestion",
+        "tool_use_id": "fake-ask-call",
+        "input": {"questions": &questions[..count]},
     })
 }
 
@@ -382,18 +408,90 @@ fn ask(count: usize) -> Value {
 /// that one key must not allow it.
 fn ask_guarded() -> Value {
     json!({
-        "type": "control_request",
-        "request_id": ASK_REQUEST_ID,
-        "request": {
-            "subtype": "can_use_tool",
-            "tool_name": "Bash",
-            "display_name": "Bash",
-            "tool_use_id": "fake-guarded-call",
-            "input": {"command": "rm -rf build", "description": "Delete the build directory"},
-            "decision_reason": "rm removes files",
-            "default_to_no": true,
-        },
+        "subtype": "can_use_tool",
+        "tool_name": "Bash",
+        "display_name": "Bash",
+        "tool_use_id": "fake-guarded-call",
+        "input": {"command": "rm -rf build", "description": "Delete the build directory"},
+        "decision_reason": "rm removes files",
+        "default_to_no": true,
     })
+}
+
+/// The requests of the message `ask all`: one of each kind, as Claude Code sends them.
+fn ask_all() -> Vec<Value> {
+    // Claude Code mostly sends a `decision_reason_type` and no `decision_reason`
+    let call = |id: &str, tool: &str, input: Value, reason_type: &str| {
+        json!({
+            "subtype": "can_use_tool",
+            "tool_name": tool,
+            "display_name": tool,
+            "tool_use_id": id,
+            "input": input,
+            "decision_reason_type": reason_type,
+        })
+    };
+    let plan = "# Plan: add a greeting\n\n\
+        ## Steps\n\n\
+        1. Add `greet` to `src/greet.js`, as an arrow function.\n\
+        2. Export it from `src/index.js`.\n\
+        3. Add a test in `test/greet.test.js` that greets `World`.\n\n\
+        ## Checks\n\n\
+        - `npm test` passes.\n\
+        - `npm run lint` passes.";
+    let mcp = json!({
+        "subtype": "can_use_tool",
+        "tool_name": "mcp__claude_ai_Google_Drive__search_files",
+        "display_name": "Search Files",
+        "mcp_server": {"name": "claude.ai Google Drive", "source": "claudeai"},
+        "tool_use_id": "fake-mcp-call",
+        "input": {"query": "greeting style guide", "page_size": 10},
+        "decision_reason_type": "rule",
+    });
+    vec![
+        ask(2),
+        json!({
+            "subtype": "can_use_tool",
+            "tool_name": "ExitPlanMode",
+            "tool_use_id": "fake-plan-call",
+            "input": {"plan": plan},
+        }),
+        call(
+            "fake-bash-call",
+            "Bash",
+            json!({"command": "npm test -- --watch=false", "description": "Run the tests", "timeout": 120_000}),
+            "subcommandResults",
+        ),
+        call(
+            "fake-edit-call",
+            "Edit",
+            json!({
+                "file_path": "/tmp/project/src/index.js",
+                "old_string": "export { main };",
+                "new_string": "import { greet } from './greet.js';\n\nexport { main, greet };",
+            }),
+            "mode",
+        ),
+        call(
+            "fake-write-call",
+            "Write",
+            json!({
+                "file_path": "/tmp/project/src/greet.js",
+                "content": "export const greet = (name) => `Hello, ${name}!`;\n",
+            }),
+            "mode",
+        ),
+        call(
+            "fake-fetch-call",
+            "WebFetch",
+            json!({
+                "url": "https://developer.mozilla.org/docs/Web/JavaScript/Reference/Functions/Arrow_functions",
+                "prompt": "When should a function be an arrow function?",
+            }),
+            "rule",
+        ),
+        mcp,
+    ]
 }
 
 /// The lines of a turn: a call to the API that writes the whole context to the cache, the plan's

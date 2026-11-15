@@ -36,7 +36,7 @@ use crate::limits::{Level, limit_level};
 use crate::picker::{self, Cursor, Draft, Form, Move, Pick, question_name};
 use crate::render::{Output, Status, colors_at, cut, marks, start_bar_row, user_line};
 use crate::status;
-use crate::style::{BOLD, GREEN, ORANGE, RESET, REVERSE, STATUS_COLOR, UNREVERSE};
+use crate::style::{ATTENTION, DONE_OR_ADDED, RESET, REVERSE, STRONG, SUBDUED_ON_BAR, UNREVERSE};
 use crate::terminal::{Settings, run_in_terminal};
 use crate::vi::{Editor, Mode};
 use crate::wrap;
@@ -880,7 +880,7 @@ impl InputLine {
     /// for both, the keys follow the label after a space, and wrap onto the next row.
     fn label_line(&self, view: Option<&View>) -> String {
         let pending = self.editor.pending();
-        let pending = (!pending.is_empty()).then(|| format!("{STATUS_COLOR}{pending}"));
+        let pending = (!pending.is_empty()).then(|| format!("{SUBDUED_ON_BAR}{pending}"));
         let right: Vec<String> = [pending, view.and_then(progress)]
             .into_iter()
             .flatten()
@@ -914,12 +914,12 @@ impl InputLine {
                 String::new()
             } else {
                 format!(
-                    "── {}{RESET}{STATUS_COLOR} ",
-                    cut(&format!("{BOLD}{title}"), columns)
+                    "── {}{RESET}{SUBDUED_ON_BAR} ",
+                    cut(&format!("{STRONG}{title}"), columns)
                 )
             };
             let fill = "─".repeat(usize::from(width).saturating_sub(visible_width(&title)));
-            format!("{STATUS_COLOR}{title}{fill}")
+            format!("{SUBDUED_ON_BAR}{title}{fill}")
         };
         let mut lines = Vec::new();
         if preview.is_some() {
@@ -943,7 +943,7 @@ impl InputLine {
                 .map(|line| cut(line, columns))
                 .collect();
             if is_cut && room > 0 {
-                lines.push(format!("{STATUS_COLOR}… Ctrl+O shows it whole"));
+                lines.push(format!("{SUBDUED_ON_BAR}… Ctrl+O shows it whole"));
             }
             for (row, line) in (1..).zip(lines) {
                 put_line(out, row, &line);
@@ -986,7 +986,7 @@ impl InputLine {
     fn confirmation(&self) -> Option<String> {
         self.confirming
             .as_ref()
-            .map(|first| format!("{ORANGE}{} again {}", keys::name(&first.key), first.loss))
+            .map(|first| format!("{ATTENTION}{} again {}", keys::name(&first.key), first.loss))
     }
 
     /// The label row: for a message, `››` with the budgets, then the activity, as AGENTS.md's
@@ -1007,7 +1007,7 @@ impl InputLine {
                 let (cold_mark, level_color) = if is_cold {
                     ("*", COLD_COLOR)
                 } else {
-                    (" ", STATUS_COLOR)
+                    (" ", SUBDUED_ON_BAR)
                 };
                 let budgets = format!(
                     "{level_color}{cold_mark}T{} {} {}",
@@ -1020,12 +1020,12 @@ impl InputLine {
                     waiting_indicator(*waiting),
                     background_indicator(shared.output.background_tasks().len()),
                 );
-                let indicators = format!("{}{budgets} {STATUS_COLOR}│ {activity}", marks());
+                let indicators = format!("{}{budgets} {SUBDUED_ON_BAR}│ {activity}", marks());
                 let state = (self.confirmation())
                     .or_else(|| self.command_line())
                     .or_else(|| describe_work(&shared.output))
                     .unwrap_or_else(|| "idle".to_string());
-                format!("{indicators} {STATUS_COLOR}│ {state}")
+                format!("{indicators} {SUBDUED_ON_BAR}│ {state}")
             }
             Phase::Answering(view) => {
                 let hint = if let Some(confirmation) = self.confirmation() {
@@ -1035,9 +1035,9 @@ impl InputLine {
                         Form::One => "write your answer, or Esc goes back",
                         _ => "Space ticks one or more",
                     };
-                    format!("{ORANGE}{text}")
+                    format!("{ATTENTION}{text}")
                 } else if view.is_submitted {
-                    format!("{GREEN}submitted{STATUS_COLOR}, Enter edits it")
+                    format!("{DONE_OR_ADDED}submitted{SUBDUED_ON_BAR}, Enter edits it")
                 } else {
                     picker::hint(
                         view.form,
@@ -1047,7 +1047,7 @@ impl InputLine {
                     )
                 };
                 format!(
-                    "{} {BOLD}{}{RESET} {STATUS_COLOR}│ {hint}",
+                    "{} {STRONG}{}{RESET} {SUBDUED_ON_BAR}│ {hint}",
                     marks(),
                     view.label
                 )
@@ -1068,7 +1068,7 @@ impl InputLine {
                     .confirmation()
                     .map_or_else(String::new, |confirmation| format!(" │ {confirmation}"));
                 format!(
-                    "{} {STATUS_COLOR}{}{confirmation}",
+                    "{} {SUBDUED_ON_BAR}{}{confirmation}",
                     marks(),
                     parts.join(" │ ")
                 )
@@ -1170,7 +1170,7 @@ fn open_line_rows(pending: &str, width: usize, room: usize) -> Vec<String> {
         return rows;
     }
     let shown = room - 1;
-    let cut = format!("{STATUS_COLOR}… its start shows once it ends{RESET}");
+    let cut = format!("{SUBDUED_ON_BAR}… its start shows once it ends{RESET}");
     [vec![cut], rows[rows.len() - shown..].to_vec()].concat()
 }
 
@@ -1270,7 +1270,7 @@ fn show_level(level: Option<usize>) -> String {
 /// The letter of a usage limit and its level, in the level's color, so the color only repeats
 /// what the level says.
 fn limit_indicator(letter: char, level: Option<Level>) -> String {
-    let color = level.and_then(Level::color).unwrap_or(STATUS_COLOR);
+    let color = level.and_then(Level::color).unwrap_or(SUBDUED_ON_BAR);
     format!("{color}{letter}{}", show_level(level.map(Level::to_number)))
 }
 
@@ -1289,7 +1289,11 @@ fn names(done: &[bool], shown: usize, name: fn(usize) -> char) -> Option<String>
         return None;
     }
     let names = done.iter().enumerate().map(|(index, &is_done)| {
-        let color = if is_done { GREEN } else { STATUS_COLOR };
+        let color = if is_done {
+            DONE_OR_ADDED
+        } else {
+            SUBDUED_ON_BAR
+        };
         let (on, off) = if index == shown {
             (REVERSE, UNREVERSE)
         } else {
@@ -1303,14 +1307,18 @@ fn names(done: &[bool], shown: usize, name: fn(usize) -> char) -> Option<String>
 /// Y and how many questions wait, in the color of a warning while any waits, since only the
 /// user moves them on.
 fn waiting_indicator(waiting: usize) -> String {
-    let color = if waiting == 0 { STATUS_COLOR } else { ORANGE };
+    let color = if waiting == 0 {
+        SUBDUED_ON_BAR
+    } else {
+        ATTENTION
+    };
     format!("{color}Y{}", show_count(waiting))
 }
 
 /// B and how many tasks run in the background, like a shell Claude started, in the bar's grey
 /// however many run, since they need nothing from the user.
 fn background_indicator(tasks: usize) -> String {
-    format!("{STATUS_COLOR}B{}", show_count(tasks))
+    format!("{SUBDUED_ON_BAR}B{}", show_count(tasks))
 }
 
 /// A count up to 9, and + for more, which keeps one character for the count, so the label's
@@ -1339,7 +1347,7 @@ fn draw_lines_above(out: &mut Vec<u8>, lines: &[String], width: u16, bottom: u16
         if line_rows > room {
             if row > 0 {
                 put!(out, MoveTo(0, row - 1));
-                out.extend(format!("{STATUS_COLOR}… Ctrl+O shows it whole{RESET}").as_bytes());
+                out.extend(format!("{SUBDUED_ON_BAR}… Ctrl+O shows it whole{RESET}").as_bytes());
             }
             return row.saturating_sub(1);
         }
@@ -1421,22 +1429,22 @@ mod tests {
 
     #[test]
     fn a_count_keeps_one_character() {
-        assert_eq!(background_indicator(0), format!("{STATUS_COLOR}B0"));
-        assert_eq!(background_indicator(9), format!("{STATUS_COLOR}B9"));
-        assert_eq!(background_indicator(10), format!("{STATUS_COLOR}B+"));
-        assert_eq!(waiting_indicator(0), format!("{STATUS_COLOR}Y0"));
-        assert_eq!(waiting_indicator(12), format!("{ORANGE}Y+"));
+        assert_eq!(background_indicator(0), format!("{SUBDUED_ON_BAR}B0"));
+        assert_eq!(background_indicator(9), format!("{SUBDUED_ON_BAR}B9"));
+        assert_eq!(background_indicator(10), format!("{SUBDUED_ON_BAR}B+"));
+        assert_eq!(waiting_indicator(0), format!("{SUBDUED_ON_BAR}Y0"));
+        assert_eq!(waiting_indicator(12), format!("{ATTENTION}Y+"));
     }
 
     #[test]
     fn a_level_names_its_items_only_when_it_has_several() {
         assert_eq!(names(&[false], 0, question_name), None);
         let two = names(&[true, false], 1, question_name).expect("names");
-        assert!(two.contains(&format!("{GREEN}a")));
+        assert!(two.contains(&format!("{DONE_OR_ADDED}a")));
         assert!(two.contains(&format!("{REVERSE}s")));
     }
 
-    use crate::style::BOLD;
+    use crate::style::STRONG;
 
     #[test]
     fn a_line_that_fits_takes_one_row() {
@@ -1457,13 +1465,13 @@ mod tests {
 
     #[test]
     fn each_row_starts_with_the_colors_set_before_it() {
-        let line = format!("a{BOLD}bc{RESET}d{BOLD}efg");
+        let line = format!("a{STRONG}bc{RESET}d{STRONG}efg");
         assert_eq!(
             terminal_rows(&line, 3),
             [
-                format!("a{BOLD}bc{RESET}"),
-                format!("d{BOLD}ef"),
-                format!("{BOLD}g")
+                format!("a{STRONG}bc{RESET}"),
+                format!("d{STRONG}ef"),
+                format!("{STRONG}g")
             ]
         );
     }

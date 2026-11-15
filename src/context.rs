@@ -7,10 +7,10 @@
 use std::time::{Duration, Instant};
 
 use crate::protocol::{Ceiling, Usage};
-use crate::style::ORANGE;
+use crate::style::ATTENTION;
 
 /// The color of a cold cache: a warning's, since a call on it costs more and fails nothing.
-pub const COLD_COLOR: &str = ORANGE;
+pub const COLD_COLOR: &str = ATTENTION;
 
 /// The upper bounds of the levels T0 to T2, above which the context is at T3. A new session
 /// starts at about 25k tokens, its system prompt, tools and memory, so T0 is a context that

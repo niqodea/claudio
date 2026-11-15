@@ -18,7 +18,7 @@ Each rule names its source, or says it is claudio's own.
 
 ## Color
 
-- Give a color only a meaning from the README's Colors table, and add a new color, or a new use of one, to the table first.
+- Style text only by a meaning from `src/style.rs`, like `SUBDUED` or `ATTENTION`, never by a raw code, which is private to it. Its names are the rows of the README's Colors table, so a new meaning, or a new use of a color, goes into the table and gets its name there first: claudio's own rule
 - Keep red for what failed. [clig.dev](https://clig.dev/#output)
 - Set code in bold, as man pages set literal text. [man-pages](https://man7.org/linux/man-pages/man7/man-pages.7.html#FORMATTING_AND_WORDING_CONVENTIONS)
 - Prefer the terminal's 16 colors, which its theme sets, to fixed shades, and keep fixed shades for what the 16 lack: orange, and the bar's subtle background and the grey on it. [bat](https://github.com/sharkdp/bat#8-bit-themes)

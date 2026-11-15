@@ -6,7 +6,8 @@ use std::sync::OnceLock;
 use syntect::easy::ScopeRegionIterator;
 use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxSet};
 
-use crate::style::{BLUE, GREEN, GREY, MAGENTA, RED, RESET, YELLOW};
+use crate::style::RESET;
+use crate::style::grammar::{BLUE, GREEN, GREY, MAGENTA, RED, YELLOW};
 
 /// The color of each kind of token, in the terminal's own colors. A token takes the color of
 /// the first kind in the list that it is.

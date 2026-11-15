@@ -15,7 +15,7 @@ use serde_json::{Map, Value};
 use crate::keys::View;
 use crate::picker::{Choice, Cursor, Draft, Form, Move, Pick};
 use crate::protocol::{Answer, Ask, AskKind, Question};
-use crate::style::{BOLD, RESET};
+use crate::style::{RESET, STRONG};
 
 #[derive(Default)]
 pub struct Questions {
@@ -178,7 +178,7 @@ impl Questions {
                 .collect();
             return View {
                 label: "Review".to_string(),
-                lines: vec![format!("{BOLD}Send these answers?{RESET}")],
+                lines: vec![format!("{STRONG}Send these answers?{RESET}")],
                 choices,
                 own_label: String::new(),
                 form: Form::Review,
@@ -206,7 +206,7 @@ impl Questions {
         };
         View {
             label: question.header.clone(),
-            lines: vec![format!("{BOLD}{}{RESET}", question.text)],
+            lines: vec![format!("{STRONG}{}{RESET}", question.text)],
             choices,
             own_label: own_label.to_string(),
             form,

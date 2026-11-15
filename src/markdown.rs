@@ -17,7 +17,7 @@
 use crate::code;
 use crate::table::Table;
 
-use crate::style::{BOLD, CODE, DIM, RESET};
+use crate::style::{CODE, RESET, STRONG, SUBDUED};
 
 // Opens a code block, and closes it
 const FENCE: &str = "```";
@@ -165,13 +165,13 @@ impl Highlighter {
             Kind::Row => Settled::Row(start.to_string()),
             Kind::Code => Settled::Code(start.to_string()),
             Kind::Heading => {
-                colored.push_str(BOLD);
+                colored.push_str(STRONG);
                 colored.push_str(start);
                 Settled::Heading
             }
             Kind::Marked(length) => {
                 let (mark, text) = start.split_at(length);
-                colored.push_str(DIM);
+                colored.push_str(SUBDUED);
                 colored.push_str(mark);
                 colored.push_str(RESET);
                 let mut inline = Inline::default();
@@ -203,7 +203,7 @@ impl Highlighter {
                 }
             };
             // The whole fence line, language name included, is a mark
-            return format!("{DIM}{line}{RESET}");
+            return format!("{SUBDUED}{line}{RESET}");
         }
         match &mut self.code_block {
             Some(CodeBlock::Language(highlighter)) => highlighter.color_line(line),
@@ -338,7 +338,7 @@ impl Inline {
                 _ if span.is_closed() => {
                     colored.push_str(&span.colored());
                     if self.is_bold {
-                        colored.push_str(BOLD);
+                        colored.push_str(STRONG);
                     }
                     self.span = None;
                     self.push(character, colored);
@@ -356,7 +356,7 @@ impl Inline {
                     colored.push_str("**");
                     colored.push_str(RESET);
                 } else {
-                    colored.push_str(BOLD);
+                    colored.push_str(STRONG);
                     colored.push_str("**");
                 }
                 self.is_bold = !self.is_bold;
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn bold_keeps_its_marks_and_turns_bold() {
-        assert_eq!(color(&["a **b** c"]), [format!("a {BOLD}**b**{RESET} c")]);
+        assert_eq!(color(&["a **b** c"]), [format!("a {STRONG}**b**{RESET} c")]);
     }
 
     #[test]
@@ -449,26 +449,29 @@ mod tests {
     fn backticks_that_never_close_stay_plain() {
         assert_eq!(color(&["a `b and ``"]), ["a `b and ``"]);
         // What the backticks held reads again as prose
-        assert_eq!(color(&["`a **b**"]), [format!("`a {BOLD}**b**{RESET}")]);
+        assert_eq!(color(&["`a **b**"]), [format!("`a {STRONG}**b**{RESET}")]);
     }
 
     #[test]
     fn a_heading_is_bold() {
         assert_eq!(
             color(&["## Title", "Text"]),
-            [format!("{BOLD}## Title{RESET}"), "Text".to_string()]
+            [format!("{STRONG}## Title{RESET}"), "Text".to_string()]
         );
     }
 
     #[test]
     fn a_list_mark_is_dim() {
-        assert_eq!(color(&["- item"]), [format!("{DIM}-{RESET} item")]);
-        assert_eq!(color(&["  12. item"]), [format!("{DIM}  12.{RESET} item")]);
+        assert_eq!(color(&["- item"]), [format!("{SUBDUED}-{RESET} item")]);
+        assert_eq!(
+            color(&["  12. item"]),
+            [format!("{SUBDUED}  12.{RESET} item")]
+        );
     }
 
     #[test]
     fn a_line_that_starts_with_bold_is_no_list_item() {
-        assert_eq!(color(&["**b** c"]), [format!("{BOLD}**b**{RESET} c")]);
+        assert_eq!(color(&["**b** c"]), [format!("{STRONG}**b**{RESET} c")]);
     }
 
     #[test]
@@ -476,9 +479,9 @@ mod tests {
         assert_eq!(
             color(&["```", "# not a **heading**", "```"]),
             [
-                format!("{DIM}```{RESET}"),
+                format!("{SUBDUED}```{RESET}"),
                 format!("{CODE}# not a **heading**{RESET}"),
-                format!("{DIM}```{RESET}"),
+                format!("{SUBDUED}```{RESET}"),
             ]
         );
     }
@@ -489,9 +492,9 @@ mod tests {
         assert_eq!(
             color(&["```python", "import os", "```"]),
             [
-                format!("{DIM}```python{RESET}"),
+                format!("{SUBDUED}```python{RESET}"),
                 python.color_line("import os"),
-                format!("{DIM}```{RESET}"),
+                format!("{SUBDUED}```{RESET}"),
             ]
         );
     }
@@ -584,10 +587,14 @@ mod tests {
 
     #[test]
     fn a_line_start_waits_for_the_character_that_settles_its_mark() {
-        assert_settles(&[("-", ""), (" item", &format!("{DIM}-{RESET} item"))]);
+        assert_settles(&[("-", ""), (" item", &format!("{SUBDUED}-{RESET} item"))]);
         assert_settles(&[("-", ""), ("1", "-1")]);
-        assert_settles(&[("12", ""), (".", ""), (" x", &format!("{DIM}12.{RESET} x"))]);
-        assert_settles(&[("##", ""), (" T", &format!("{BOLD}## T"))]);
+        assert_settles(&[
+            ("12", ""),
+            (".", ""),
+            (" x", &format!("{SUBDUED}12.{RESET} x")),
+        ]);
+        assert_settles(&[("##", ""), (" T", &format!("{STRONG}## T"))]);
         assert_settles(&[("  ", ""), ("x", "  x")]);
         assert_settles(&[("``", ""), ("x", "")]);
     }
@@ -596,7 +603,7 @@ mod tests {
     fn a_star_waits_for_the_next_character() {
         assert_settles(&[
             ("a *", "a "),
-            ("*", &format!("{BOLD}**")),
+            ("*", &format!("{STRONG}**")),
             ("b*", "b"),
             ("*", &format!("**{RESET}")),
         ]);
@@ -617,7 +624,7 @@ mod tests {
         assert_settles(&[
             ("``", ""),
             ("`py", ""),
-            ("\n", &format!("{DIM}```py{RESET}\n")),
+            ("\n", &format!("{SUBDUED}```py{RESET}\n")),
         ]);
         assert_settles(&[("| a |", ""), ("\n", "")]);
     }

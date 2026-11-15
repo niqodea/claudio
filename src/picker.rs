@@ -15,7 +15,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::keys::Input;
 use crate::render::markdown_lines;
-use crate::style::{BOLD, DIM, GREEN, MARK, RESET};
+use crate::style::{DONE_OR_ADDED, MARK, RESET, STRONG, SUBDUED};
 
 /// The key of the user's own answer, and its mark, the same on every question.
 pub const OWN_KEY: char = '>';
@@ -337,15 +337,15 @@ pub fn lines(
                     Cursor::Own | Cursor::Writing => chosen.is_own,
                 };
                 match (is_chosen, form) {
-                    (true, Form::One) => (format!("{GREEN}✓{RESET}"), GREEN, false),
-                    (true, _) => (" ".to_string(), GREEN, true),
-                    (false, _) => (" ".to_string(), DIM, false),
+                    (true, Form::One) => (format!("{DONE_OR_ADDED}✓{RESET}"), DONE_OR_ADDED, false),
+                    (true, _) => (" ".to_string(), DONE_OR_ADDED, true),
+                    (false, _) => (" ".to_string(), SUBDUED, false),
                 }
             }
             None => match (pick.cursor == cursor, pick.cursor) {
-                (true, _) => (format!("{MARK}❯{RESET}"), BOLD, is_ticked),
+                (true, _) => (format!("{MARK}❯{RESET}"), STRONG, is_ticked),
                 (false, Cursor::Writing) if cursor == Cursor::Own => {
-                    (format!("{DIM}❯{RESET}"), "", is_ticked)
+                    (format!("{SUBDUED}❯{RESET}"), "", is_ticked)
                 }
                 (false, _) => (" ".to_string(), "", is_ticked),
             },
@@ -374,7 +374,7 @@ pub fn lines(
             let description = if choice.description.is_empty() {
                 String::new()
             } else {
-                format!("  {DIM}{}", choice.description)
+                format!("  {SUBDUED}{}", choice.description)
             };
             format!("{start}{}{RESET}{description}", choice.label)
         })

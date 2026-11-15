@@ -12,7 +12,7 @@ const LEVEL_BOUNDS: [f64; 3] = [0.5, 0.75, 0.9];
 /// The number of bounds passed from which a level is near its end.
 const NEAR_BOUNDS_PASSED: usize = 2;
 
-use crate::style::{ORANGE, RED};
+use crate::style::{ATTENTION, FAILED_OR_REMOVED};
 
 /// How much of a limit the account used.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -35,8 +35,8 @@ impl Level {
     pub fn color(self) -> Option<&'static str> {
         match self {
             Level::Below(passed) if passed < NEAR_BOUNDS_PASSED => None,
-            Level::Below(_) => Some(ORANGE),
-            Level::Reached => Some(RED),
+            Level::Below(_) => Some(ATTENTION),
+            Level::Reached => Some(FAILED_OR_REMOVED),
         }
     }
 }

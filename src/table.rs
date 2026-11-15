@@ -3,7 +3,7 @@
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::style::{BOLD, DIM, RESET};
+use crate::style::{RESET, STRONG, SUBDUED};
 
 // The narrowest divider cell Markdown reads as one
 const MIN_COLUMN_WIDTH: usize = 3;
@@ -60,13 +60,13 @@ impl Table {
     /// The lines of the laid-out table, header in bold and the body's cells as `color_cell`
     /// colors them.
     pub fn render(&self, color_cell: impl Fn(&str) -> String) -> Vec<String> {
-        let pipe = format!("{DIM}|{RESET}");
+        let pipe = format!("{SUBDUED}|{RESET}");
         let mut header = pipe.clone();
         for (column, cell) in self.header.iter().enumerate() {
-            header.push_str(&self.pad(column, cell, &format!("{BOLD}{cell}{RESET}")));
+            header.push_str(&self.pad(column, cell, &format!("{STRONG}{cell}{RESET}")));
             header.push_str(&pipe);
         }
-        let mut divider = format!("{DIM}|");
+        let mut divider = format!("{SUBDUED}|");
         for (alignment, width) in self.alignments.iter().zip(&self.widths) {
             let dashes = match alignment {
                 Alignment::Left => "-".repeat(*width),
@@ -157,8 +157,8 @@ mod tests {
         let colored = table.render(ToString::to_string).join("\n");
         colored
             .replace(RESET, "")
-            .replace(BOLD, "")
-            .replace(DIM, "")
+            .replace(STRONG, "")
+            .replace(SUBDUED, "")
     }
 
     #[test]

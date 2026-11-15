@@ -20,7 +20,10 @@ use crate::protocol::{
 };
 use crate::status::grouped;
 
-use crate::style::{BAR, BOLD, DIM, GREEN, MARK, ORANGE, RED, RESET, STATUS_COLOR};
+use crate::style::{
+    ATTENTION, DONE_OR_ADDED, FAILED_OR_REMOVED, MARK, RESET, STRONG, SUBDUED, SUBDUED_ON_BAR,
+    YOURS,
+};
 
 // Erases to the end of the row in the background color that is set, which fills the row's
 // rest with the bar without writing spaces into the text. Written after the text too, it fills
@@ -291,7 +294,7 @@ impl Output {
             TaskStatus::Stopped => ("✗", "stopped"),
         };
         self.push_detail(&format!(
-            "{outcome} {DIM}#{:02x} {}: {word}{RESET}",
+            "{outcome} {SUBDUED}#{:02x} {}: {word}{RESET}",
             call.tag, call.name
         ));
         self.write_full_view_line(&format!("  {}", end.summary));
@@ -350,7 +353,7 @@ impl Output {
         let after = after.map_or_else(String::new, |after| format!(" to {}", grouped(after)));
         self.begin(Section::Notice);
         self.push_detail(&format!(
-            "{DIM}compacted from {}{after} tokens{RESET}",
+            "{SUBDUED}compacted from {}{after} tokens{RESET}",
             grouped(before)
         ));
     }
@@ -364,7 +367,7 @@ impl Output {
         }
         self.begin(Section::Notice);
         self.push_detail(&format!(
-            "{ORANGE}Claude Code's {name} {part}s are not shown: Ctrl+O shows the first{RESET}"
+            "{ATTENTION}Claude Code's {name} {part}s are not shown: Ctrl+O shows the first{RESET}"
         ));
         self.write_full_view_line(&format!("  {line}"));
     }
@@ -447,7 +450,7 @@ impl Output {
         self.set_status(Status::Idle);
         if let Some(exit) = exit {
             self.begin(Section::Notice);
-            self.push_detail(&format!("{DIM}{exit}{RESET}"));
+            self.push_detail(&format!("{SUBDUED}{exit}{RESET}"));
         }
     }
 
@@ -472,7 +475,7 @@ impl Output {
         // What a subagent did shows in what it reports back to Claude, so its calls have no
         // result line to tie to
         let mark = if tool_use.is_subagent {
-            format!("  {BOLD}○")
+            format!("  {STRONG}○")
         } else {
             let tag = self.next_tag;
             self.next_tag = tag.wrapping_add(1);
@@ -483,7 +486,7 @@ impl Output {
                     tag,
                 },
             );
-            format!("{BOLD}○{RESET} {DIM}#{tag:02x}{RESET}{BOLD}")
+            format!("{STRONG}○{RESET} {SUBDUED}#{tag:02x}{RESET}{STRONG}")
         };
         self.begin(Section::Tools);
         // One line per call keeps the tool calls out of the way of the conversation. A call that
@@ -491,7 +494,7 @@ impl Output {
         let task_call = (self.background_calls).get(read_field(&tool_use.input, "task_id"));
         let summary = match task_call {
             Some(BackgroundCall { call, .. }) => Summary {
-                text: format!("{DIM}#{:02x}{RESET}", call.tag),
+                text: format!("{SUBDUED}#{:02x}{RESET}", call.tag),
                 is_input: false,
             },
             None => summarize(&tool_use.name, &tool_use.input),
@@ -505,12 +508,12 @@ impl Output {
         };
         let more = match summary_lines.count() {
             0 => String::new(),
-            count => format!(" {DIM}(+{count} lines){RESET}"),
+            count => format!(" {SUBDUED}(+{count} lines){RESET}"),
         };
         let changes = if tool_use.name == "Edit" {
             let removed = read_field(&tool_use.input, "old_string").lines().count();
             let added = read_field(&tool_use.input, "new_string").lines().count();
-            format!(" {RED}-{removed}{RESET} {GREEN}+{added}{RESET}")
+            format!(" {FAILED_OR_REMOVED}-{removed}{RESET} {DONE_OR_ADDED}+{added}{RESET}")
         } else {
             String::new()
         };
@@ -525,12 +528,14 @@ impl Output {
         for (field, value) in &tool_use.input {
             match value {
                 Value::String(text) => {
-                    self.write_full_view_line(&format!("{indent}{DIM}{field}:{RESET}"));
+                    self.write_full_view_line(&format!("{indent}{SUBDUED}{field}:{RESET}"));
                     for line in text.lines() {
                         self.write_full_view_line(&format!("{indent}  {line}"));
                     }
                 }
-                _ => self.write_full_view_line(&format!("{indent}{DIM}{field}:{RESET} {value}")),
+                _ => {
+                    self.write_full_view_line(&format!("{indent}{SUBDUED}{field}:{RESET} {value}"));
+                }
             }
         }
     }
@@ -558,7 +563,7 @@ impl Output {
             && task.is_backgrounded
         {
             self.push_detail(&format!(
-                "◌ {DIM}#{:02x} {}: running in background{RESET}",
+                "◌ {SUBDUED}#{:02x} {}: running in background{RESET}",
                 call.tag, call.name
             ));
             for line in text.lines() {
@@ -589,7 +594,7 @@ impl Output {
         let label = call.map_or_else(String::new, |call| {
             format!("#{:02x} {}: ", call.tag, call.name)
         });
-        self.push_noisy(&format!("{outcome} {DIM}{label}{first}{more}{RESET}"));
+        self.push_noisy(&format!("{outcome} {SUBDUED}{label}{first}{more}{RESET}"));
         for line in text.lines().skip(1) {
             self.write_full_view_line(&format!("  {line}"));
         }
@@ -621,7 +626,7 @@ impl Output {
         };
         if let Some(line) = line {
             self.begin(Section::Notice);
-            self.push_detail(&format!("{DIM}{line}{RESET}"));
+            self.push_detail(&format!("{SUBDUED}{line}{RESET}"));
         }
         // A message that waits for its reply still waits when an older turn ends
         if self.position != Position::In(Section::Message) {
@@ -634,7 +639,7 @@ impl Output {
         for error in errors {
             let file = error.file.as_deref().unwrap_or("a settings file");
             self.push_detail(&format!(
-                "{RED}Claude Code skipped {file}, so none of its settings apply: {} {}{RESET}",
+                "{FAILED_OR_REMOVED}Claude Code skipped {file}, so none of its settings apply: {} {}{RESET}",
                 error.path, error.message
             ));
         }
@@ -645,7 +650,7 @@ impl Output {
     pub fn show_unchecked_version(&mut self, version: &str) {
         self.begin(Section::Notice);
         self.push_detail(&format!(
-            "{ORANGE}Claude Code {version} runs, but {} is the one checked to work{RESET}",
+            "{ATTENTION}Claude Code {version} runs, but {} is the one checked to work{RESET}",
             crate::claude_code::VERSION
         ));
     }
@@ -655,14 +660,14 @@ impl Output {
     pub fn show_inexact_redraw(&mut self) {
         self.begin(Section::Notice);
         self.push_detail(&format!(
-            "{ORANGE}a resize in this terminal can leave copies of the label row and the box in the scrollback, which tmux 3.5 avoids{RESET}"
+            "{ATTENTION}a resize in this terminal can leave copies of the label row and the box in the scrollback, which tmux 3.5 avoids{RESET}"
         ));
     }
 
     pub fn show_paying_key(&mut self, key: &str) {
         self.begin(Section::Notice);
         self.push_detail(&format!(
-            "{ORANGE}{key} pays for this session, not the subscription{RESET}"
+            "{ATTENTION}{key} pays for this session, not the subscription{RESET}"
         ));
     }
 
@@ -698,7 +703,7 @@ impl Output {
             }
             Level::Notice => text
                 .lines()
-                .map(|line| format!("{DIM}{line}{RESET}"))
+                .map(|line| format!("{SUBDUED}{line}{RESET}"))
                 .collect(),
             Level::Suggestion | Level::Warning => {
                 let name = if level == Level::Warning {
@@ -709,8 +714,8 @@ impl Output {
                 text.lines()
                     .enumerate()
                     .map(|(index, line)| match index {
-                        0 => format!("{ORANGE}{name}: {line}{RESET}"),
-                        _ => format!("{ORANGE}{line}{RESET}"),
+                        0 => format!("{ATTENTION}{name}: {line}{RESET}"),
+                        _ => format!("{ATTENTION}{line}{RESET}"),
                     })
                     .collect()
             }
@@ -723,7 +728,7 @@ impl Output {
 
     pub fn show_error(&mut self, error: &str) {
         self.begin(Section::Notice);
-        self.push_detail(&format!("{RED}{error}{RESET}"));
+        self.push_detail(&format!("{FAILED_OR_REMOVED}{error}{RESET}"));
     }
 
     /// Shows a line of Claude Code's error output. Claude's text has nothing that names it, so
@@ -746,7 +751,9 @@ impl Output {
     /// tag of an API error, so each line is red, as a failure.
     fn push_stderr(&mut self, line: &str) {
         self.begin(Section::Notice);
-        self.push_detail(&format!("{DIM}stderr │{RESET} {RED}{line}{RESET}"));
+        self.push_detail(&format!(
+            "{SUBDUED}stderr │{RESET} {FAILED_OR_REMOVED}{line}{RESET}"
+        ));
     }
 
     /// Sets what Claude does. Once Claude stops writing, the lines of error output that waited
@@ -875,12 +882,16 @@ impl Output {
 /// A line of what the user did, like a command or a clear, on the bar, where the user's lines
 /// are, in the style of the label row's state. Only the user's lines are on the bar.
 pub fn user_line(what: &str) -> String {
-    format!("{}{} {STATUS_COLOR}{what}{RESET}", start_bar_row(), marks())
+    format!(
+        "{}{} {SUBDUED_ON_BAR}{what}{RESET}",
+        start_bar_row(),
+        marks()
+    )
 }
 
 /// The start of a row on the bar, which fills the whole row.
 pub fn start_bar_row() -> String {
-    format!("{BAR}{FILL_ROW}")
+    format!("{YOURS}{FILL_ROW}")
 }
 
 /// The marks in front of a message, on a row of their own.
@@ -986,17 +997,17 @@ pub fn markdown_lines(markdown: &str) -> Vec<String> {
 /// view numbers them.
 pub fn question_lines(question: &Question) -> Vec<String> {
     let mut lines = vec![format!(
-        "{BOLD}{}{RESET} {}",
+        "{STRONG}{}{RESET} {}",
         question.header, question.text
     )];
     for (number, choice) in (1..).zip(&question.options) {
         lines.push(format!(
-            "  {number}. {} {DIM}{}{RESET}",
+            "  {number}. {} {SUBDUED}{}{RESET}",
             choice.label, choice.description
         ));
         if let Some(preview) = &choice.preview {
             for line in preview.lines() {
-                lines.push(format!("     {DIM}{line}{RESET}"));
+                lines.push(format!("     {SUBDUED}{line}{RESET}"));
             }
         }
     }
@@ -1006,7 +1017,7 @@ pub fn question_lines(question: &Question) -> Vec<String> {
 /// The question in front of an answer, on the bar.
 pub fn answer_label(question: &str) -> String {
     let bar = start_bar_row();
-    format!("{bar}{BOLD}{question}{RESET}{bar} {MARK}›{RESET}{bar} ")
+    format!("{bar}{STRONG}{question}{RESET}{bar} {MARK}›{RESET}{bar} ")
 }
 
 /// What sums up a call on its line.
@@ -1096,7 +1107,10 @@ mod tests {
                 "Two.".to_string()
             ]
         );
-        assert_eq!(lines[5], format!("{DIM}stderr │{RESET} {RED}Failed{RESET}"));
+        assert_eq!(
+            lines[5],
+            format!("{SUBDUED}stderr │{RESET} {FAILED_OR_REMOVED}Failed{RESET}")
+        );
     }
 
     #[test]
@@ -1120,7 +1134,7 @@ mod tests {
                 reply_mark(),
                 "Hel".to_string(),
                 String::new(),
-                format!("{RED}Failed{RESET}")
+                format!("{FAILED_OR_REMOVED}Failed{RESET}")
             ]
         );
     }
@@ -1262,8 +1276,8 @@ mod tests {
         assert_eq!(
             headers,
             [
-                format!("{BOLD}Database{RESET} Which database?"),
-                format!("{BOLD}Checks{RESET} Which checks?"),
+                format!("{STRONG}Database{RESET} Which database?"),
+                format!("{STRONG}Checks{RESET} Which checks?"),
             ]
         );
     }
@@ -1284,10 +1298,10 @@ mod tests {
         assert_eq!(
             lines[2..],
             [
-                format!("  {DIM}command:{RESET}"),
+                format!("  {SUBDUED}command:{RESET}"),
                 "    cd a".to_string(),
                 "    make".to_string(),
-                format!("  {DIM}timeout:{RESET} 5"),
+                format!("  {SUBDUED}timeout:{RESET} 5"),
             ]
         );
     }
@@ -1303,15 +1317,15 @@ mod tests {
         assert_eq!(
             lines[4..],
             [
-                format!("✓ {DIM}#00 Read: one (+1 lines){RESET}"),
+                format!("✓ {SUBDUED}#00 Read: one (+1 lines){RESET}"),
                 "  two".to_string(),
                 format!(
-                    "{BOLD}○{RESET} {DIM}#01{RESET}{BOLD} Read{RESET} {}",
+                    "{STRONG}○{RESET} {SUBDUED}#01{RESET}{STRONG} Read{RESET} {}",
                     code_span("b.txt")
                 ),
-                format!("  {DIM}file_path:{RESET}"),
+                format!("  {SUBDUED}file_path:{RESET}"),
                 "    b.txt".to_string(),
-                format!("✓ {DIM}#01 Read: three{RESET}"),
+                format!("✓ {SUBDUED}#01 Read: three{RESET}"),
             ]
         );
     }
@@ -1333,20 +1347,20 @@ mod tests {
     #[test]
     fn the_end_kept_starts_with_the_colors_in_effect_there() {
         assert_eq!(
-            cut(&format!("{DIM}abcdef"), columns(4)),
-            format!("{DIM}ab{RESET}{DIM}…{RESET}{DIM}f")
+            cut(&format!("{SUBDUED}abcdef"), columns(4)),
+            format!("{SUBDUED}ab{RESET}{SUBDUED}…{RESET}{SUBDUED}f")
         );
         assert_eq!(
-            cut(&format!("{BOLD}ab{RESET}cdefgh"), columns(4)),
-            format!("{BOLD}ab{RESET}…{RESET}h")
+            cut(&format!("{STRONG}ab{RESET}cdefgh"), columns(4)),
+            format!("{STRONG}ab{RESET}…{RESET}h")
         );
     }
 
     #[test]
     fn the_ellipsis_takes_the_colors_of_the_text_it_replaces() {
         assert_eq!(
-            cut(&format!("ab{DIM}cdefgh"), columns(4)),
-            format!("ab{RESET}{DIM}…{RESET}{DIM}h")
+            cut(&format!("ab{SUBDUED}cdefgh"), columns(4)),
+            format!("ab{RESET}{SUBDUED}…{RESET}{SUBDUED}h")
         );
     }
 
@@ -1365,7 +1379,7 @@ mod tests {
             screen = output.take_lines();
         });
         let call = format!(
-            "{BOLD}○{RESET} {DIM}#00{RESET}{BOLD} Read{RESET} {}",
+            "{STRONG}○{RESET} {SUBDUED}#00{RESET}{STRONG} Read{RESET} {}",
             code_span(&path)
         );
         assert_eq!(
@@ -1402,7 +1416,7 @@ mod tests {
         output.show_error(&long);
         output.show_answer("Q", &long);
         let lines = output.take_lines();
-        assert_eq!(lines[1], format!("{RED}{long}{RESET}"));
+        assert_eq!(lines[1], format!("{FAILED_OR_REMOVED}{long}{RESET}"));
         assert!(lines[2].contains(&long));
     }
 
@@ -1442,11 +1456,11 @@ mod tests {
         assert_eq!(
             lines[2],
             format!(
-                "{BOLD}○{RESET} {DIM}#01{RESET}{BOLD} Read{RESET} {}",
+                "{STRONG}○{RESET} {SUBDUED}#01{RESET}{STRONG} Read{RESET} {}",
                 code_span("b.txt")
             )
         );
-        assert_eq!(lines[3], format!("✓ {DIM}#01 Read: b{RESET}"));
+        assert_eq!(lines[3], format!("✓ {SUBDUED}#01 Read: b{RESET}"));
     }
 
     /// Shows `lines` as Claude Code wrote them, by the events that claudio reads of tasks and
@@ -1477,7 +1491,7 @@ mod tests {
     }
 
     fn running_in_background(tag: &str) -> String {
-        format!("◌ {DIM}#{tag} Bash: running in background{RESET}")
+        format!("◌ {SUBDUED}#{tag} Bash: running in background{RESET}")
     }
 
     #[test]
@@ -1490,7 +1504,7 @@ mod tests {
                 lines[2..],
                 [
                     running_in_background("00"),
-                    format!("{outcome} {DIM}#00 Bash: {word}{RESET}"),
+                    format!("{outcome} {SUBDUED}#00 Bash: {word}{RESET}"),
                 ]
             );
         }
@@ -1501,7 +1515,7 @@ mod tests {
         let mut output = output_after_message();
         let lines = show_lines(&mut output, &contract::moved_call());
         assert_eq!(lines[2], running_in_background("00"));
-        assert_eq!(lines[3], format!("✓ {DIM}#00 Bash: completed{RESET}"));
+        assert_eq!(lines[3], format!("✓ {SUBDUED}#00 Bash: completed{RESET}"));
     }
 
     #[test]
@@ -1515,7 +1529,7 @@ mod tests {
             lines[2..],
             [
                 running_in_background("00"),
-                format!("✓ {DIM}#00 Bash: completed{RESET}"),
+                format!("✓ {SUBDUED}#00 Bash: completed{RESET}"),
             ]
         );
         assert!(output.background_calls.is_empty());
@@ -1547,10 +1561,12 @@ mod tests {
         let lines = show_lines(&mut output, &contract::stopped_background_task());
         assert_eq!(
             lines[3],
-            format!("{BOLD}○{RESET} {DIM}#01{RESET}{BOLD} TaskStop{RESET} {DIM}#00{RESET}")
+            format!(
+                "{STRONG}○{RESET} {SUBDUED}#01{RESET}{STRONG} TaskStop{RESET} {SUBDUED}#00{RESET}"
+            )
         );
-        assert_eq!(lines[4], format!("✗ {DIM}#00 Bash: stopped{RESET}"));
-        assert!(lines[5].starts_with(&format!("✓ {DIM}#01 TaskStop: ")));
+        assert_eq!(lines[4], format!("✗ {SUBDUED}#00 Bash: stopped{RESET}"));
+        assert!(lines[5].starts_with(&format!("✓ {SUBDUED}#01 TaskStop: ")));
     }
 
     #[test]
@@ -1562,7 +1578,10 @@ mod tests {
         let result = json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "c", "content": "", "is_error": false}]}, "parent_tool_use_id": null});
         let lines = [call, started, ended, result].map(|line| line.to_string());
         let lines = show_lines(&mut output, &lines);
-        assert_eq!(lines[2..], [format!("✓ {DIM}#00 Bash: (no output){RESET}")]);
+        assert_eq!(
+            lines[2..],
+            [format!("✓ {SUBDUED}#00 Bash: (no output){RESET}")]
+        );
         assert!(output.call_tasks.is_empty());
     }
 
@@ -1589,7 +1608,7 @@ mod tests {
         assert_eq!(
             lines.last().expect("the call's line"),
             &format!(
-                "{BOLD}○{RESET} {DIM}#00{RESET}{BOLD} Bash{RESET} {} {DIM}(+2 lines){RESET}",
+                "{STRONG}○{RESET} {SUBDUED}#00{RESET}{STRONG} Bash{RESET} {} {SUBDUED}(+2 lines){RESET}",
                 code_span("cd a")
             )
         );
@@ -1605,7 +1624,7 @@ mod tests {
         let lines = output.take_lines();
         assert_eq!(
             lines.last().expect("the call's line"),
-            &format!("{BOLD}○{RESET} {DIM}#00{RESET}{BOLD} Bash{RESET} Run the tests")
+            &format!("{STRONG}○{RESET} {SUBDUED}#00{RESET}{STRONG} Bash{RESET} Run the tests")
         );
     }
 
@@ -1628,7 +1647,7 @@ mod tests {
         assert_eq!(
             lines.last().expect("the call's line"),
             &format!(
-                "{BOLD}○{RESET} {DIM}#00{RESET}{BOLD} TodoWrite{RESET} {}",
+                "{STRONG}○{RESET} {SUBDUED}#00{RESET}{STRONG} TodoWrite{RESET} {}",
                 code_span(r#"{"todos":[]}"#)
             )
         );
@@ -1643,7 +1662,7 @@ mod tests {
         assert_eq!(
             lines.last().expect("the call's line"),
             &format!(
-                "{BOLD}○{RESET} {DIM}#00{RESET}{BOLD} Edit{RESET} {} {RED}-2{RESET} {GREEN}+1{RESET}",
+                "{STRONG}○{RESET} {SUBDUED}#00{RESET}{STRONG} Edit{RESET} {} {FAILED_OR_REMOVED}-2{RESET} {DONE_OR_ADDED}+1{RESET}",
                 code_span("a.rs")
             )
         );
@@ -1685,7 +1704,7 @@ mod tests {
             [
                 user_line("/compact"),
                 reply_mark(),
-                format!("{DIM}compacted from 19,812 to 6,578 tokens{RESET}")
+                format!("{SUBDUED}compacted from 19,812 to 6,578 tokens{RESET}")
             ]
         );
     }
@@ -1723,7 +1742,7 @@ mod tests {
         let lines = output.take_lines();
         assert_eq!(
             lines[1],
-            format!("{RED}Stop hook failed with exit code 1{RESET}")
+            format!("{FAILED_OR_REMOVED}Stop hook failed with exit code 1{RESET}")
         );
         assert!(lines[2].contains("stderr │") && lines[2].contains("no tmux server"));
         assert_eq!(lines.len(), 3);
@@ -1737,8 +1756,8 @@ mod tests {
         output.show_notice("loud", Level::Warning);
         let lines = output.take_lines();
         assert!(!lines.join("").contains("in the full view only"));
-        assert_eq!(lines[1], format!("{DIM}quiet{RESET}"));
-        assert_eq!(lines[2], format!("{ORANGE}warning: loud{RESET}"));
+        assert_eq!(lines[1], format!("{SUBDUED}quiet{RESET}"));
+        assert_eq!(lines[2], format!("{ATTENTION}warning: loud{RESET}"));
     }
 
     #[test]

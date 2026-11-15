@@ -7,7 +7,8 @@
 //! input, and their results, then two text blocks in a row, and the message `ask` with two
 //! questions of `AskUserQuestion`'s, whose turn ends once they are answered: one of one choice
 //! whose options have previews, and one of several choices. The message `ask one` asks only the
-//! first. The messages of the checks of a slow permission check and of tasks get those checks'
+//! first. The message `ask guarded` asks to allow a call that Claude Code deems dangerous. The
+//! messages of the checks of a slow permission check and of tasks get those checks'
 //! lines, and an interrupt, send now's too, gets the rest of a call that waits for one.
 //! `/clear` starts a new session, and `/compact` and `/cost` answer as Claude Code does.
 //! `FAKE_DELAY` is how many seconds each answer waits before it starts, none when unset.
@@ -102,6 +103,7 @@ impl Fake {
         match text.trim() {
             "ask" => return send(&ask(2).to_string()),
             "ask one" => return send(&ask(1).to_string()),
+            "ask guarded" => return send(&ask_guarded().to_string()),
             contract::SLOW_PERMISSION_CHECK_MESSAGE => {
                 return self.send_turn(&contract::slow_permission_check());
             }
@@ -372,6 +374,24 @@ fn ask(count: usize) -> Value {
             "tool_name": "AskUserQuestion",
             "tool_use_id": "fake-ask-call",
             "input": {"questions": &questions[..count]},
+        },
+    })
+}
+
+/// The permission of the message `ask guarded`: a call that Claude Code deems dangerous, so
+/// that one key must not allow it.
+fn ask_guarded() -> Value {
+    json!({
+        "type": "control_request",
+        "request_id": ASK_REQUEST_ID,
+        "request": {
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "display_name": "Bash",
+            "tool_use_id": "fake-guarded-call",
+            "input": {"command": "rm -rf build", "description": "Delete the build directory"},
+            "decision_reason": "rm removes files",
+            "default_to_no": true,
         },
     })
 }

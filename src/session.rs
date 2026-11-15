@@ -21,7 +21,7 @@ use crate::{Shared, lock};
 
 /// What Claude Code asks of the main thread.
 pub enum Input {
-    Ask(Ask),
+    Ask(Box<Ask>),
     Unsupported {
         request_id: String,
         subtype: String,
@@ -83,17 +83,12 @@ impl<'a> Conversation<'a> {
         let mut shown: Option<usize> = None;
         loop {
             match self.session.next_input() {
-                Some(Input::Ask(ask)) if matches!(ask.kind, AskKind::Permission) => {
-                    lock(&self.session.shared).output.show_error(&format!(
-                        "refused {}: only auto mode works, which ~/.claude/settings.json sets",
-                        ask.tool_name
-                    ));
-                    self.reply(&ask, Answer::Deny)?;
-                    continue;
-                }
                 Some(Input::Ask(ask)) => {
-                    let full_view_lines = lock(&self.session.shared).output.show_ask(&ask);
-                    questions.add(ask, full_view_lines);
+                    let mut shared = lock(&self.session.shared);
+                    let agent = shared.output.agent_of(&ask.tool_use_id);
+                    let full_view_lines = shared.output.show_ask(&ask);
+                    drop(shared);
+                    questions.add(*ask, agent, full_view_lines);
                     continue;
                 }
                 Some(Input::Unsupported {
@@ -250,7 +245,7 @@ impl<'a> Conversation<'a> {
             }
             // Claude Code takes or refuses a call's questions together
             Outcome::Stop(_) => {
-                let ask = questions.remove_first();
+                let ask = questions.remove_shown();
                 self.reply(&ask, Answer::Deny)?;
                 questions.first()
             }
@@ -274,17 +269,29 @@ impl<'a> Conversation<'a> {
         Ok(Some(Ending { session, claude }))
     }
 
-    /// Tells Claude Code the answer to what it asked.
+    /// Tells Claude Code the answer to what it asked. A plan or a permission adds the decision
+    /// to the conversation, which a call's questions do with their answers.
     fn reply(&mut self, ask: &Ask, answer: Answer) -> Result<(), String> {
+        let mut shared = lock(&self.session.shared);
+        let output = &mut shared.output;
+        let is_decision = !matches!(ask.kind, AskKind::Questions(_));
         // The result of a refused tool repeats the refusal
-        match answer {
+        match &answer {
             Answer::Deny => {
-                let output = &mut lock(&self.session.shared).output;
                 output.hide_result(&ask.tool_use_id);
                 output.note_interrupt(Interruption::Stop);
+                if is_decision {
+                    output.show_decision(ask, "refused", None);
+                }
             }
+            Answer::Explain { reason } => {
+                output.hide_result(&ask.tool_use_id);
+                output.show_decision(ask, "refused", Some(reason));
+            }
+            Answer::Allow { .. } if is_decision => output.show_decision(ask, "allowed", None),
             Answer::Allow { .. } => {}
         }
+        drop(shared);
         self.send(&Command::Answer(ask, answer))
     }
 

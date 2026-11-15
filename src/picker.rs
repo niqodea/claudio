@@ -1,12 +1,15 @@
 //! A question's options and the user's own answer, as the question view shows them, and what the
 //! keys do to them. The options are numbered from 1, and below them an item marked `>` stands for
-//! the user's own answer, which the user writes in the input box. The keys that pick an option
-//! pick that item too, which takes the cursor into the box. There, Enter finishes the answer, or
-//! on a question of several options ticks it as one more, and Esc in normal mode leaves the box.
+//! the user's own answer, which the user writes in the input box. An option's number, or its
+//! letter, moves the cursor to it, and only Enter answers, as AGENTS.md's rule for keys says.
+//! Enter on the `>` item, or the `>` key, takes the cursor into the box. There, Enter finishes the
+//! answer, or on a question of several options ticks it as one more, and Esc in normal mode
+//! leaves the box.
 //!
 //! `]` and `[` move to the next and previous question, as they move between tabs in lazygit, and
 //! the home row's `a`, `s`, `d` and `f` go straight to the first four, which letters name apart
-//! from the options' numbers.
+//! from the options' numbers. `}` and `{`, and `q`, `w`, `e` and `r` on the row above, do the same
+//! for the requests that wait, each a call's questions, a plan or a permission.
 //! Ref: <https://coreyt.github.io/monospace-design-tui/standard/keyboard/>, on `[`/`]` for tabs
 
 use std::collections::BTreeSet;
@@ -15,7 +18,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::keys::Input;
 use crate::render::markdown_lines;
-use crate::style::{DONE_OR_ADDED, MARK, RESET, STRONG, SUBDUED};
+use crate::style::{ATTENTION, DONE_OR_ADDED, MARK, RESET, STRONG, SUBDUED};
 
 /// The key of the user's own answer, and its mark, the same on every question.
 pub const OWN_KEY: char = '>';
@@ -28,6 +31,16 @@ pub const QUESTION_KEYS: [char; 4] = ['a', 's', 'd', 'f'];
 /// The name of the batch's question at `index`.
 pub fn question_name(index: usize) -> char {
     QUESTION_KEYS.get(index).copied().unwrap_or('·')
+}
+
+/// The keys that go to the first four requests that wait, which also name them, on the row above
+/// the questions' keys, as requests hold questions. A request after the fourth has no key, and
+/// `}` reaches it.
+pub const REQUEST_KEYS: [char; 4] = ['q', 'w', 'e', 'r'];
+
+/// The name of the request at `index`, none after the fourth.
+pub fn request_name(index: usize) -> Option<char> {
+    REQUEST_KEYS.get(index).copied()
 }
 
 /// The most options Claude Code allows on a question, as of Claude Code 2.1.321, which checks a
@@ -48,6 +61,26 @@ pub struct Choice {
     pub label: String,
     pub description: String,
     pub preview: Option<String>,
+    /// The letter that names the option and moves the cursor to it, in place of its number, like
+    /// `y` and `n` for a decision, as command-line prompts answer a yes-or-no question.
+    pub key: Option<char>,
+    /// What choosing the option risks, like allowing a dangerous call, which the label row
+    /// names while Enter waits for its second press. The option shows in the color of
+    /// attention, and its label says the risk too.
+    pub risk: Option<String>,
+}
+
+impl Choice {
+    /// An option named by its number.
+    pub fn new(label: &str, description: &str, preview: Option<String>) -> Self {
+        Choice {
+            label: label.to_string(),
+            description: description.to_string(),
+            preview,
+            key: None,
+            risk: None,
+        }
+    }
 }
 
 /// The form of the answer a question takes.
@@ -109,24 +142,31 @@ pub enum Effect {
     Go(Move),
 }
 
-/// Where the user moves among a batch's questions.
+/// Where the user moves among a batch's questions, or among the requests that wait.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Move {
     Next,
     Previous,
     /// To the question at this index, from 0.
     To(usize),
+    NextRequest,
+    PreviousRequest,
+    /// To the request at this index, from 0.
+    ToRequest(usize),
 }
 
-/// Where `key` moves among the questions: `]` and `[`, and the questions' own keys.
+/// Where `key` moves among the questions and the requests: `]` and `[`, `}` and `{`, and the
+/// questions' and the requests' own keys.
 fn move_of(key: &KeyEvent) -> Option<Move> {
+    let position = |keys: &[char], name: char| keys.iter().position(|&key| key == name);
     match key.code {
         KeyCode::Char(']') => Some(Move::Next),
         KeyCode::Char('[') => Some(Move::Previous),
-        KeyCode::Char(name) => QUESTION_KEYS
-            .iter()
-            .position(|&key| key == name)
-            .map(Move::To),
+        KeyCode::Char('}') => Some(Move::NextRequest),
+        KeyCode::Char('{') => Some(Move::PreviousRequest),
+        KeyCode::Char(name) => position(&QUESTION_KEYS, name)
+            .map(Move::To)
+            .or_else(|| position(&REQUEST_KEYS, name).map(Move::ToRequest)),
         _ => None,
     }
 }
@@ -146,9 +186,15 @@ impl Draft {
 }
 
 impl Pick {
-    /// Acts on `key`, Enter among them, on a question of `choices` options that takes `form`,
-    /// with `input` the state of the box.
-    pub fn press(&mut self, key: &KeyEvent, choices: usize, form: Form, input: Input) -> Effect {
+    /// Acts on `key`, Enter among them, on a question of `choices` that takes `form`, with
+    /// `input` the state of the box.
+    pub fn press(
+        &mut self,
+        key: &KeyEvent,
+        choices: &[Choice],
+        form: Form,
+        input: Input,
+    ) -> Effect {
         match self.cursor {
             Cursor::Writing => self.press_in_box(key, form, input),
             Cursor::Option(_) | Cursor::Own => self.press_on_list(key, choices, form),
@@ -225,11 +271,20 @@ impl Pick {
         }
     }
 
-    fn press_on_list(&mut self, key: &KeyEvent, choices: usize, form: Form) -> Effect {
+    fn press_on_list(&mut self, key: &KeyEvent, options: &[Choice], form: Form) -> Effect {
+        let choices = options.len();
+        if let KeyCode::Char(name) = key.code
+            && let Some(index) = options.iter().position(|choice| choice.key == Some(name))
+        {
+            self.cursor = Cursor::Option(index);
+            return Effect::Stay;
+        }
         if let Some(to) = move_of(key) {
             return Effect::Go(to);
         }
         let ticks = form != Form::One;
+        // Options named by letters take no numbers
+        let is_numbered = options.iter().all(|choice| choice.key.is_none());
         match (key.code, self.cursor, form) {
             (KeyCode::Down | KeyCode::Char('j'), _, _) => self.move_down(choices, form),
             (KeyCode::Up | KeyCode::Char('k'), _, _) => self.move_up(choices),
@@ -251,14 +306,14 @@ impl Pick {
             (KeyCode::Char(' '), Cursor::Own, Form::Several) => self.start_writing(),
             // The review's rows are named by the questions' keys, which go to them
             (KeyCode::Char('1'..='9'), _, Form::Review) => Effect::Stay,
-            (KeyCode::Char(digit @ '1'..='9'), _, _) => {
+            (KeyCode::Char(digit @ '1'..='9'), _, _) if is_numbered => {
                 let index = usize::from(digit as u8 - b'1');
                 if index >= choices {
                     return Effect::Stay;
                 }
                 self.cursor = Cursor::Option(index);
                 if !ticks {
-                    return Effect::Submit;
+                    return Effect::Stay;
                 }
                 if !self.ticked.remove(&index) {
                     self.ticked.insert(index);
@@ -281,6 +336,8 @@ impl Pick {
             (KeyCode::Esc, _) if input.is_idle => self.leave_box(),
             (KeyCode::Char(']'), _) if input.is_idle => Effect::Go(Move::Next),
             (KeyCode::Char('['), _) if input.is_idle => Effect::Go(Move::Previous),
+            (KeyCode::Char('}'), _) if input.is_idle => Effect::Go(Move::NextRequest),
+            (KeyCode::Char('{'), _) if input.is_idle => Effect::Go(Move::PreviousRequest),
             _ => Effect::Type,
         }
     }
@@ -361,10 +418,10 @@ pub fn lines(
         .iter()
         .enumerate()
         .map(|(index, choice)| {
-            let key = if form == Form::Review {
-                question_name(index).to_string()
-            } else {
-                (index + 1).to_string()
+            let key = match (form, choice.key) {
+                (Form::Review, _) => question_name(index).to_string(),
+                (_, Some(key)) => key.to_string(),
+                (_, None) => (index + 1).to_string(),
             };
             let start = start(
                 &format!("{key}."),
@@ -376,7 +433,12 @@ pub fn lines(
             } else {
                 format!("  {SUBDUED}{}", choice.description)
             };
-            format!("{start}{}{RESET}{description}", choice.label)
+            let risk = if choice.risk.is_some() && submitted.is_none() {
+                ATTENTION
+            } else {
+                ""
+            };
+            format!("{start}{risk}{}{RESET}{description}", choice.label)
         })
         .collect();
     if form == Form::Review {
@@ -405,7 +467,12 @@ pub fn preview(choices: &[Choice], pick: &Pick) -> Option<Preview> {
         Cursor::Own | Cursor::Writing => None,
     };
     Some(Preview {
-        title: focused.map(|(index, choice)| format!("{}. {}", index + 1, choice.label)),
+        title: focused.map(|(index, choice)| {
+            let key = choice
+                .key
+                .map_or_else(|| (index + 1).to_string(), String::from);
+            format!("{key}. {}", choice.label)
+        }),
         // Claude Code shows a preview as Markdown, which Claude then writes it in
         lines: markdown_lines(
             focused
@@ -455,13 +522,66 @@ mod tests {
         keys.chars()
             .map(|character| {
                 let key = KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE);
-                pick.press(&key, 3, form, IDLE)
+                pick.press(&key, &numbered(3), form, IDLE)
             })
             .collect()
     }
 
     fn press_code(pick: &mut Pick, form: Form, code: KeyCode, input: Input) -> Effect {
-        pick.press(&KeyEvent::new(code, KeyModifiers::NONE), 3, form, input)
+        pick.press(
+            &KeyEvent::new(code, KeyModifiers::NONE),
+            &numbered(3),
+            form,
+            input,
+        )
+    }
+
+    fn numbered(count: usize) -> Vec<Choice> {
+        (0..count).map(|_| Choice::new("", "", None)).collect()
+    }
+
+    fn decision() -> Vec<Choice> {
+        let keyed = |label: &str, key: char| Choice {
+            key: Some(key),
+            ..Choice::new(label, "", None)
+        };
+        vec![keyed("allow", 'y'), keyed("refuse", 'n')]
+    }
+
+    #[test]
+    fn a_letter_only_moves_to_its_option_and_enter_answers() {
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let mut pick = pick(Cursor::Option(1));
+        assert_eq!(
+            pick.press(&key(KeyCode::Char('y')), &decision(), Form::One, IDLE),
+            Effect::Stay
+        );
+        assert_eq!(pick.cursor, Cursor::Option(0));
+        // Letters name the options, so numbers move to none
+        assert_eq!(
+            pick.press(&key(KeyCode::Char('2')), &decision(), Form::One, IDLE),
+            Effect::Stay
+        );
+        assert_eq!(pick.cursor, Cursor::Option(0));
+        assert_eq!(
+            pick.press(&key(KeyCode::Enter), &decision(), Form::One, IDLE),
+            Effect::Submit
+        );
+        let (lines, _) = lines(&decision(), "", Form::One, &pick, None);
+        assert!(lines[1].contains("n. "));
+    }
+
+    #[test]
+    fn braces_and_qwer_move_between_requests() {
+        let mut pick = pick(Cursor::Option(0));
+        assert_eq!(
+            press(&mut pick, Form::One, "}{w"),
+            [
+                Effect::Go(Move::NextRequest),
+                Effect::Go(Move::PreviousRequest),
+                Effect::Go(Move::ToRequest(1))
+            ]
+        );
     }
 
     #[test]
@@ -476,9 +596,9 @@ mod tests {
     }
 
     #[test]
-    fn a_number_picks_its_option_or_ticks_it() {
+    fn a_number_only_moves_to_its_option_or_ticks_it() {
         let mut pick = pick(Cursor::Option(0));
-        assert_eq!(press(&mut pick, Form::One, "2"), [Effect::Submit]);
+        assert_eq!(press(&mut pick, Form::One, "2"), [Effect::Stay]);
         assert_eq!(pick.cursor, Cursor::Option(1));
         assert_eq!(press(&mut pick, Form::One, "9"), [Effect::Stay]);
         assert_eq!(press(&mut pick, Form::Several, "3 "), [Effect::Stay; 2]);
@@ -613,11 +733,7 @@ mod tests {
 
     #[test]
     fn a_question_with_any_preview_shows_the_preview_of_each_option() {
-        let choice = |preview: Option<&str>| Choice {
-            label: String::new(),
-            description: String::new(),
-            preview: preview.map(str::to_string),
-        };
+        let choice = |preview: Option<&str>| Choice::new("", "", preview.map(str::to_string));
         let choices = [choice(Some("a\nb\nc")), choice(None)];
         let first = preview(&choices, &pick(Cursor::Option(0))).expect("a preview");
         assert_eq!(first.title.as_deref(), Some("1. "));

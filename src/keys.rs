@@ -24,7 +24,7 @@ pub enum Phase {
     /// question instead.
     Writing { waiting: usize },
     /// Answers the question the question view shows.
-    Answering(View),
+    Answering(Box<View>),
     /// Has nothing more to say, while Claude finishes its work, which only Ctrl+C stops.
     Ending,
 }
@@ -36,14 +36,86 @@ impl Phase {
     }
 }
 
-/// What the question view shows: one of the questions that wait.
+/// The rows of the block under the rule, the same on every question and call, so that the rule
+/// and the question stay in place from one to the next.
+pub const BLOCK_ROWS: usize = 8;
+
+/// A part of the block under the rule, which takes `rows` rows: a call's field, its reason, or a
+/// question's text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Field {
+    /// What shows in front of the value.
+    pub mark: Mark,
+    /// The value, with its line breaks.
+    pub value: String,
+    pub tone: Tone,
+    pub rows: usize,
+}
+
+/// What shows in front of a field's value, in a column of the same width on every call of a
+/// tool, so that its values never move sideways.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Mark {
+    /// Nothing, as in front of a question's text.
+    None,
+    /// A sign that reads as what the value is, like `$` in front of a command, in a column of
+    /// two, in front of the value's first row, or of each of its rows on `every_row`, as a diff
+    /// marks its lines. Its tone is the field's, whatever the value: dim, or a diff's red or
+    /// green.
+    Sign {
+        sign: char,
+        every_row: bool,
+        tone: Tone,
+    },
+    /// The field's name, cut to a column of the same width on every tool, in front of a value of
+    /// one row.
+    Name(String),
+}
+
+/// How a field's value shows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Tone {
+    Plain,
+    /// A question's text.
+    Bold,
+    /// claudio's note in place of a value, like `not given`, dim as all that stays in the
+    /// background.
+    Note,
+    /// Claude's own words on a call, like the description of a command, dim as a comment.
+    Comment,
+    /// The text an edit takes out, in red, as in a diff.
+    Removed,
+    /// The text an edit puts in, in green, as in a diff.
+    Added,
+}
+
+/// What the question view shows: one of the questions that wait, in one of the requests that
+/// wait, a call's questions, a plan or a permission.
 #[derive(Clone)]
 pub struct View {
     /// The question's header, which the label row shows.
     pub label: String,
-    /// The question's text, or the plan, above the options.
+    /// The request's name, which the rule above the question shows: its kind, and the subagent
+    /// that asked.
+    pub title: String,
+    /// The request's place among the requests, like ` · 2/3`, when more than one waits, which
+    /// the rule shows whole after the title.
+    pub place: String,
+    /// What Ctrl+C refuses: the request shown, like `the call` or `2 questions`.
+    pub refusal: String,
+    /// Which request it is, from 0.
+    pub request_index: usize,
+    /// Whether each request that waits has all its questions submitted.
+    pub requests: Vec<bool>,
+    /// The plan asked about, which shows from the top of the screen, under the rule, so the
+    /// question and the rule stay in place whatever its length. None on anything else.
+    pub details: Vec<String>,
+    /// What the block of `BLOCK_ROWS` rows under the rule shows: a question's text, or a call's
+    /// reason and fields. None on a plan.
+    pub fields: Vec<Field>,
+    /// The lines right above the options, like the question that asks to allow a call.
     pub lines: Vec<String>,
-    /// The question's options, or a plan's approval and refusal.
+    /// The question's options, or the approval and the refusal of a call or a plan.
     pub choices: Vec<Choice>,
     /// What the item of the user's own answer says.
     pub own_label: String,
@@ -151,9 +223,9 @@ pub fn loss(phase: &Phase, action: Action, stakes: Stakes) -> Option<String> {
         (Phase::Writing { waiting }, Action::Session(SessionKey::Stop)) if *waiting > 0 => {
             Some(format!("refuses {}", questions(*waiting)))
         }
-        // The question view refuses the call it shows, with each of its questions
+        // The question view refuses the request it shows, with each of its questions
         (Phase::Answering(view), Action::Session(SessionKey::Stop)) => {
-            Some(format!("refuses {}", questions(view.progress.len())))
+            Some(format!("refuses {}", view.refusal))
         }
         // Claude Code stops its background tasks too, and exits
         (Phase::Ending, Action::Session(SessionKey::Stop)) => Some("stops claude".to_string()),
@@ -195,7 +267,7 @@ pub fn loss(phase: &Phase, action: Action, stakes: Stakes) -> Option<String> {
     }
 }
 
-fn questions(count: usize) -> String {
+pub fn questions(count: usize) -> String {
     if count == 1 {
         "the question".to_string()
     } else {
@@ -290,8 +362,15 @@ mod tests {
     }
 
     fn answering() -> Phase {
-        Phase::Answering(View {
+        Phase::Answering(Box::new(View {
             label: "plan".to_string(),
+            title: "Questions".to_string(),
+            place: String::new(),
+            refusal: "2 questions".to_string(),
+            request_index: 0,
+            requests: vec![false],
+            details: vec![],
+            fields: vec![],
             lines: vec![],
             choices: vec![],
             own_label: String::new(),
@@ -301,7 +380,7 @@ mod tests {
             progress: vec![false, false],
             is_submitted: false,
             sends_at_once: false,
-        })
+        }))
     }
 
     #[test]

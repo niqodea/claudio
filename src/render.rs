@@ -99,6 +99,12 @@ pub struct Output {
     waiting_stderr: Vec<String>,
     /// The tasks that run in the background, as Claude Code last told them.
     background_tasks: Vec<Task>,
+    /// The description of each `Agent` call, by its id, until its result, which names the
+    /// subagent it started.
+    agents: HashMap<String, String>,
+    /// The `Agent` call that started the subagent making each call, by the call's id, until its
+    /// result.
+    call_agents: HashMap<String, String>,
 }
 
 /// The task a tool use started, until the call's result.
@@ -215,6 +221,8 @@ impl Output {
             highlighter: Highlighter::new(),
             waiting_stderr: Vec::new(),
             background_tasks: Vec::new(),
+            agents: HashMap::new(),
+            call_agents: HashMap::new(),
         }
     }
 
@@ -380,6 +388,41 @@ impl Output {
         ));
     }
 
+    /// The subagent that makes the tool use with `tool_use_id`, as the description of the
+    /// `Agent` call that started it, none for Claude itself or a subagent whose call claudio did
+    /// not see.
+    pub fn agent_of(&self, tool_use_id: &str) -> Option<String> {
+        let agent_call = self.call_agents.get(tool_use_id)?;
+        self.agents.get(agent_call).cloned()
+    }
+
+    /// Shows the user's decision on a tool use that Claude Code asked about, like `allowed #01
+    /// Bash Run the tests`, which names the call by its tag, and by its summary, since the tag of
+    /// a subagent's call is missing and the call's line can be far above. The user's `reason`
+    /// follows, when they gave one.
+    pub fn show_decision(&mut self, ask: &Ask, decision: &str, reason: Option<&str>) {
+        let tag = (self.pending_calls.get(&ask.tool_use_id))
+            .map_or_else(String::new, |call| format!("#{:02x} ", call.tag));
+        let summary = summarize(&ask.tool_name, &ask.input);
+        let first = summary.text.lines().next().unwrap_or_default();
+        let line = format!(
+            "{}{decision} {tag}{} {first}",
+            start_bar_row(),
+            ask.tool_name
+        );
+        self.write_break();
+        self.end_claude_line();
+        self.text
+            .push_str(&cut_middle(&line, self.max_noisy_line_columns));
+        self.text.push_str(FILL_ROW);
+        self.text.push_str(RESET);
+        self.text.push('\n');
+        self.write_full_view_line(&format!("{line}{RESET}"));
+        if let Some(reason) = reason {
+            self.show_answer("reason", reason);
+        }
+    }
+
     /// Notes that the user stopped the turn, whose end then says so in the user's terms.
     pub fn note_interrupt(&mut self, interruption: Interruption) {
         self.interruption = Some(interruption);
@@ -461,7 +504,14 @@ impl Output {
     }
 
     pub fn show_tool_use(&mut self, tool_use: &ToolUse) {
-        if !tool_use.is_subagent {
+        if tool_use.name == "Agent" {
+            let description = read_field(&tool_use.input, "description");
+            (self.agents).insert(tool_use.id.clone(), description.to_string());
+        }
+        if let Some(agent_call) = &tool_use.agent_call {
+            (self.call_agents).insert(tool_use.id.clone(), agent_call.clone());
+        }
+        if !tool_use.is_subagent() {
             self.set_status(Status::Running {
                 tool: tool_use.name.clone(),
                 call: tool_use.id.clone(),
@@ -474,7 +524,7 @@ impl Output {
         }
         // What a subagent did shows in what it reports back to Claude, so its calls have no
         // result line to tie to
-        let mark = if tool_use.is_subagent {
+        let mark = if tool_use.is_subagent() {
             format!("  {STRONG}○")
         } else {
             let tag = self.next_tag;
@@ -524,18 +574,16 @@ impl Output {
         } else {
             self.push_detail(&line);
         }
-        let indent = if tool_use.is_subagent { "    " } else { "  " };
+        let indent = if tool_use.is_subagent() { "    " } else { "  " };
         for (field, value) in &tool_use.input {
-            match value {
-                Value::String(text) => {
-                    self.write_full_view_line(&format!("{indent}{SUBDUED}{field}:{RESET}"));
-                    for line in text.lines() {
-                        self.write_full_view_line(&format!("{indent}  {line}"));
-                    }
+            if let Value::String(text) = value {
+                self.write_full_view_line(&format!("{indent}{SUBDUED}{field}:{RESET}"));
+                for line in text.lines() {
+                    self.write_full_view_line(&format!("{indent}  {line}"));
                 }
-                _ => {
-                    self.write_full_view_line(&format!("{indent}{SUBDUED}{field}:{RESET} {value}"));
-                }
+            } else {
+                let line = format!("{indent}{SUBDUED}{field}:{RESET} {value}");
+                self.write_full_view_line(&line);
             }
         }
     }
@@ -544,6 +592,8 @@ impl Output {
         if !result.is_subagent {
             self.set_status(Status::Working);
         }
+        self.agents.remove(&result.tool_use_id);
+        self.call_agents.remove(&result.tool_use_id);
         let call = self.pending_calls.remove(&result.tool_use_id);
         let task = self.call_tasks.remove(&result.tool_use_id);
         // What a subagent did shows in what it reports back to Claude. A tool the interrupt
@@ -605,8 +655,20 @@ impl Output {
     pub fn show_ask(&mut self, ask: &Ask) -> Vec<usize> {
         self.begin(Section::Tools);
         match &ask.kind {
-            // Refused as it arrives, which the error line says
-            AskKind::Permission => vec![],
+            // The call's line shows what it asks to run, and the full view shows its input whole,
+            // to which the reason for asking adds
+            AskKind::Permission(permission) => {
+                let line = self.full_view_lines.max(1);
+                if let Some(reason) = &permission.reason {
+                    self.write_full_view_line(&format!("  {SUBDUED}reason:{RESET}"));
+                    for reason_line in reason.lines() {
+                        self.write_full_view_line(&format!("    {reason_line}"));
+                    }
+                }
+                vec![line]
+            }
+            // The plan shows whole, since the answer depends on all of it
+            AskKind::Plan(plan) => vec![self.push_details(markdown_lines(plan))],
             AskKind::Questions(questions) => questions
                 .iter()
                 .map(|question| self.push_details(question_lines(question)))
@@ -829,7 +891,8 @@ impl Output {
     fn push_noisy(&mut self, line: &str) {
         self.write_break();
         self.end_claude_line();
-        self.text.push_str(&cut(line, self.max_noisy_line_columns));
+        self.text
+            .push_str(&cut_middle(line, self.max_noisy_line_columns));
         self.text.push('\n');
         self.write_full_view_line(line);
     }
@@ -905,13 +968,47 @@ fn reply_mark() -> String {
     format!("{MARK}‹‹{RESET}")
 }
 
+/// `line` cut at its end to take at most `columns` columns on screen, with `…` where it is cut,
+/// for a name or a title, which reads from its start, as the part that matters most comes
+/// first. `cut_middle` cuts a value instead, whose end tells it apart.
+/// The line holds its own colors, as for `cut_middle`.
+pub fn cut_end(line: &str, columns: NonZeroUsize) -> String {
+    let mut width = 0;
+    let mut rest = line.char_indices();
+    let mut start_end = None;
+    let kept_columns = columns.get() - 1;
+    while let Some((index, character)) = rest.next() {
+        if character == '\x1b' {
+            // Every sequence a line holds is a CSI, which ends with a letter and takes no column
+            rest.find(|(_, next)| next.is_ascii_alphabetic());
+            continue;
+        }
+        let character_width = character.width().unwrap_or(0);
+        if start_end.is_none() && width + character_width > kept_columns {
+            start_end = Some(index);
+        }
+        width += character_width;
+    }
+    match start_end {
+        Some(start_end) if width > columns.get() => {
+            // The `…` stands for the text it replaces, so it takes the colors of that text
+            format!(
+                "{}{RESET}{}…{RESET}",
+                &line[..start_end],
+                colors_at(line, start_end),
+            )
+        }
+        _ => line.to_string(),
+    }
+}
+
 /// `line` cut in the middle to take at most `columns` columns on screen, with `…` where it is
-/// cut. Both its start and its end stay, since the part that tells one line from the next is
-/// often at the end, like the file a command ends with:
-/// <https://v5-archive.patternfly.org/ux-writing/truncation>.
+/// cut, for a value, like a path or a command. Both its start and its end stay, since the part
+/// that tells one value from the next is often at the end, like the file a command ends with:
+/// <https://v5-archive.patternfly.org/ux-writing/truncation>. `cut_end` cuts a name instead.
 /// The line holds its own colors, since the `…` and the end take the colors in effect where the
 /// line has them, and know nothing of colors set before it.
-pub fn cut(line: &str, columns: NonZeroUsize) -> String {
+pub fn cut_middle(line: &str, columns: NonZeroUsize) -> String {
     let mut characters = Vec::new();
     let mut rest = line.char_indices();
     while let Some((index, character)) = rest.next() {
@@ -1157,7 +1254,7 @@ mod tests {
             id: "1".to_string(),
             name: "Bash".to_string(),
             input,
-            is_subagent: false,
+            agent_call: None,
         });
         assert_eq!(output.take_lines()[0], reply_mark());
     }
@@ -1292,7 +1389,7 @@ mod tests {
                     .as_object()
                     .expect("an object")
                     .clone(),
-                is_subagent: false,
+                agent_call: None,
             });
         });
         assert_eq!(
@@ -1336,22 +1433,25 @@ mod tests {
 
     #[test]
     fn a_line_that_fits_stays_whole() {
-        assert_eq!(cut("abc", columns(3)), "abc");
+        assert_eq!(cut_middle("abc", columns(3)), "abc");
     }
 
     #[test]
     fn a_line_too_long_keeps_its_start_and_its_end() {
-        assert_eq!(cut("abcdefgh", columns(6)), format!("abc{RESET}…{RESET}gh"));
+        assert_eq!(
+            cut_middle("abcdefgh", columns(6)),
+            format!("abc{RESET}…{RESET}gh")
+        );
     }
 
     #[test]
     fn the_end_kept_starts_with_the_colors_in_effect_there() {
         assert_eq!(
-            cut(&format!("{SUBDUED}abcdef"), columns(4)),
+            cut_middle(&format!("{SUBDUED}abcdef"), columns(4)),
             format!("{SUBDUED}ab{RESET}{SUBDUED}…{RESET}{SUBDUED}f")
         );
         assert_eq!(
-            cut(&format!("{STRONG}ab{RESET}cdefgh"), columns(4)),
+            cut_middle(&format!("{STRONG}ab{RESET}cdefgh"), columns(4)),
             format!("{STRONG}ab{RESET}…{RESET}h")
         );
     }
@@ -1359,14 +1459,31 @@ mod tests {
     #[test]
     fn the_ellipsis_takes_the_colors_of_the_text_it_replaces() {
         assert_eq!(
-            cut(&format!("ab{SUBDUED}cdefgh"), columns(4)),
+            cut_middle(&format!("ab{SUBDUED}cdefgh"), columns(4)),
             format!("ab{RESET}{SUBDUED}…{RESET}{SUBDUED}h")
         );
     }
 
     #[test]
+    fn a_name_too_long_keeps_its_start_and_its_colors() {
+        assert_eq!(cut_end("abcdef", columns(6)), "abcdef");
+        assert_eq!(
+            cut_end("abcdefgh", columns(6)),
+            format!("abcde{RESET}…{RESET}")
+        );
+        assert_eq!(
+            cut_end(&format!("{SUBDUED}abcdef"), columns(4)),
+            format!("{SUBDUED}abc{RESET}{SUBDUED}…{RESET}")
+        );
+        assert_eq!(cut_end("ab日本", columns(4)), format!("ab{RESET}…{RESET}"));
+    }
+
+    #[test]
     fn a_wide_character_that_does_not_fit_is_cut_whole() {
-        assert_eq!(cut("ab日本", columns(4)), format!("ab{RESET}…{RESET}"));
+        assert_eq!(
+            cut_middle("ab日本", columns(4)),
+            format!("ab{RESET}…{RESET}")
+        );
     }
 
     #[test]
@@ -1384,7 +1501,7 @@ mod tests {
         );
         assert_eq!(
             screen[1],
-            cut(&call, Config::default().max_noisy_line_columns)
+            cut_middle(&call, Config::default().max_noisy_line_columns)
         );
         assert_ne!(screen[1], call);
         assert_eq!(lines[1], call);
@@ -1404,7 +1521,7 @@ mod tests {
             id: "1".to_string(),
             name: "Bash".to_string(),
             input,
-            is_subagent: false,
+            agent_call: None,
         });
         assert!(output.take_lines()[1].contains(&description));
     }
@@ -1433,7 +1550,7 @@ mod tests {
             id: id.to_string(),
             name: "Read".to_string(),
             input,
-            is_subagent: false,
+            agent_call: None,
         }
     }
 
@@ -1593,7 +1710,7 @@ mod tests {
             id: "toolu_1".to_string(),
             name: name.to_string(),
             input,
-            is_subagent: false,
+            agent_call: None,
         }
     }
 

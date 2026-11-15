@@ -1,32 +1,42 @@
-//! The questions of Claude's `AskUserQuestion` calls that wait for the user. Claude Code takes a
-//! call's answers together, and Claude reads none of them before, so the question view shows a
-//! call's questions as a batch. Enter submits a question and moves on to the next one not
-//! submitted, and a submitted question keeps its answer until Enter opens it again. Once all are
-//! submitted, the review shows the answers, all ticked: Enter sends them, or opens the ones the
-//! user unticked, which keep what was picked and written on them.
+//! The requests of Claude's that wait for the user: the questions of an `AskUserQuestion` call,
+//! a plan to carry out, or a call to allow. Each request goes to Claude Code as soon as it is
+//! answered, apart from the others, and the question view shows one request at a time.
+//!
+//! Claude Code takes a call's answers together, and Claude reads none of them before, so the
+//! question view shows a call's questions as a batch. Enter submits a question and moves on to
+//! the next one not submitted, and a submitted question keeps its answer until Enter opens it
+//! again. Once all are submitted, the review shows the answers, all ticked: Enter sends them, or
+//! opens the ones the user unticked, which keep what was picked and written on them.
+//!
+//! A plan and a permission are requests of one question, which Enter sends at once: allow, or
+//! refuse, which stops Claude's turn, or the user's own answer, which refuses the call with the
+//! user's words for Claude to go on from.
 //!
 //! Ref: <https://design-system.service.gov.uk/patterns/check-answers>, on checking answers
 //! before sending them
 
-use std::collections::VecDeque;
-
 use serde_json::{Map, Value};
 
-use crate::keys::View;
+use crate::keys::{BLOCK_ROWS, Field, Mark, Tone, View, questions};
 use crate::picker::{Choice, Cursor, Draft, Form, Move, Pick};
-use crate::protocol::{Answer, Ask, AskKind, Question};
+use crate::protocol::{Answer, Ask, AskKind, Permission, Question};
+use crate::render::markdown_lines;
 use crate::style::{RESET, STRONG};
 
 #[derive(Default)]
 pub struct Questions {
-    /// The calls that ask, oldest first, of which the question view shows the first. Claude asks
-    /// in one call at a time in practice, and calls asked together wait in line.
-    batches: VecDeque<Batch>,
+    /// The requests that wait, oldest first.
+    requests: Vec<Request>,
+    /// The request the question view shows, from 0.
+    shown: usize,
 }
 
-/// A call that asks, with each of its questions.
-struct Batch {
+/// A request of Claude's, with each of its questions.
+struct Request {
     ask: Ask,
+    /// The subagent that asked, by the description of the call that started it, none for Claude
+    /// itself.
+    agent: Option<String>,
     entries: Vec<Entry>,
 }
 
@@ -43,20 +53,32 @@ struct Entry {
 pub enum Sent {
     /// The question view shows the question at this index, or the review one past the last.
     Show(usize),
-    /// The batch is answered: each question's header with its answer, and the reply to its call.
+    /// The request is answered: each question's header with its answer, none for a plan or a
+    /// permission, and the reply to its call.
     Answered {
         answers: Vec<(String, String)>,
-        ask: Ask,
+        /// Boxed, since the input of a call keeps its fields' order, which takes room.
+        ask: Box<Ask>,
         answer: Answer,
     },
 }
 
-impl Batch {
+/// The index of the option that allows a call or a plan, which `y` names, and the one that
+/// refuses it, which `n` names.
+const ALLOW: usize = 0;
+const REFUSE: usize = 1;
+
+impl Request {
+    /// The questions of a call that asks, none for a plan or a permission.
     fn questions(&self) -> &[Question] {
         match &self.ask.kind {
             AskKind::Questions(questions) => questions,
-            AskKind::Permission => unreachable!("only a call with questions waits"),
+            AskKind::Permission(_) | AskKind::Plan(_) => &[],
         }
+    }
+
+    fn is_decision(&self) -> bool {
+        !matches!(self.ask.kind, AskKind::Questions(_))
     }
 
     fn is_submitted(&self) -> bool {
@@ -84,65 +106,411 @@ impl Batch {
             })
             .collect()
     }
+
+    /// The request's kind: the tool asked about, or the questions or the plan.
+    fn kind(&self) -> String {
+        match &self.ask.kind {
+            AskKind::Questions(_) => "Questions".to_string(),
+            AskKind::Plan(_) => "Plan".to_string(),
+            // An MCP tool's name for a person says what it does, and its server's whose it is
+            AskKind::Permission(permission) => match &permission.server {
+                Some(server) => format!("{} · {server}", permission.name),
+                None => permission.name.clone(),
+            },
+        }
+    }
+
+    /// What refusing the request refuses.
+    fn refusal(&self) -> String {
+        match &self.ask.kind {
+            AskKind::Questions(questions_asked) => questions(questions_asked.len()),
+            AskKind::Plan(_) => "the plan".to_string(),
+            AskKind::Permission(_) => "the call".to_string(),
+        }
+    }
+
+    /// What the question view shows of a plan or a permission: the plan, from the top of the
+    /// screen, or the call's reason and fields, in the block under the rule, then the question,
+    /// right above the options.
+    fn decision_view(&self) -> (Vec<String>, Vec<Field>, String, Vec<Choice>) {
+        let (details, fields, question) = match &self.ask.kind {
+            AskKind::Plan(plan) => (
+                markdown_lines(plan),
+                Vec::new(),
+                "Carry out this plan?".to_string(),
+            ),
+            AskKind::Permission(permission) => (
+                Vec::new(),
+                call_fields(
+                    &self.ask.tool_name,
+                    &self.ask.input,
+                    reason(permission).as_deref(),
+                ),
+                format!("Allow this {} call?", permission.name),
+            ),
+            AskKind::Questions(_) => unreachable!("a call's questions have options of their own"),
+        };
+        let keyed = |label: &str, key: char| Choice {
+            key: Some(key),
+            ..Choice::new(label, "", None)
+        };
+        // A call Claude Code deems dangerous says so on its approval, which waits for a second
+        // Enter, so no stray key allows it
+        let approval = match &self.ask.kind {
+            AskKind::Permission(permission) if permission.is_guarded => Choice {
+                risk: Some("allows a call Claude Code deems dangerous".to_string()),
+                ..keyed("allow (dangerous)", 'y')
+            },
+            _ => keyed("allow", 'y'),
+        };
+        let choices = vec![approval, keyed("refuse, and stop Claude", 'n')];
+        (
+            details,
+            fields,
+            format!("{STRONG}{question}{RESET}"),
+            choices,
+        )
+    }
+
+    /// The answer that `draft` gives to a plan or a permission, none when it gives none, like
+    /// the user's own answer left empty.
+    fn decide(&self, draft: &Draft) -> Option<Answer> {
+        let chosen = draft.pick.chosen(Form::One, &draft.text);
+        match chosen.options.first() {
+            Some(&ALLOW) => Some(Answer::Allow {
+                input: self.ask.input.clone(),
+            }),
+            Some(_) => Some(Answer::Deny),
+            None if chosen.is_own => Some(Answer::Explain {
+                reason: draft.text.trim().to_string(),
+            }),
+            None => None,
+        }
+    }
+}
+
+/// A field of a tool's layout.
+struct Laid {
+    name: &'static str,
+    rows: usize,
+    /// The sign in front of the field, and whether it marks each of its rows.
+    sign: char,
+    every_row: bool,
+    tone: Tone,
+    /// claudio's note when the call leaves the field out.
+    missing: &'static str,
+    /// The value as it shows.
+    show: fn(&Value) -> String,
+}
+
+impl Laid {
+    /// A field that shows its value as it is, and `not given` when left out.
+    const fn new(name: &'static str, rows: usize, sign: char, every_row: bool, tone: Tone) -> Self {
+        Self {
+            name,
+            rows,
+            sign,
+            every_row,
+            tone,
+            missing: "not given",
+            show: value_text,
+        }
+    }
+}
+
+/// `value` as text: a string as it is, anything else as JSON.
+fn value_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        _ => value.to_string(),
+    }
+}
+
+/// Bash's `timeout`, in milliseconds, in the units a person reads it in, like `90s` or `2m`.
+fn timeout_text(value: &Value) -> String {
+    let Some(milliseconds) = value.as_u64() else {
+        return value_text(value);
+    };
+    let seconds = milliseconds / 1000;
+    match (milliseconds % 1000, seconds / 60, seconds % 60) {
+        (0, 0, seconds) => format!("{seconds}s"),
+        (0, minutes, 0) => format!("{minutes}m"),
+        (0, minutes, seconds) => format!("{minutes}m {seconds}s"),
+        _ => format!("{milliseconds}ms"),
+    }
+}
+
+/// Bash's `run_in_background`, as where the command runs.
+fn background_text(value: &Value) -> String {
+    match value {
+        Value::Bool(true) => "in background".to_string(),
+        Value::Bool(false) => "in foreground".to_string(),
+        _ => value_text(value),
+    }
+}
+
+/// The fields of a call of these tools, in the order they show, at the top of the block, each
+/// marked with the sign that reads as what it is: a shell's `$` in front of a command, `#` in
+/// front of a comment and `&` in front of where it runs, a diff's `-` and `+` in front of what
+/// an edit takes out and puts in, `@` in front of where a call acts, `│` in front of a body of
+/// text, and `t` in front of a timeout. The field that matters most, like a command, takes the
+/// most rows. A call of any other tool shows each field on a row of its own, by its name.
+const LAYOUTS: [(&str, &[Laid]); 4] = [
+    (
+        "Bash",
+        &[
+            Laid::new("command", 4, '$', false, Tone::Plain),
+            Laid::new("description", 1, '#', false, Tone::Comment),
+            Laid {
+                missing: "default",
+                show: timeout_text,
+                ..Laid::new("timeout", 1, 't', false, Tone::Plain)
+            },
+            Laid {
+                missing: "in foreground",
+                show: background_text,
+                ..Laid::new("run_in_background", 1, '&', false, Tone::Plain)
+            },
+        ],
+    ),
+    (
+        "Edit",
+        &[
+            Laid::new("file_path", 1, '@', false, Tone::Plain),
+            Laid::new("old_string", 3, '-', true, Tone::Removed),
+            Laid::new("new_string", 3, '+', true, Tone::Added),
+        ],
+    ),
+    (
+        "Write",
+        &[
+            Laid::new("file_path", 1, '@', false, Tone::Plain),
+            Laid::new("content", 6, '│', true, Tone::Plain),
+        ],
+    ),
+    (
+        "WebFetch",
+        &[
+            Laid::new("url", 1, '@', false, Tone::Plain),
+            Laid::new("prompt", 6, '│', true, Tone::Plain),
+        ],
+    ),
+];
+
+/// The block under the rule of a call of `tool` with `input`: the fields of its layout, then the
+/// others, by name, then on the last row, after a `?`, the reason Claude Code gives for asking,
+/// or a note that it gives none, in `BLOCK_ROWS` rows in all. Each field keeps its rows when its
+/// value is shorter, so a field shows in the same place on every call of the tool. A field the
+/// layout lacks, like Bash's `timeout`, takes a row from the last field of more rows, and the
+/// fields that still do not fit give their place to a row that counts them.
+fn call_fields(tool: &str, input: &Map<String, Value>, reason: Option<&str>) -> Vec<Field> {
+    let field = |mark, value: String, tone, rows| Field {
+        mark,
+        value,
+        tone,
+        rows,
+    };
+    // A sign is dim, but for a diff's, whose red and green say what it takes out and puts in
+    let sign = |sign, every_row, tone| Mark::Sign {
+        sign,
+        every_row,
+        tone: match tone {
+            Tone::Removed | Tone::Added => tone,
+            _ => Tone::Comment,
+        },
+    };
+    let name = |name: &str| Mark::Name(name.to_string());
+    let reason = match reason {
+        Some(reason) => field(
+            sign('?', false, Tone::Plain),
+            reason.to_string(),
+            Tone::Plain,
+            1,
+        ),
+        None => field(
+            sign('?', false, Tone::Plain),
+            "no reason given".to_string(),
+            Tone::Note,
+            1,
+        ),
+    };
+    let layout = LAYOUTS
+        .iter()
+        .find(|(name, _)| *name == tool)
+        .map_or(&[][..], |(_, layout)| *layout);
+    // Edit's `replace_all` changes what the file's line means, so it goes with it
+    let is_folded = |name: &str| tool == "Edit" && name == "replace_all";
+    let mut fields: Vec<Field> = Vec::new();
+    for laid in layout {
+        let mark = sign(laid.sign, laid.every_row, laid.tone);
+        let mut shown = match input.get(laid.name) {
+            Some(value) => field(mark, (laid.show)(value), laid.tone, laid.rows),
+            None => field(mark, laid.missing.to_string(), Tone::Note, laid.rows),
+        };
+        if laid.name == "file_path" && input.get("replace_all") == Some(&Value::Bool(true)) {
+            shown.value.push_str(" (all matches)");
+        }
+        fields.push(shown);
+    }
+    fields.extend(
+        (input.iter())
+            .filter(|(field_name, _)| {
+                !is_folded(field_name) && !layout.iter().any(|laid| laid.name == *field_name)
+            })
+            .map(|(field_name, value)| field(name(field_name), value_text(value), Tone::Plain, 1)),
+    );
+    if fields.is_empty() {
+        fields.push(field(name("input"), "none".to_string(), Tone::Note, 1));
+    }
+    let room = BLOCK_ROWS - 1;
+    while fields.iter().map(|field| field.rows).sum::<usize>() > room {
+        if let Some(field) = fields.iter_mut().rev().find(|field| field.rows > 1) {
+            field.rows -= 1;
+        } else {
+            let hidden = fields.len() - (room - 1);
+            fields.truncate(room - 1);
+            fields.push(field(
+                name(""),
+                format!("… {hidden} more fields · Ctrl+O shows them"),
+                Tone::Note,
+                1,
+            ));
+        }
+    }
+    // the reason stays on the block's last row, however few rows the fields take
+    let taken = fields.iter().map(|field| field.rows).sum::<usize>();
+    if taken < room {
+        fields.push(field(Mark::None, String::new(), Tone::Plain, room - taken));
+    }
+    fields.push(reason);
+    fields
+}
+
+/// Why Claude Code asks about a call: its `decision_reason`, or else a sentence for its
+/// `decision_reason_type`, or else its `blocked_path`. None when it sends none of them.
+fn reason(permission: &Permission) -> Option<String> {
+    (permission.reason.clone())
+        .or_else(|| permission.reason_type.as_deref().map(reason_type_text))
+        .or_else(|| (permission.blocked_path.as_ref()).map(|path| format!("blocked path {path}")))
+}
+
+/// A sentence that says which check asks about the call, for four values of
+/// `decision_reason_type`. Each of them is a bare name, like `rule`, that does not say what
+/// asked, and four sentences are little to keep.
+/// Ref: `SDKControlPermissionRequest` in `sdk.d.ts`, which lists the values
+fn reason_type_text(reason_type: &str) -> String {
+    match reason_type {
+        "rule" => "A rule in your settings asks before this call",
+        "mode" => "The permission mode asks before this call",
+        "subcommandResults" => "Some parts of this command need approval",
+        "permissionPromptTool" => "The permission prompt tool asks about this call",
+        other => other,
+    }
+    .to_string()
+}
+
+/// The block under the rule of a question, or of the review: its text, in all the block's rows.
+fn text_field(text: &str) -> Field {
+    Field {
+        mark: Mark::None,
+        value: text.to_string(),
+        tone: Tone::Bold,
+        rows: BLOCK_ROWS,
+    }
 }
 
 impl Questions {
-    /// Adds the questions of a call that asks, each starting on its line of `full_view_lines`. A
-    /// permission has none, since it is refused as it arrives.
-    pub fn add(&mut self, ask: Ask, full_view_lines: Vec<usize>) {
-        let AskKind::Questions(questions) = &ask.kind else {
-            return;
+    /// Adds a request of Claude's, made by the subagent `agent`, none for Claude itself, with
+    /// each of its questions starting on its line of `full_view_lines`. A guarded call opens on
+    /// the refusal, so that an Enter by habit does not allow it.
+    pub fn add(&mut self, ask: Ask, agent: Option<String>, full_view_lines: Vec<usize>) {
+        let first = match &ask.kind {
+            AskKind::Permission(permission) if permission.is_guarded => Cursor::Option(REFUSE),
+            _ => Cursor::Option(0),
+        };
+        let count = match &ask.kind {
+            AskKind::Questions(questions) => questions.len(),
+            AskKind::Permission(_) | AskKind::Plan(_) => 1,
         };
         let entries = full_view_lines
             .into_iter()
-            .take(questions.len())
-            .map(|full_view_line| Entry {
-                full_view_line,
-                draft: Draft::new(),
-                is_submitted: false,
+            .take(count)
+            .map(|full_view_line| {
+                let mut draft = Draft::new();
+                draft.pick.cursor = first;
+                Entry {
+                    full_view_line,
+                    draft,
+                    is_submitted: false,
+                }
             })
             .collect();
-        self.batches.push_back(Batch { ask, entries });
+        self.requests.push(Request {
+            ask,
+            agent,
+            entries,
+        });
     }
 
+    /// How many questions wait, where a plan and a permission are one each.
     pub fn count(&self) -> usize {
-        self.batches.iter().map(|batch| batch.entries.len()).sum()
+        self.requests
+            .iter()
+            .map(|request| request.entries.len())
+            .sum()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.batches.is_empty()
+        self.requests.is_empty()
     }
 
-    /// Where the question view opens: the first question not submitted, or else the review, or
-    /// none when none waits.
-    pub fn first(&self) -> Option<usize> {
-        let batch = self.batches.front()?;
-        Some(batch.next_open(batch.entries.len() - 1))
+    /// Where the question view opens: on the request it showed last, the first question not
+    /// submitted, or else the review, or none when none waits.
+    pub fn first(&mut self) -> Option<usize> {
+        self.shown = self.shown.min(self.requests.len().checked_sub(1)?);
+        let request = self.request();
+        Some(request.next_open(request.entries.len() - 1))
     }
 
-    /// Where `to` moves from the question at `index`: next and previous go round the batch, where
-    /// the review comes after the last question once all are submitted, and a question the batch
-    /// lacks keeps the one at `index`.
-    pub fn go(&self, index: usize, to: Move) -> usize {
-        let batch = self.batch();
-        let stops = batch.entries.len() + usize::from(batch.is_submitted());
-        match to {
-            Move::Next => (index + 1) % stops,
-            Move::Previous => (index + stops - 1) % stops,
-            Move::To(question) if question < batch.entries.len() => question,
-            Move::To(_) => index,
+    /// Where `to` moves from the question at `index`. Next and previous go round the request,
+    /// where the review comes after the last question once all are submitted, and a question the
+    /// request lacks keeps the one at `index`. Moves between requests go round them too, onto
+    /// the request's first question not submitted, and a request that does not wait keeps the
+    /// one shown.
+    pub fn go(&mut self, index: usize, to: Move) -> usize {
+        let count = self.requests.len();
+        let request = match to {
+            Move::NextRequest => (self.shown + 1) % count,
+            Move::PreviousRequest => (self.shown + count - 1) % count,
+            Move::ToRequest(request) if request < count => request,
+            Move::ToRequest(_) => return index,
+            Move::Next | Move::Previous | Move::To(_) => {
+                let request = self.request();
+                let stops = request.entries.len() + usize::from(request.is_submitted());
+                return match to {
+                    Move::Next => (index + 1) % stops,
+                    Move::Previous => (index + stops - 1) % stops,
+                    Move::To(question) if question < request.entries.len() => question,
+                    _ => index,
+                };
+            }
+        };
+        if request == self.shown {
+            return index;
         }
+        self.shown = request;
+        self.first().expect("a request waits")
     }
 
     /// The draft of the question at `index`, or on the review, every answer ticked.
     pub fn draft(&self, index: usize) -> Draft {
-        let batch = self.batch();
-        match batch.entries.get(index) {
+        let request = self.request();
+        match request.entries.get(index) {
             Some(entry) => entry.draft.clone(),
             None => Draft {
                 pick: Pick {
                     cursor: Cursor::Option(0),
-                    ticked: (0..batch.entries.len()).collect(),
+                    ticked: (0..request.entries.len()).collect(),
                     is_own_ticked: false,
                 },
                 text: String::new(),
@@ -152,52 +520,75 @@ impl Questions {
 
     /// Keeps `draft` on the question at `index`, which the review has none of.
     pub fn keep_draft(&mut self, index: usize, draft: Draft) {
-        if let Some(entry) = self.batch_mut().entries.get_mut(index) {
+        if let Some(entry) = self.request_mut().entries.get_mut(index) {
             entry.draft = draft;
         }
     }
 
-    /// What the question view shows at `index`: a question's text and its options, or the
-    /// review's answers.
+    /// What the question view shows at `index`: a question's text and its options, the call or
+    /// the plan asked about with the options to allow or refuse it, or the review's answers.
     pub fn view(&self, index: usize) -> View {
-        let batch = self.batch();
-        let progress: Vec<bool> = batch
-            .entries
-            .iter()
+        let request = self.request();
+        let progress: Vec<bool> = (request.entries.iter())
             .map(|entry| entry.is_submitted)
             .collect();
-        let Some(entry) = batch.entries.get(index) else {
-            let choices = batch
-                .answers()
-                .into_iter()
-                .map(|(header, answer)| Choice {
-                    label: format!("{header}: {answer}"),
-                    description: String::new(),
-                    preview: None,
-                })
+        let requests: Vec<bool> = self.requests.iter().map(Request::is_submitted).collect();
+        let agent =
+            (request.agent.as_ref()).map_or_else(String::new, |agent| format!(" · {agent}"));
+        let place = if requests.len() > 1 {
+            format!(" · {}/{}", self.shown + 1, requests.len())
+        } else {
+            String::new()
+        };
+        let view = |label: String, lines, choices, own_label: &str, form| View {
+            label,
+            title: format!("{}{agent}", request.kind()),
+            place: place.clone(),
+            refusal: request.refusal(),
+            request_index: self.shown,
+            requests: requests.clone(),
+            details: Vec::new(),
+            fields: Vec::new(),
+            lines,
+            choices,
+            own_label: own_label.to_string(),
+            form,
+            full_view_line: request.entries[index.min(request.entries.len() - 1)].full_view_line,
+            index,
+            sends_at_once: progress.len() == 1,
+            progress: progress.clone(),
+            is_submitted: request
+                .entries
+                .get(index)
+                .is_some_and(|entry| entry.is_submitted),
+        };
+        if request.is_decision() {
+            let (details, fields, question, choices) = request.decision_view();
+            let own_label = "refuse, and tell Claude why";
+            return View {
+                details,
+                fields,
+                ..view(
+                    request.kind(),
+                    vec![question],
+                    choices,
+                    own_label,
+                    Form::One,
+                )
+            };
+        }
+        if index == request.entries.len() {
+            let choices = (request.answers().into_iter())
+                .map(|(header, answer)| Choice::new(&format!("{header}: {answer}"), "", None))
                 .collect();
             return View {
-                label: "Review".to_string(),
-                lines: vec![format!("{STRONG}Send these answers?{RESET}")],
-                choices,
-                own_label: String::new(),
-                form: Form::Review,
-                full_view_line: batch.entries[0].full_view_line,
-                index,
-                progress,
-                is_submitted: false,
-                sends_at_once: false,
+                fields: vec![text_field("Send these answers?")],
+                ..view("Review".to_string(), Vec::new(), choices, "", Form::Review)
             };
-        };
-        let question = &batch.questions()[index];
-        let choices = question
-            .options
-            .iter()
-            .map(|choice| Choice {
-                label: choice.label.clone(),
-                description: choice.description.clone(),
-                preview: choice.preview.clone(),
-            })
+        }
+        let question = &request.questions()[index];
+        let choices = (question.options.iter())
+            .map(|choice| Choice::new(&choice.label, &choice.description, choice.preview.clone()))
             .collect();
         let (own_label, form) = if question.is_multi_select {
             ("more of your own", Form::Several)
@@ -205,38 +596,48 @@ impl Questions {
             ("your own answer", Form::One)
         };
         View {
-            label: question.header.clone(),
-            lines: vec![format!("{STRONG}{}{RESET}", question.text)],
-            choices,
-            own_label: own_label.to_string(),
-            form,
-            full_view_line: entry.full_view_line,
-            index,
-            sends_at_once: progress.len() == 1,
-            progress,
-            is_submitted: entry.is_submitted,
+            fields: vec![text_field(&question.text)],
+            ..view(
+                question.header.clone(),
+                Vec::new(),
+                choices,
+                own_label,
+                form,
+            )
         }
     }
 
-    /// Acts on Enter at `index` with `draft`. Enter submits a question and moves on, or opens a
-    /// submitted one again, and keeps a question that `draft` answers nothing on, like the user's
-    /// own answer left empty. A batch of one question has nothing to review, so its answer goes
-    /// at once. On the review, it answers the batch once every answer is ticked, and else opens
-    /// the unticked ones.
+    /// Acts on Enter at `index` with `draft`. A plan or a permission is answered at once. Else
+    /// Enter submits a question and moves on, or opens a submitted one again, and keeps a
+    /// question that `draft` answers nothing on, like the user's own answer left empty. A batch
+    /// of one question has nothing to review, so its answer goes at once. On the review, it
+    /// answers the batch once every answer is ticked, and else opens the unticked ones.
     pub fn send(&mut self, index: usize, draft: Draft) -> Sent {
-        let batch = self.batch_mut();
-        let count = batch.entries.len();
+        let request = self.request_mut();
+        if request.is_decision() {
+            let Some(answer) = request.decide(&draft) else {
+                request.entries[0].draft = draft;
+                return Sent::Show(index);
+            };
+            let ask = Box::new(self.requests.remove(self.shown).ask);
+            return Sent::Answered {
+                answers: Vec::new(),
+                ask,
+                answer,
+            };
+        }
+        let count = request.entries.len();
         if index == count {
             if draft.pick.ticked.len() == count {
                 return self.answer();
             }
-            for (number, entry) in batch.entries.iter_mut().enumerate() {
+            for (number, entry) in request.entries.iter_mut().enumerate() {
                 entry.is_submitted = draft.pick.ticked.contains(&number);
             }
-            return Sent::Show(batch.next_open(count - 1));
+            return Sent::Show(request.next_open(count - 1));
         }
-        let answers = choose(&batch.questions()[index], &draft).is_some();
-        let entry = &mut batch.entries[index];
+        let answers = choose(&request.questions()[index], &draft).is_some();
+        let entry = &mut request.entries[index];
         entry.draft = draft;
         if entry.is_submitted || !answers {
             entry.is_submitted = false;
@@ -246,45 +647,45 @@ impl Questions {
         if count == 1 {
             return self.answer();
         }
-        Sent::Show(batch.next_open(index))
+        Sent::Show(request.next_open(index))
     }
 
-    /// Takes away the batch the question view shows, and returns what it asked, to refuse, since
-    /// Claude Code refuses a call's questions together.
-    pub fn remove_first(&mut self) -> Ask {
-        self.batches.pop_front().expect("a batch shows").ask
+    /// Takes away the request the question view shows, and returns what it asked, to refuse,
+    /// since Claude Code refuses a call's questions together.
+    pub fn remove_shown(&mut self) -> Ask {
+        self.requests.remove(self.shown).ask
     }
 
-    /// Takes away every call, and returns what they asked, to refuse.
+    /// Takes away every request, and returns what they asked, to refuse.
     pub fn remove_all(&mut self) -> Vec<Ask> {
-        self.batches.drain(..).map(|batch| batch.ask).collect()
+        self.requests.drain(..).map(|request| request.ask).collect()
     }
 
     /// Takes away the batch the question view shows, answered.
     fn answer(&mut self) -> Sent {
-        let batch = self.batches.pop_front().expect("a batch shows");
-        let answers = batch.answers();
-        let map: Map<String, Value> = batch
+        let request = self.requests.remove(self.shown);
+        let answers = request.answers();
+        let map: Map<String, Value> = request
             .questions()
             .iter()
             .zip(&answers)
             .map(|(question, (_, answer))| (question.text.clone(), Value::String(answer.clone())))
             .collect();
-        let mut input = batch.ask.input.clone();
+        let mut input = request.ask.input.clone();
         input.insert("answers".to_string(), Value::Object(map));
         Sent::Answered {
             answers,
-            ask: batch.ask,
+            ask: Box::new(request.ask),
             answer: Answer::Allow { input },
         }
     }
 
-    fn batch(&self) -> &Batch {
-        self.batches.front().expect("a batch shows")
+    fn request(&self) -> &Request {
+        &self.requests[self.shown]
     }
 
-    fn batch_mut(&mut self) -> &mut Batch {
-        self.batches.front_mut().expect("a batch shows")
+    fn request_mut(&mut self) -> &mut Request {
+        &mut self.requests[self.shown]
     }
 }
 
@@ -325,7 +726,7 @@ mod tests {
             "tool_use_id": id,
         });
         match read_request(format!("request-{id}"), request) {
-            Ok(crate::protocol::Event::Ask(ask)) => ask,
+            Ok(crate::protocol::Event::Ask(ask)) => *ask,
             _ => panic!("an ask"),
         }
     }
@@ -370,7 +771,7 @@ mod tests {
     fn questions_of(ask: &Ask) -> &[Question] {
         match &ask.kind {
             AskKind::Questions(questions) => questions,
-            AskKind::Permission => panic!("questions"),
+            AskKind::Permission(_) | AskKind::Plan(_) => panic!("questions"),
         }
     }
 
@@ -384,7 +785,7 @@ mod tests {
     #[test]
     fn the_view_offers_a_questions_options_in_its_form() {
         let mut questions = Questions::default();
-        questions.add(two_questions("a"), vec![1, 2]);
+        questions.add(two_questions("a"), None, vec![1, 2]);
         assert_eq!(questions.count(), 2);
         let view = questions.view(0);
         assert_eq!(view.label, "Database");
@@ -396,7 +797,7 @@ mod tests {
     #[test]
     fn enter_submits_and_moves_on_and_opens_a_submitted_question_again() {
         let mut questions = Questions::default();
-        questions.add(two_questions("a"), vec![1, 2]);
+        questions.add(two_questions("a"), None, vec![1, 2]);
         assert_eq!(shown(&questions.send(1, with_ticks(2, &[2]))), 0);
         assert_eq!(questions.view(0).progress, [false, true]);
         assert_eq!(questions.go(0, Move::Next), 1);
@@ -412,7 +813,7 @@ mod tests {
     #[test]
     fn the_review_comes_once_all_are_submitted_and_sends_them_together() {
         let mut questions = Questions::default();
-        questions.add(two_questions("a"), vec![1, 2]);
+        questions.add(two_questions("a"), None, vec![1, 2]);
         questions.send(0, draft(Cursor::Option(1), ""));
         let mut ticked = Draft::new();
         ticked.pick.ticked = BTreeSet::from([2, 0]);
@@ -443,7 +844,7 @@ mod tests {
     #[test]
     fn the_review_opens_the_unticked_answers_keeping_their_drafts() {
         let mut questions = Questions::default();
-        questions.add(two_questions("a"), vec![1, 2]);
+        questions.add(two_questions("a"), None, vec![1, 2]);
         questions.send(0, draft(Cursor::Option(1), ""));
         questions.send(1, with_ticks(0, &[0]));
         let mut review = questions.draft(2);
@@ -491,7 +892,7 @@ mod tests {
     #[test]
     fn a_single_question_sends_its_answer_at_once() {
         let mut questions = Questions::default();
-        questions.add(one_question("a"), vec![1]);
+        questions.add(one_question("a"), None, vec![1]);
         assert!(questions.view(0).sends_at_once);
         let Sent::Answered { answers, .. } = questions.send(0, draft(Cursor::Option(1), "")) else {
             panic!("the answer, with no review");
@@ -500,14 +901,275 @@ mod tests {
         assert!(questions.is_empty());
     }
 
+    fn permission(id: &str, is_guarded: bool) -> Ask {
+        let request = json!({
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "input": {"command": "rm -rf build"},
+            "tool_use_id": id,
+            "default_to_no": is_guarded,
+        });
+        match read_request(format!("request-{id}"), request) {
+            Ok(crate::protocol::Event::Ask(ask)) => *ask,
+            _ => panic!("an ask"),
+        }
+    }
+
+    /// The rule's text: the request's title, then its place.
+    fn title(view: &View) -> String {
+        format!("{}{}", view.title, view.place)
+    }
+
     #[test]
-    fn calls_asked_together_wait_in_line() {
+    fn requests_wait_each_on_its_own_and_the_view_moves_between_them() {
         let mut questions = Questions::default();
-        questions.add(two_questions("a"), vec![1, 2]);
-        questions.add(one_question("b"), vec![3]);
-        assert_eq!(questions.count(), 3);
-        assert_eq!(questions.remove_first().tool_use_id, "a");
+        questions.add(two_questions("a"), None, vec![1, 2]);
+        questions.add(one_question("b"), Some("Explore".to_string()), vec![3]);
+        questions.add(permission("c", false), None, vec![4]);
+        assert_eq!(questions.count(), 4);
+        assert_eq!(title(&questions.view(0)), "Questions · 1/3");
+        assert_eq!(questions.go(0, Move::ToRequest(1)), 0);
+        let view = questions.view(0);
+        assert_eq!(title(&view), "Questions · Explore · 2/3");
+        assert_eq!(view.label, "Cache");
+        assert_eq!(view.request_index, 1);
+        assert_eq!(questions.go(0, Move::PreviousRequest), 0);
+        assert_eq!(questions.go(0, Move::ToRequest(3)), 0);
+        assert_eq!(questions.view(0).request_index, 0);
+        questions.go(0, Move::NextRequest);
+        assert_eq!(questions.remove_shown().tool_use_id, "b");
+        // The view stays in place, on the request that slid into it
         assert_eq!(questions.first(), Some(0));
-        assert_eq!(questions.view(0).label, "Cache");
+        assert_eq!(title(&questions.view(0)), "Bash · 2/2");
+        assert_eq!(questions.remove_shown().tool_use_id, "c");
+        assert_eq!(questions.first(), Some(0));
+        assert_eq!(questions.view(0).label, "Database");
+    }
+
+    #[test]
+    fn a_permission_is_allowed_or_refused_at_once_and_the_users_words_explain_a_refusal() {
+        let decide = |draft: Draft| {
+            let mut questions = Questions::default();
+            questions.add(permission("a", false), None, vec![1]);
+            match questions.send(0, draft) {
+                Sent::Answered { answer, .. } => answer,
+                Sent::Show(_) => panic!("an answer"),
+            }
+        };
+        assert!(matches!(
+            decide(draft(Cursor::Option(0), "")),
+            Answer::Allow { input } if input["command"] == "rm -rf build"
+        ));
+        assert!(matches!(decide(draft(Cursor::Option(1), "")), Answer::Deny));
+        assert!(matches!(
+            decide(draft(Cursor::Writing, " use cargo clean ")),
+            Answer::Explain { reason } if reason == "use cargo clean"
+        ));
+        let mut questions = Questions::default();
+        questions.add(permission("a", false), None, vec![1]);
+        assert_eq!(shown(&questions.send(0, draft(Cursor::Writing, ""))), 0);
+        let view = questions.view(0);
+        assert_eq!(view.refusal, "the call");
+        assert!(view.sends_at_once);
+        assert_eq!(view.choices[0].key, Some('y'));
+        // The call shows in the block under the rule, and only the question above the options
+        assert_eq!(view.details, Vec::<String>::new());
+        assert!(
+            view.fields
+                .iter()
+                .any(|field| field.value == "rm -rf build")
+        );
+        assert_eq!(view.lines.len(), 1);
+        assert!(view.lines[0].contains("Allow this Bash call?"));
+    }
+
+    #[test]
+    fn a_guarded_permission_opens_on_the_refusal_and_its_approval_names_the_risk() {
+        let mut questions = Questions::default();
+        questions.add(permission("a", true), None, vec![1]);
+        assert_eq!(questions.draft(0).pick.cursor, Cursor::Option(REFUSE));
+        let approval = &questions.view(0).choices[ALLOW];
+        assert_eq!(approval.label, "allow (dangerous)");
+        assert_eq!(
+            approval.risk.as_deref(),
+            Some("allows a call Claude Code deems dangerous")
+        );
+        questions.add(permission("b", false), None, vec![2]);
+        questions.go(0, Move::NextRequest);
+        assert_eq!(questions.view(0).choices[ALLOW].risk, None);
+    }
+
+    #[test]
+    fn a_permission_without_words_for_its_reason_tells_the_kind_of_check_or_the_path() {
+        let reason_of = |extra: Value| {
+            let mut request = json!({
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {"command": "echo hi"},
+                "tool_use_id": "a",
+            });
+            request
+                .as_object_mut()
+                .expect("an object")
+                .extend(extra.as_object().expect("an object").clone());
+            let Ok(crate::protocol::Event::Ask(ask)) = read_request("r".to_string(), request)
+            else {
+                panic!("an ask");
+            };
+            let mut questions = Questions::default();
+            questions.add(*ask, None, vec![1]);
+            let fields = questions.view(0).fields;
+            let reason = fields.last().expect("a reason").clone();
+            (reason.value, reason.tone)
+        };
+        assert_eq!(
+            reason_of(
+                json!({"decision_reason": "rm removes files", "decision_reason_type": "safetyCheck"})
+            ),
+            ("rm removes files".to_string(), Tone::Plain)
+        );
+        assert_eq!(
+            reason_of(json!({"decision_reason_type": "rule", "blocked_path": "/x"})),
+            (
+                "A rule in your settings asks before this call".to_string(),
+                Tone::Plain
+            )
+        );
+        assert_eq!(
+            reason_of(json!({"decision_reason_type": "sandboxOverride"})),
+            ("sandboxOverride".to_string(), Tone::Plain)
+        );
+        assert_eq!(
+            reason_of(json!({"blocked_path": "/tmp/sub"})),
+            ("blocked path /tmp/sub".to_string(), Tone::Plain)
+        );
+        assert_eq!(
+            reason_of(json!({})),
+            ("no reason given".to_string(), Tone::Note)
+        );
+    }
+
+    #[test]
+    fn a_permission_names_its_tool_as_claude_code_names_it_for_a_person() {
+        let request = json!({
+            "subtype": "can_use_tool",
+            "tool_name": "mcp__claude_ai_Google_Drive__search_files",
+            "display_name": "Search Files",
+            "mcp_server": {"name": "claude.ai Google Drive", "source": "claudeai"},
+            "input": {"query": "x"},
+            "tool_use_id": "a",
+        });
+        let Ok(crate::protocol::Event::Ask(ask)) = read_request("request-a".to_string(), request)
+        else {
+            panic!("an ask");
+        };
+        let mut questions = Questions::default();
+        questions.add(*ask, None, vec![1]);
+        let view = questions.view(0);
+        assert_eq!(view.title, "Search Files · claude.ai Google Drive");
+        assert!(view.lines[0].contains("Allow this Search Files call?"));
+        // Without a name for a person, the tool's own name
+        let mut questions = Questions::default();
+        questions.add(permission("b", false), None, vec![2]);
+        assert_eq!(questions.view(0).title, "Bash");
+    }
+
+    /// The marks, as text, and rows of a block's fields.
+    fn shape(fields: &[Field]) -> Vec<(String, usize)> {
+        let mark = |field: &Field| match &field.mark {
+            Mark::None => String::new(),
+            Mark::Sign { sign, .. } => sign.to_string(),
+            Mark::Name(name) => name.clone(),
+        };
+        (fields.iter())
+            .map(|field| (mark(field), field.rows))
+            .collect()
+    }
+
+    #[test]
+    fn a_call_of_a_known_tool_takes_its_layout_and_its_other_fields_take_rows_from_the_last() {
+        let input = |json: Value| json.as_object().expect("an object").clone();
+        let bash = input(json!({"command": "ls", "description": "List", "timeout": 90000}));
+        let fields = call_fields("Bash", &bash, Some("why"));
+        let expected = [("$", 4), ("#", 1), ("t", 1), ("&", 1), ("?", 1)];
+        assert_eq!(
+            shape(&fields),
+            expected.map(|(name, rows)| (name.to_string(), rows))
+        );
+        assert_eq!(fields[2].value, "1m 30s");
+        assert_eq!(
+            (fields[3].value.as_str(), fields[3].tone),
+            ("in foreground", Tone::Note)
+        );
+        assert_eq!(fields[4].value, "why");
+        assert_eq!(
+            fields.iter().map(|field| field.rows).sum::<usize>(),
+            BLOCK_ROWS
+        );
+        // A field the layout lacks shows by name, on a row the command gives up
+        let bash = input(json!({"command": "ls", "run_in_background": true, "new": 1}));
+        let fields = call_fields("Bash", &bash, None);
+        let expected = [("$", 3), ("#", 1), ("t", 1), ("&", 1), ("new", 1), ("?", 1)];
+        assert_eq!(
+            shape(&fields),
+            expected.map(|(name, rows)| (name.to_string(), rows))
+        );
+        assert_eq!(
+            (fields[2].value.as_str(), fields[2].tone),
+            ("default", Tone::Note)
+        );
+        assert_eq!(fields[3].value, "in background");
+        // A sign is the field's, whatever the value, given or not
+        let left_out = call_fields("Bash", &input(json!({"command": "ls"})), None);
+        assert_eq!(fields[3].mark, left_out[3].mark);
+        assert_eq!(
+            (left_out[4].value.as_str(), left_out[4].tone),
+            ("no reason given", Tone::Note)
+        );
+        let edit = input(json!({"file_path": "a.rs", "new_string": "y"}));
+        let fields = call_fields("Edit", &edit, None);
+        assert_eq!(fields[1].tone, Tone::Note);
+        assert!(matches!(
+            fields[1].mark,
+            Mark::Sign {
+                tone: Tone::Removed,
+                ..
+            }
+        ));
+        let edit = input(json!({
+            "replace_all": true, "file_path": "a.rs", "old_string": "x", "new_string": "y"
+        }));
+        let fields = call_fields("Edit", &edit, None);
+        let expected = [("@", 1), ("-", 3), ("+", 3), ("?", 1)];
+        assert_eq!(
+            shape(&fields),
+            expected.map(|(mark, rows)| (mark.to_string(), rows))
+        );
+        assert_eq!(fields[0].value, "a.rs (all matches)");
+        assert_eq!(fields[1].tone, Tone::Removed);
+        assert_eq!(fields[2].tone, Tone::Added);
+        assert_eq!(fields[3].tone, Tone::Note);
+    }
+
+    #[test]
+    fn a_call_of_another_tool_shows_a_field_a_row_and_counts_the_fields_that_do_not_fit() {
+        let input = json!({
+            "a": "1", "b": "2", "c": "3", "d": "4", "e": "5", "f": "6", "g": 7, "h": 8, "i": 9
+        });
+        let fields = call_fields("mcp__x__y", input.as_object().expect("an object"), None);
+        assert_eq!(fields.len(), BLOCK_ROWS);
+        assert_eq!(fields[5].mark, Mark::Name("f".to_string()));
+        assert_eq!(fields[6].value, "… 3 more fields · Ctrl+O shows them");
+        assert_eq!(shape(&fields)[7], ("?".to_string(), 1));
+        let fields = call_fields("ListAgents", &Map::new(), None);
+        assert_eq!(fields[0].value, "none");
+        assert_eq!(shape(&fields)[1], (String::new(), BLOCK_ROWS - 2));
+        assert_eq!(shape(&fields)[2], ("?".to_string(), 1));
+    }
+
+    #[test]
+    fn a_timeout_shows_in_the_units_a_person_reads() {
+        let shown = [0, 45000, 120_000, 90000, 1500].map(|ms| timeout_text(&json!(ms)));
+        assert_eq!(shown, ["0s", "45s", "2m", "1m 30s", "1500ms"]);
     }
 }

@@ -24,12 +24,13 @@ When Claude Code refuses claudio's request for the context's usage, or answers i
 `claudio check-claude-code` runs the contract checks against the Claude Code that claudio runs, the one `CLAUDIO_CLAUDE` names too, so it tells whether a newer Claude Code still works with claudio.
 The checks that call the API run only with `--paid`, on the cheapest model, at a few cents in all.
 
-claudio supports only auto mode for now: it refuses every permission Claude Code asks for, and says so in red.
-It has no key to switch modes either, so set auto mode in `~/.claude/settings.json`:
+claudio has no key to switch the permission mode, which Claude Code's settings set, like auto mode in `~/.claude/settings.json`:
 
 ```json
 { "permissions": { "defaultMode": "auto" } }
 ```
+
+The calls Claude Code asks you about wait among Claude's questions, as [Questions](#questions) tells.
 
 When the shell has `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` set, Claude Code pays with them instead of your subscription.
 The interactive Claude asks first, `claude -p` does not, so claudio warns in orange as it starts.
@@ -136,12 +137,17 @@ Enter waits for a second press as on a message: while questions wait, which a co
 
 ## Questions
 
-Claude's questions, the choices of `AskUserQuestion`, wait until you open them, so no key meant for your message answers one.
+Claude asks in three kinds of requests: the questions of a call of `AskUserQuestion`, a plan to carry out, from plan mode, and a call to allow, which Claude Code asks you about when its permission mode and rules leave it to you.
+Each request waits until you open it, so no key meant for your message answers one.
 `Y` on the label row counts them, up to 9 and then `+`, in orange while any waits.
 Meanwhile, Enter on a message refuses them, so it waits for a second press.
 Ctrl+Y shows them one at a time, and Ctrl+Y goes back to the message, as Esc does on the list.
-The right end of the label row names the call's questions `a`, `s`, `d` and `f`, green once submitted, with the one shown in reverse, when the call has more than one.
-A question longer than the screen ends in `… Ctrl+O shows it whole`: Ctrl+O there opens the whole conversation at the question, to read with less's keys, and `q` brings you back to answer.
+A rule above the question names its request: its kind, like `Questions`, `Plan` or the tool of the call, as Claude Code names it for a person, with its MCP server, if any, the subagent that asked, if one did, and its place among the requests, when more than one waits, like `── Bash · Explore the code · 2/3` or `── Search Files · claude.ai Google Drive · 1/2`.
+A title too long for the rule loses its end, and the place stays whole.
+The right end of the label row names the requests `q`, `w`, `e` and `r`, and those after the fourth as how many they are, like `+2`, then the request's questions `a`, `s`, `d` and `f`, green once submitted, each with the one shown in reverse, and each only when it has more than one, like `q w e │ a s`.
+Each request goes to Claude Code as soon as you answer it, apart from the others.
+A question shows in a block of 8 rows under the rule, whatever its length, so the options never move while you answer.
+A longer question ends in `… N more lines · Ctrl+O shows it whole`: Ctrl+O there opens the whole conversation at the question, to read with less's keys, and `q` brings you back to answer.
 
 Each question shows its options as numbered lines between the label row and the input box, and last, an item marked `>` for your own answer, which you write in the box.
 The cursor starts on the first option.
@@ -149,14 +155,17 @@ The cursor starts on the first option.
 | Key                  | On the list                                                    |
 | -------------------- | -------------------------------------------------------------- |
 | `j`/`k`, `↓`/`↑`     | move between the options                                       |
-| `1`–`9`              | pick an option, or tick it on several choices                  |
+| `1`–`9`              | move to an option, or tick it on several choices               |
 | Space                | tick the option, on several choices                            |
 | Enter                | submit the option, or the ticked ones on several choices       |
 | `>`                  | write your own answer in the box                               |
 | `]`/`[`              | go to the next or previous question                            |
 | `a` `s` `d` `f`      | go to that question                                            |
+| `}`/`{`              | go to the next or previous request                             |
+| `q` `w` `e` `r`      | go to that request                                             |
 | Esc                  | go back to the message                                         |
 
+A number only moves the cursor, so you see your choice before Enter answers it.
 The keys that pick an option pick the `>` item too: Enter, or Space on several choices.
 Either takes you into the box, at the end of your text, in insert mode, where the vi keys work as in a message.
 There, Enter submits your answer, or on several choices, ticks it as one more item and takes you back to the list.
@@ -174,6 +183,19 @@ A call of one question has nothing to review, so Enter sends its answer at once,
 `]` and `[` reach the review too, after the last question.
 Claude gets the options' labels and your words, never the numbers, and the conversation shows the answers once sent.
 Each question keeps what you picked and typed on it until the call is answered.
+
+A plan or a call to allow is a request of one question, whose options are named `y` and `n`, as command-line prompts answer a yes-or-no question.
+`y` and `n` only move the cursor, as numbers do, and Enter answers: allow allows it, and `refuse, and stop Claude` refuses it and stops Claude's turn, as Ctrl+C does.
+Your own answer refuses it too, but Claude reads your words and goes on from them, in the same turn.
+A plan shows whole, from the top of the screen, so the question stays right above the options whatever its length.
+A call shows in the same 8 rows as a question: first the fields of its input that matter most, each after a sign that reads as what it is, then the others, by name, and on the last row, after `?`, why Claude Code asks, as it sends it: its words, or else the kind of check that asks, like `A rule in your settings asks before this call`, or else the path that made it ask, and `no reason given` when it sends none of them.
+The signs come from a shell and a diff: Bash shows `$` before its command, `#` before its description, `t` before its timeout and `&` before where it runs, like `& in background`, an Edit shows `-` and `+` before what it takes out and puts in, in red and green, `@` comes before a file or a URL, and `│` before a Write's content or a WebFetch's prompt.
+A field the call leaves out shows what that means in grey, like `t default` or `& in foreground`.
+A call of another tool, like an MCP tool's, shows each field on a row of its own, after its name, which loses its end past 10 columns, so all its values start in one column.
+Each field takes the same rows on every call of its tool, and a short value leaves them empty, so a field stays in its place from one call to the next, and each value starts in the column its mark sets.
+A longer value ends in `… N more lines · Ctrl+O shows it whole`, a value of one row is cut in the middle with `…`, and the fields that do not fit end in `… N more fields · Ctrl+O shows them`.
+A call that Claude Code deems dangerous opens on `n`, as Claude Code's own prompt does, and its option to allow reads `allow (dangerous)`, in orange, and waits for a second Enter, which the label row asks for.
+The conversation shows each decision with the call's tag, like `allowed #01 Bash Run the tests`, then your words, when you gave them.
 
 ## Design
 

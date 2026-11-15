@@ -17,7 +17,7 @@ crossterm = "0.29"
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 # To check the Claude Code it installs against its pinned sha256
 sha2 = "0.10"
 # Only the grammars and a regex engine in Rust, since the terminal's own colors replace its themes

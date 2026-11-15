@@ -41,8 +41,9 @@ pub enum Event {
     ApiError(String),
     ToolUse(ToolUse),
     ToolResult(ToolResult),
-    /// A tool that waits for the user's answer before it runs.
-    Ask(Ask),
+    /// A tool that waits for the user's answer before it runs. Boxed, since its input and what
+    /// Claude Code tells of it take room.
+    Ask(Box<Ask>),
     State(State),
     /// A hook of the user's settings, named `hook` as Claude Code names it, failed with
     /// `exit_code` and `stderr`, or was cancelled, when `is_cancelled`.
@@ -204,8 +205,16 @@ pub struct ToolUse {
     pub id: String,
     pub name: String,
     pub input: Map<String, Value>,
+    /// The `Agent` call that started the subagent that makes the call, none when Claude itself
+    /// makes it.
+    pub agent_call: Option<String>,
+}
+
+impl ToolUse {
     /// Whether a subagent of Claude makes the call, rather than Claude itself.
-    pub is_subagent: bool,
+    pub fn is_subagent(&self) -> bool {
+        self.agent_call.is_some()
+    }
 }
 
 pub struct ToolResult {
@@ -225,12 +234,30 @@ pub struct Ask {
 }
 
 pub enum AskKind {
-    /// Whether the tool may run, which is refused, since only auto mode is supported for now.
-    /// TODO: Ask the user to approve the plan of an `ExitPlanMode` call, which Claude Code asks
-    /// about once claudio supports plan mode
-    Permission,
+    /// Whether the tool may run.
+    Permission(Permission),
+    /// Whether Claude may leave plan mode and carry out the plan of an `ExitPlanMode` call, in
+    /// Markdown.
+    Plan(String),
     /// The questions of an `AskUserQuestion` call, which runs once all of them are answered.
     Questions(Vec<Question>),
+}
+
+/// What Claude Code tells of a tool use it asks the user about.
+pub struct Permission {
+    /// The tool's name for a person, like `Search Files` for an MCP tool, or the tool's own name.
+    pub name: String,
+    /// The name of the MCP server the tool comes from, like `claude.ai Google Drive`.
+    pub server: Option<String>,
+    /// Why Claude Code asks, like the safety check that failed, none when it does not say.
+    pub reason: Option<String>,
+    /// What kind of check asks, like `rule` for the user's own ask rules.
+    pub reason_type: Option<String>,
+    /// The path that made Claude Code ask, as about a `rm -rf` of a directory.
+    pub blocked_path: Option<String>,
+    /// Whether the call should open on its refusal, which Claude Code asks for a call it deems
+    /// dangerous, like a `rm` of many files, as its own prompt then does.
+    pub is_guarded: bool,
 }
 
 #[derive(Deserialize)]
@@ -265,6 +292,9 @@ pub enum Answer {
     Allow { input: Map<String, Value> },
     /// Refuse the tool and end the turn, so Claude waits for the next message.
     Deny,
+    /// Refuse the tool for the user's `reason`, which Claude reads and goes on from, in the same
+    /// turn.
+    Explain { reason: String },
 }
 
 pub enum Command<'a> {
@@ -349,6 +379,12 @@ impl Command<'_> {
                         "behavior": "deny",
                         "message": "The user refused this tool use.",
                         "interrupt": true,
+                        "toolUseID": ask.tool_use_id,
+                    }),
+                    Answer::Explain { reason } => json!({
+                        "behavior": "deny",
+                        "message": format!("The user refused this tool use, and said: {reason}"),
+                        "interrupt": false,
                         "toolUseID": ask.tool_use_id,
                     }),
                 };
@@ -451,7 +487,7 @@ pub fn read_events(line: &str) -> Result<Vec<Event>, String> {
             message,
             parent_tool_use_id,
             error: _,
-        } => Shown(read_assistant(message, parent_tool_use_id.is_some(), line)),
+        } => Shown(read_assistant(message, parent_tool_use_id.as_ref(), line)),
         Message::User {
             is_replay: true, ..
         } => Skipped("it repeats what Claude Code's history holds, like a command's output"),
@@ -532,8 +568,10 @@ fn read_stream_event(event: StreamEvent, is_subagent: bool, line: &str) -> Class
     }
 }
 
-/// The events of a reply's blocks, those of a subagent's when `is_subagent`, from `line`.
-fn read_assistant(message: Body, is_subagent: bool, line: &str) -> Vec<Event> {
+/// The events of a reply's blocks, from `line`, those of the subagent that `agent_call` started,
+/// when it is some.
+fn read_assistant(message: Body, agent_call: Option<&String>, line: &str) -> Vec<Event> {
+    let is_subagent = agent_call.is_some();
     (message.content.into_blocks().into_iter().enumerate())
         .flat_map(|(index, block)| {
             let class = match block {
@@ -545,7 +583,7 @@ fn read_assistant(message: Body, is_subagent: bool, line: &str) -> Vec<Event> {
                     id,
                     name,
                     input,
-                    is_subagent,
+                    agent_call: agent_call.cloned(),
                 })]),
                 Block::Thinking => Skipped("claudio leaves Claude's thinking out"),
                 Block::ToolResult { .. } => Skipped("a tool's result comes in a user message"),
@@ -817,20 +855,35 @@ pub(crate) fn read_request(request_id: String, request: Value) -> Result<Event, 
     }
     let request: CanUseTool = serde_json::from_value(request)
         .map_err(|error| format!("Unreadable permission request from Claude Code: {error}"))?;
-    let kind = if request.tool_name == "AskUserQuestion" {
-        let input: QuestionsInput = serde_json::from_value(Value::Object(request.input.clone()))
-            .map_err(|error| format!("Unreadable questions from Claude: {error}"))?;
-        AskKind::Questions(input.questions)
-    } else {
-        AskKind::Permission
+    let kind = match request.tool_name.as_str() {
+        "AskUserQuestion" => {
+            let input: QuestionsInput =
+                serde_json::from_value(Value::Object(request.input.clone()))
+                    .map_err(|error| format!("Unreadable questions from Claude: {error}"))?;
+            AskKind::Questions(input.questions)
+        }
+        "ExitPlanMode" => {
+            let plan = request.input.get("plan").and_then(Value::as_str);
+            AskKind::Plan(plan.unwrap_or_default().to_string())
+        }
+        _ => AskKind::Permission(Permission {
+            name: (request.display_name.as_deref())
+                .map_or_else(|| request.tool_name.clone(), strip_escapes),
+            server: request.mcp_server.map(|server| strip_escapes(&server.name)),
+            // The SDK's types warn that it may carry ANSI escapes
+            reason: request.decision_reason.as_deref().map(strip_escapes),
+            reason_type: request.decision_reason_type.as_deref().map(strip_escapes),
+            blocked_path: request.blocked_path.as_deref().map(strip_escapes),
+            is_guarded: request.default_to_no,
+        }),
     };
-    Ok(Event::Ask(Ask {
+    Ok(Event::Ask(Box::new(Ask {
         request_id,
         tool_use_id: request.tool_use_id,
         tool_name: request.tool_name,
         input: request.input,
         kind,
-    }))
+    })))
 }
 
 /// A kind of message Claude Code sends, whose [`Class`] the reading gives. A kind joins once a
@@ -1313,11 +1366,75 @@ struct PlanLimit {
     resets_at: Option<String>,
 }
 
+/// `text` without its escape sequences, and without the control characters other than line
+/// breaks, so it cannot move the cursor or change colors where it shows.
+fn strip_escapes(text: &str) -> String {
+    let mut stripped = String::new();
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\x1b' {
+            // A CSI ends with a letter, and any other sequence with the character after the escape
+            if characters.next_if_eq(&'[').is_some() {
+                characters.find(char::is_ascii_alphabetic);
+            } else {
+                characters.next();
+            }
+        } else if !character.is_control() || character == '\n' {
+            stripped.push(character);
+        }
+    }
+    stripped
+}
+
+/// Claude Code's request to use a tool, `can_use_tool`, which asks whether Claude may make a
+/// call, as `SDKControlPermissionRequest` in `sdk.d.ts` types it:
+/// <https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.325/sdk.d.ts>.
+///
+/// claudio reads the fields below, and leaves out the others the types declare, each for a
+/// reason:
+/// - `description`: duplicate information. It is Claude Code's summary of the call for its own
+///   dialog, made of what the request already carries: a copy of the `description` in a Bash
+///   call's input, or else a part of the input, like a Write's file, sometimes followed by
+///   `decision_reason`. The block shows all of it from the input and the reason. Not to be
+///   confused with the `description` in a Bash call's input, Claude's own words, which the
+///   block shows after `#`.
+/// - `title`: a heading for Claude Code's own dialog. Claude Code 2.1.322 sends it only for a
+///   tool the person answers on a card of its own, like setting up Claude in Chrome, which only
+///   Claude's apps offer, and for an ask a hook words itself, so no call claudio meets has one
+///   yet. Read from Claude Code's code on 2026-11-15: should a tool claudio meets start sending
+///   one, show it.
+/// - `matched_ask_rule`: the user's ask rule that matched too, when another check's reason is
+///   the one given. The reason given is true, and the case is rare.
+/// - `permission_suggestions` and `suppress_always_allow_rule`: the rules an option "allow, and
+///   don't ask again" would save, and whether to leave that option out. claudio leaves the
+///   option out on purpose, so each call is answered on its own.
+/// - `classifier_approvable`: whether a program that approves calls by its own classifier may
+///   approve this one. claudio approves nothing by itself.
+/// - `requires_user_interaction`: whether a one-tap answer, as from a phone's notification, is
+///   not enough, and the person must open the session. claudio always shows the whole call.
+/// - `agent_id`: the subagent that asked, which claudio does not read here yet.
 #[derive(Deserialize)]
 struct CanUseTool {
     tool_name: String,
     input: Map<String, Value>,
     tool_use_id: String,
+    /// Absent before Claude Code named tools for a person.
+    display_name: Option<String>,
+    mcp_server: Option<McpServer>,
+    /// Ref: `SDKControlPermissionRequest` in `sdk.d.ts`, which marks it human-readable
+    decision_reason: Option<String>,
+    decision_reason_type: Option<String>,
+    blocked_path: Option<String>,
+    /// Ref: `SDKControlPermissionRequest` in `sdk.d.ts`: an ask that a stray key must not
+    /// approve
+    #[serde(default)]
+    default_to_no: bool,
+}
+
+/// The MCP server a tool comes from, as `McpServerProvenance` in `sdk.d.ts` types it.
+#[derive(Deserialize)]
+struct McpServer {
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -1662,7 +1779,7 @@ mod tests {
     }
 
     #[test]
-    fn an_exit_plan_mode_request_asks_for_permission() {
+    fn an_exit_plan_mode_request_asks_to_approve_its_plan() {
         let request = serde_json::json!({
             "subtype": "can_use_tool",
             "tool_name": "ExitPlanMode",
@@ -1672,7 +1789,27 @@ mod tests {
         let Ok(Event::Ask(ask)) = read_request("request-1".to_string(), request) else {
             panic!("an ask");
         };
-        assert!(matches!(ask.kind, AskKind::Permission));
+        assert!(matches!(&ask.kind, AskKind::Plan(plan) if plan == "# Plan"));
+    }
+
+    #[test]
+    fn a_permission_request_tells_why_it_asks_and_whether_one_key_may_allow_it() {
+        let request = serde_json::json!({
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "input": {"command": "rm -rf build"},
+            "tool_use_id": "1",
+            "decision_reason": "\u{1b}[1mrm\u{1b}[0m removes files",
+            "default_to_no": true,
+        });
+        let Ok(Event::Ask(ask)) = read_request("request-1".to_string(), request) else {
+            panic!("an ask");
+        };
+        let AskKind::Permission(permission) = ask.kind else {
+            panic!("a permission");
+        };
+        assert_eq!(permission.reason.as_deref(), Some("rm removes files"));
+        assert!(permission.is_guarded);
     }
 
     #[test]

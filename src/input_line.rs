@@ -31,12 +31,17 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::climb::{self, Climb};
 use crate::context::COLD_COLOR;
-use crate::keys::{self, Action, Phase, SessionKey, View};
+use crate::keys::{self, Action, BLOCK_ROWS, Field, Mark, Phase, SessionKey, Tone, View};
 use crate::limits::{Level, limit_level};
-use crate::picker::{self, Cursor, Draft, Form, Move, Pick, question_name};
-use crate::render::{Output, Status, colors_at, cut, marks, start_bar_row, user_line};
+use crate::picker::{self, Cursor, Draft, Form, Move, Pick, question_name, request_name};
+use crate::render::{
+    Output, Status, colors_at, cut_end, cut_middle, marks, start_bar_row, user_line,
+};
 use crate::status;
-use crate::style::{ATTENTION, DONE_OR_ADDED, RESET, REVERSE, STRONG, SUBDUED_ON_BAR, UNREVERSE};
+use crate::style::{
+    ATTENTION, DONE_OR_ADDED, FAILED_OR_REMOVED, RESET, REVERSE, STRONG, SUBDUED, SUBDUED_ON_BAR,
+    UNREVERSE,
+};
 use crate::terminal::{Settings, run_in_terminal};
 use crate::vi::{Editor, Mode};
 use crate::wrap;
@@ -238,7 +243,7 @@ impl InputLine {
             self.editor.press(&escape());
         }
         self.pick = draft.pick;
-        let outcome = self.run(Phase::Answering(view))?;
+        let outcome = self.run(Phase::Answering(Box::new(view)))?;
         Ok(outcome.with(Draft {
             pick: self.pick.clone(),
             text: self.text(),
@@ -476,15 +481,19 @@ impl InputLine {
         }
         let text = self.text();
         let before = self.pick.clone();
-        let effect = self
-            .pick
-            .press(key, view.choices.len(), view.form, self.input());
+        let effect = self.pick.press(key, &view.choices, view.form, self.input());
         if effect == picker::Effect::Submit && view.form != Form::Review {
-            let is_empty = self.pick.chosen(view.form, &text).is_empty();
-            let loss = self
-                .pick
-                .leaves_out(view.form, &text)
-                .then(|| "leaves out your own answer".to_string());
+            let chosen = self.pick.chosen(view.form, &text);
+            let is_empty = chosen.is_empty();
+            let risk = (chosen.options.iter()).find_map(|index| {
+                view.choices
+                    .get(*index)
+                    .and_then(|choice| choice.risk.clone())
+            });
+            let loss = risk.or_else(|| {
+                (self.pick.leaves_out(view.form, &text))
+                    .then(|| "leaves out your own answer".to_string())
+            });
             if is_empty || !self.goes_ahead(key, confirming, loss, None) {
                 self.pick = before;
                 self.is_empty_warned = is_empty;
@@ -895,8 +904,9 @@ impl InputLine {
         format!("{}{}{right}", self.label, " ".repeat(room))
     }
 
-    /// Draws the question of `view` in `rows`: the question above the label row, and on a
-    /// question whose options have previews, the preview of the option the cursor is on from the
+    /// Draws the question of `view` in `rows`: the question above the label row, with the call
+    /// or the plan it asks about from the top of the screen, under the rule. On a question whose
+    /// options have previews, it draws the preview of the option the cursor is on from the
     /// top of the screen, between an edge titled with the option and a rule above the question,
     /// as fzf's preview window with a label, so only the preview changes as the cursor moves.
     /// Below the label row go the options, on the bar, and the user's own answer right above the
@@ -908,27 +918,42 @@ impl InputLine {
         put!(out, Clear(ClearType::All));
         let columns = NonZeroUsize::new(usize::from(width)).unwrap_or(NonZeroUsize::MIN);
         let preview = picker::preview(&view.choices, &self.pick);
-        // An edge across the screen, with `title` in it, as fzf's preview label
-        let rule = |title: &str| {
+        // An edge across the screen, with `title` in it, as fzf's preview label, cut at its end
+        // as a name is, before `place`, which stays whole
+        let rule = |title: &str, place: &str| {
             let title = if title.is_empty() {
                 String::new()
             } else {
+                let room = usize::from(width).saturating_sub("──  ".len() + visible_width(place));
+                let room = NonZeroUsize::new(room).unwrap_or(NonZeroUsize::MIN);
                 format!(
-                    "── {}{RESET}{SUBDUED_ON_BAR} ",
-                    cut(&format!("{STRONG}{title}"), columns)
+                    "── {}{RESET}{SUBDUED}{place} ",
+                    cut_end(&format!("{STRONG}{title}"), room)
                 )
             };
             let fill = "─".repeat(usize::from(width).saturating_sub(visible_width(&title)));
-            format!("{SUBDUED_ON_BAR}{title}{fill}")
+            format!("{SUBDUED}{title}{fill}")
         };
-        let mut lines = Vec::new();
-        if preview.is_some() {
-            lines.push(rule(""));
-        }
-        lines.extend(view.lines.iter().cloned());
-        let top = draw_lines_above(out, &lines, width, rows.label);
+        // The rule above the question names the request, which the label row names the question
+        // of
+        let top = if view.details.is_empty() {
+            let mut lines = vec![rule(&view.title, &view.place)];
+            lines.extend(block_lines(&view.fields, columns));
+            lines.extend(view.lines.iter().cloned());
+            draw_lines_above(out, &lines, width, rows.label)
+        } else {
+            // The call or the plan from the top, so the rule and the question stay in place
+            let top = draw_lines_above(out, &view.lines, width, rows.label);
+            put_line(out, 0, &rule(&view.title, &view.place));
+            draw_lines_below(out, &view.details, width, 1, top.saturating_sub(1));
+            top
+        };
         if let Some(preview) = preview {
-            put_line(out, 0, &rule(preview.title.as_deref().unwrap_or_default()));
+            put_line(
+                out,
+                0,
+                &rule(preview.title.as_deref().unwrap_or_default(), ""),
+            );
             // The rows between the edge and the rule above the question, less a blank row
             // above the rule. A cut keeps the last of them for the …
             let room = usize::from(top.saturating_sub(2));
@@ -940,10 +965,10 @@ impl InputLine {
             };
             let mut lines: Vec<String> = preview.lines[..shown]
                 .iter()
-                .map(|line| cut(line, columns))
+                .map(|line| cut_middle(line, columns))
                 .collect();
             if is_cut && room > 0 {
-                lines.push(format!("{SUBDUED_ON_BAR}… Ctrl+O shows it whole"));
+                lines.push(format!("{SUBDUED}… Ctrl+O shows it whole"));
             }
             for (row, line) in (1..).zip(lines) {
                 put_line(out, row, &line);
@@ -964,10 +989,10 @@ impl InputLine {
         for row in rows.options..rows.own {
             let line = options
                 .next()
-                .map_or_else(String::new, |line| cut(line, columns));
+                .map_or_else(String::new, |line| cut_middle(line, columns));
             put_bar_line(out, row, &line);
         }
-        put_bar_line(out, rows.own, &cut(&own, columns));
+        put_bar_line(out, rows.own, &cut_middle(&own, columns));
     }
 
     /// Lays the screen out for its new size, which the frame after it draws. The main screen
@@ -1274,9 +1299,35 @@ fn limit_indicator(letter: char, level: Option<Level>) -> String {
     format!("{color}{letter}{}", show_level(level.map(Level::to_number)))
 }
 
-/// The batch's progress in the question view: the names of its questions.
+/// The question view's progress: the names of the requests that wait, then those of the
+/// questions of the request shown, each level only when it has more than one item.
 fn progress(view: &View) -> Option<String> {
-    names(&view.progress, view.index, question_name)
+    let requests = request_names(view);
+    let questions = names(&view.progress, view.index, question_name);
+    let levels: Vec<String> = [requests, questions].into_iter().flatten().collect();
+    (!levels.is_empty()).then(|| levels.join(&format!("{SUBDUED_ON_BAR} │ ")))
+}
+
+/// The names of the requests that wait, as for the questions of a batch, where those after the
+/// fourth, which have no key, show as how many they are, like `+2`, in reverse video when one of
+/// them shows.
+fn request_names(view: &View) -> Option<String> {
+    let count = view.requests.len();
+    let keyed = count.min(picker::REQUEST_KEYS.len());
+    let mut shown = names(&view.requests[..keyed], view.request_index, |index| {
+        request_name(index).expect("a named request")
+    })
+    .or_else(|| (count > 1).then(String::new))?;
+    if count > keyed {
+        let (on, off) = if view.request_index >= keyed {
+            (REVERSE, UNREVERSE)
+        } else {
+            ("", "")
+        };
+        let rest = count - keyed;
+        shown = format!("{shown} {SUBDUED_ON_BAR}{on}+{rest}{off}");
+    }
+    Some(shown)
 }
 
 /// The names of the items of one level of the question view, like the questions of a batch:
@@ -1347,7 +1398,7 @@ fn draw_lines_above(out: &mut Vec<u8>, lines: &[String], width: u16, bottom: u16
         if line_rows > room {
             if row > 0 {
                 put!(out, MoveTo(0, row - 1));
-                out.extend(format!("{SUBDUED_ON_BAR}… Ctrl+O shows it whole{RESET}").as_bytes());
+                out.extend(format!("{SUBDUED}… Ctrl+O shows it whole{RESET}").as_bytes());
             }
             return row.saturating_sub(1);
         }
@@ -1355,6 +1406,178 @@ fn draw_lines_above(out: &mut Vec<u8>, lines: &[String], width: u16, bottom: u16
         put_line(out, row, line);
     }
     row
+}
+
+/// The columns a field's name takes at most, cut in the middle when longer.
+const NAME_WIDTH: usize = 10;
+
+/// The columns of a field's name, the `:` and the space after it, so that every value shown by
+/// name starts in the same column.
+const NAME_COLUMNS: usize = NAME_WIDTH + ": ".len();
+
+/// The rows of the block under the rule: each field's mark, then its value from a column that
+/// depends on the mark alone, so that a value starts in the same column on every call of a
+/// tool, in the rows the field takes. A sign takes 2 columns, and a name `NAME_COLUMNS`, losing
+/// its middle when longer than `NAME_WIDTH`. A value of one row shows its line breaks as `↵`, and loses its middle
+/// to `…` when it is too wide. A value of more rows wraps, and when it still does not fit, its
+/// last row counts the rows left out. Rows a value leaves empty stay empty, so the block always
+/// takes `BLOCK_ROWS` rows.
+fn block_lines(fields: &[Field], columns: NonZeroUsize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for field in fields {
+        let tone = match field.tone {
+            Tone::Plain => RESET,
+            Tone::Bold => STRONG,
+            Tone::Note | Tone::Comment => SUBDUED,
+            Tone::Removed => FAILED_OR_REMOVED,
+            Tone::Added => DONE_OR_ADDED,
+        };
+        // The mark of the first row, and of each row of the value on `every_row`
+        let (mark, every_row) = match &field.mark {
+            Mark::None => (String::new(), false),
+            Mark::Sign {
+                sign,
+                every_row,
+                tone,
+            } => {
+                let color = match tone {
+                    Tone::Removed => FAILED_OR_REMOVED,
+                    Tone::Added => DONE_OR_ADDED,
+                    _ => SUBDUED,
+                };
+                (format!("{color}{sign}{RESET} "), *every_row)
+            }
+            Mark::Name(name) if name.is_empty() => (" ".repeat(NAME_COLUMNS), false),
+            Mark::Name(name) => {
+                // The name holds its color, which the cut sets again after the `…`
+                let width = NonZeroUsize::new(NAME_WIDTH).unwrap_or(NonZeroUsize::MIN);
+                let name = format!("{}:", cut_end(&format!("{SUBDUED}{name}"), width));
+                let pad = " ".repeat(NAME_COLUMNS.saturating_sub(visible_width(&name)));
+                (format!("{name}{RESET}{pad}"), false)
+            }
+        };
+        let indent = visible_width(&mark);
+        let value_columns =
+            NonZeroUsize::new(columns.get().saturating_sub(indent)).unwrap_or(NonZeroUsize::MIN);
+        let value = field.value.trim_end_matches('\n');
+        // Each row, and whether it shows the value, rather than counting the rows left out
+        let rows: Vec<(String, bool)> = if field.rows == 1 {
+            vec![(
+                cut_middle(
+                    &format!("{tone}{}", value.replace('\n', "↵")),
+                    value_columns,
+                ),
+                true,
+            )]
+        } else {
+            let wrapped = word_rows(value, value_columns.get());
+            if wrapped.len() <= field.rows {
+                (wrapped.into_iter())
+                    .map(|row| (format!("{tone}{row}"), true))
+                    .collect()
+            } else {
+                let shown = field.rows - 1;
+                let mut rows: Vec<(String, bool)> = (wrapped[..shown].iter())
+                    .map(|row| (format!("{tone}{row}"), true))
+                    .collect();
+                let more = more_lines(wrapped.len() - shown);
+                rows.push((
+                    cut_middle(&format!("{SUBDUED}{more}"), value_columns),
+                    false,
+                ));
+                rows
+            }
+        };
+        for (number, row) in
+            (0..field.rows).zip(rows.into_iter().map(Some).chain(std::iter::repeat(None)))
+        {
+            let line = match row {
+                Some((row, is_value)) if number == 0 || (every_row && is_value) => {
+                    format!("{mark}{row}{RESET}")
+                }
+                Some((row, _)) => format!("{}{row}{RESET}", " ".repeat(indent)),
+                None => String::new(),
+            };
+            lines.push(line);
+        }
+    }
+    lines.resize(BLOCK_ROWS, String::new());
+    lines
+}
+
+/// `text` wrapped at `width` columns between words, as prose reads, and within a word only when
+/// it is wider than a row, like a long path. Each line break starts a row, which keeps the line's
+/// indent, and a row that a wrap starts drops the spaces it starts with.
+fn word_rows(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    for line in text.split('\n') {
+        let line = line.replace('\t', " ");
+        // Each word with the spaces before it
+        let mut words: Vec<&str> = Vec::new();
+        let mut start = 0;
+        let mut was_space = true;
+        for (index, character) in line.char_indices() {
+            let is_space = character == ' ';
+            if is_space && !was_space {
+                words.push(&line[start..index]);
+                start = index;
+            }
+            was_space = is_space;
+        }
+        words.push(&line[start..]);
+        let mut row = String::new();
+        let mut row_width = 0;
+        for word in words {
+            let mut word = word;
+            if row_width > 0 && row_width + UnicodeWidthStr::width(word) > width {
+                rows.push(std::mem::take(&mut row));
+                row_width = 0;
+                word = word.trim_start();
+            }
+            for character in word.chars() {
+                let character_width = character.width().unwrap_or(0);
+                if row_width > 0 && row_width + character_width > width {
+                    rows.push(std::mem::take(&mut row));
+                    row_width = 0;
+                }
+                row.push(character);
+                row_width += character_width;
+            }
+        }
+        rows.push(row);
+    }
+    rows
+}
+
+/// The row that stands for `count` rows left out, and tells how to see them.
+fn more_lines(count: usize) -> String {
+    let lines = if count == 1 { "line" } else { "lines" };
+    format!("… {count} more {lines} · Ctrl+O shows it whole")
+}
+
+/// Draws `lines` from `top` down, each taking the rows it wraps to, and ends before `bottom`.
+/// Lines that do not fit give their place to a `…` line that says how to see them whole.
+fn draw_lines_below(out: &mut Vec<u8>, lines: &[String], width: u16, top: u16, bottom: u16) {
+    let mut row = top;
+    for (index, line) in lines.iter().enumerate() {
+        let line_rows = rows_of(line, width);
+        // A cut keeps a row for the …
+        let room = if index + 1 == lines.len() {
+            bottom.saturating_sub(row)
+        } else {
+            bottom.saturating_sub(row).saturating_sub(1)
+        };
+        if line_rows > room {
+            if row < bottom {
+                let hidden: u16 = lines[index..].iter().map(|line| rows_of(line, width)).sum();
+                put_line(out, row, &format!("{SUBDUED}{}", more_lines(hidden.into())));
+            }
+            return;
+        }
+        put_line(out, row, line);
+        row += line_rows;
+    }
 }
 
 /// Writes `line` on `row`, from its start, and resets the colors after it, so they reach nothing
@@ -1444,6 +1667,46 @@ mod tests {
         assert!(two.contains(&format!("{REVERSE}s")));
     }
 
+    #[test]
+    fn requests_after_the_fourth_show_as_their_count_beside_the_questions() {
+        let view = |requests: usize, request_index: usize, questions: usize| View {
+            label: String::new(),
+            title: String::new(),
+            place: String::new(),
+            refusal: String::new(),
+            request_index,
+            requests: vec![false; requests],
+            details: vec![],
+            fields: vec![],
+            lines: vec![],
+            choices: vec![],
+            own_label: String::new(),
+            form: Form::One,
+            full_view_line: 1,
+            index: 0,
+            progress: vec![false; questions],
+            is_submitted: false,
+            sends_at_once: false,
+        };
+        assert_eq!(progress(&view(1, 0, 1)), None);
+        let plain = |text: String| {
+            let mut plain = String::new();
+            let mut characters = text.chars();
+            while let Some(character) = characters.next() {
+                if character == '\x1b' {
+                    characters.by_ref().find(char::is_ascii_alphabetic);
+                } else {
+                    plain.push(character);
+                }
+            }
+            plain
+        };
+        let six = progress(&view(6, 5, 2)).expect("names");
+        assert_eq!(plain(six.clone()), "q w e r +2 │ a s");
+        assert!(six.contains(&format!("{REVERSE}+2")));
+        assert_eq!(plain(progress(&view(2, 0, 1)).expect("names")), "q w");
+    }
+
     use crate::style::STRONG;
 
     #[test]
@@ -1491,5 +1754,97 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(rows[0].contains('…'));
         assert_eq!(rows[1], format!("ef{RESET}"));
+    }
+
+    /// The text of the rows of `fields`' block, without colors.
+    fn block_text(fields: &[Field], columns: usize) -> Vec<String> {
+        let columns = NonZeroUsize::new(columns).expect("some columns");
+        (block_lines(fields, columns).iter())
+            .map(|line| {
+                // Every sequence a row holds is a CSI, which ends with a letter
+                let mut text = String::new();
+                let mut characters = line.chars();
+                while let Some(character) = characters.next() {
+                    if character == '\x1b' {
+                        characters.find(char::is_ascii_alphabetic);
+                    } else {
+                        text.push(character);
+                    }
+                }
+                text.trim_end().to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_block_starts_values_in_the_column_of_their_mark_and_counts_the_rows_left_out() {
+        let field = |mark: Mark, value: &str, rows| Field {
+            mark,
+            value: value.to_string(),
+            tone: Tone::Plain,
+            rows,
+        };
+        let sign = |sign, every_row| Mark::Sign {
+            sign,
+            every_row,
+            tone: Tone::Comment,
+        };
+        let name = |name: &str| Mark::Name(name.to_string());
+        let fields = [
+            field(sign('$', false), "1\n2\n3\n4\n5", 3),
+            field(sign('#', false), "a\nb", 1),
+            field(name("timeout"), "600", 1),
+            field(sign('?', false), "why", 1),
+        ];
+        assert_eq!(
+            block_text(&fields, 60),
+            [
+                "$ 1",
+                "  2",
+                "  … 3 more lines · Ctrl+O shows it whole",
+                "# a↵b",
+                "timeout:    600",
+                "? why",
+                "",
+                "",
+            ]
+        );
+        // A diff's sign marks each row of the value, and a short value leaves its rows empty,
+        // so each field keeps its place
+        let fields = [
+            field(sign('@', false), "a.rs", 1),
+            field(sign('-', true), "x\ny", 2),
+            field(sign('+', true), "z", 2),
+            field(sign('?', false), "why", 1),
+        ];
+        assert_eq!(
+            block_text(&fields, 40),
+            ["@ a.rs", "- x", "- y", "+ z", "", "? why", "", ""]
+        );
+        // A name too long for its column loses its end, and the empty field that fills the
+        // rows the fields leave keeps the reason on the last row
+        let fields = [
+            field(name("a_very_long_name"), "1", 1),
+            field(Mark::None, "", 6),
+            field(sign('?', false), "why", 1),
+        ];
+        assert_eq!(
+            block_text(&fields, 40),
+            ["a_very_lo…: 1", "", "", "", "", "", "", "? why"]
+        );
+        let line = &block_lines(&fields, NonZeroUsize::new(40).expect("columns"))[0];
+        assert!(
+            line.contains(&format!("{SUBDUED}a_very_lo{RESET}{SUBDUED}…{RESET}:")),
+            "{line:?}"
+        );
+    }
+
+    #[test]
+    fn a_value_wraps_between_words_and_within_a_word_only_wider_than_a_row() {
+        assert_eq!(word_rows("one two three", 8), ["one two", "three"]);
+        assert_eq!(
+            word_rows("  indented\nabcdefghij", 4),
+            ["  in", "dent", "ed", "abcd", "efgh", "ij"]
+        );
     }
 }

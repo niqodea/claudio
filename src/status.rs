@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::context::{COLD_COLOR, Context};
 use crate::limits::{Limits, level, limit_level};
 use crate::protocol::{Ceiling, Limit};
-use crate::style::{RESET, SUBDUED_ON_BAR};
+use crate::style::{RESET, SUBDUED};
 
 /// How long before the cache turns cold its cold-at time shows in yellow.
 const NEAR_COLD: Duration = Duration::from_mins(5);
@@ -148,7 +148,7 @@ fn change(verb: &str, at: SystemTime, wall_now: SystemTime, color: Option<&'stat
 }
 
 fn label(text: &str) -> String {
-    format!("{SUBDUED_ON_BAR}{text:<LABEL_WIDTH$}{RESET}")
+    format!("{SUBDUED}{text:<LABEL_WIDTH$}{RESET}")
 }
 
 /// A part of a row, in its color, none for the terminal's own.

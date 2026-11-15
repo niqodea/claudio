@@ -12,6 +12,10 @@
 //! refuse, which stops Claude's turn, or the user's own answer, which refuses the call with the
 //! user's words for Claude to go on from.
 //!
+//! The question view keeps the user's place: each request keeps the question it shows, and the
+//! review and each question their drafts, so going to another request, or back to the message,
+//! and coming back finds everything as the user left it.
+//!
 //! Ref: <https://design-system.service.gov.uk/patterns/check-answers>, on checking answers
 //! before sending them
 
@@ -38,6 +42,10 @@ struct Request {
     /// itself.
     agent: Option<String>,
     entries: Vec<Entry>,
+    /// The question the question view shows, from 0, where one past the last is the review.
+    shown: usize,
+    /// What was picked on the review.
+    review: Draft,
 }
 
 /// A question that waits.
@@ -51,8 +59,8 @@ struct Entry {
 
 /// What sending from the question view leads to.
 pub enum Sent {
-    /// The question view shows the question at this index, or the review one past the last.
-    Show(usize),
+    /// The request still waits for answers.
+    Show,
     /// The request is answered: each question's header with its answer, none for a plan or a
     /// permission, and the reply to its call.
     Answered {
@@ -83,6 +91,15 @@ impl Request {
 
     fn is_submitted(&self) -> bool {
         self.entries.iter().all(|entry| entry.is_submitted)
+    }
+
+    /// Moves on from the question at `index` to the first one not submitted after it, or else
+    /// to the review, with every answer ticked.
+    fn move_on(&mut self, index: usize) {
+        self.shown = self.next_open(index);
+        if self.shown == self.entries.len() {
+            self.review = all_ticked(self.entries.len());
+        }
     }
 
     /// The first question not submitted after the one at `index`, round from the first, or else
@@ -409,6 +426,18 @@ fn reason_type_text(reason_type: &str) -> String {
     .to_string()
 }
 
+/// The review's draft with each of `count` answers ticked.
+fn all_ticked(count: usize) -> Draft {
+    Draft {
+        pick: Pick {
+            cursor: Cursor::Option(0),
+            ticked: (0..count).collect(),
+            is_own_ticked: false,
+        },
+        text: String::new(),
+    }
+}
+
 /// The block under the rule of a question, or of the review: its text, in all the block's rows.
 fn text_field(text: &str) -> Field {
     Field {
@@ -432,7 +461,7 @@ impl Questions {
             AskKind::Questions(questions) => questions.len(),
             AskKind::Permission(_) | AskKind::Plan(_) => 1,
         };
-        let entries = full_view_lines
+        let entries: Vec<Entry> = full_view_lines
             .into_iter()
             .take(count)
             .map(|full_view_line| {
@@ -445,10 +474,13 @@ impl Questions {
                 }
             })
             .collect();
+        let review = all_ticked(entries.len());
         self.requests.push(Request {
             ask,
             agent,
             entries,
+            shown: 0,
+            review,
         });
     }
 
@@ -461,71 +493,65 @@ impl Questions {
         self.requests.is_empty()
     }
 
-    /// Where the question view opens: on the request it showed last, the first question not
-    /// submitted, or else the review, or none when none waits.
-    pub fn first(&mut self) -> Option<usize> {
-        self.shown = self.shown.min(self.requests.len().checked_sub(1)?);
-        let request = self.request();
-        Some(request.next_open(request.entries.len() - 1))
+    /// Opens the question view on the request it showed last, or on the last request when that
+    /// one is gone, and returns whether any request waits.
+    pub fn open(&mut self) -> bool {
+        let Some(last) = self.requests.len().checked_sub(1) else {
+            return false;
+        };
+        self.shown = self.shown.min(last);
+        true
     }
 
-    /// Where `to` moves from the question at `index`. Next and previous go round the request,
-    /// where the review comes after the last question once all are submitted, and a question the
-    /// request lacks keeps the one at `index`. Moves between requests go round them too, onto
-    /// the request's first question not submitted, and a request that does not wait keeps the
-    /// one shown.
-    pub fn go(&mut self, index: usize, to: Move) -> usize {
+    /// Moves the question view as `to` says. Next and previous go round the request, where the
+    /// review comes after the last question once all are submitted, and a question the request
+    /// lacks keeps the one shown. Moves between requests go round them too, onto the question
+    /// each request showed last, and a request that does not wait keeps the one shown.
+    pub fn go(&mut self, to: Move) {
         let count = self.requests.len();
-        let request = match to {
-            Move::NextRequest => (self.shown + 1) % count,
-            Move::PreviousRequest => (self.shown + count - 1) % count,
-            Move::ToRequest(request) if request < count => request,
-            Move::ToRequest(_) => return index,
+        match to {
+            Move::NextRequest => self.shown = (self.shown + 1) % count,
+            Move::PreviousRequest => self.shown = (self.shown + count - 1) % count,
+            Move::ToRequest(request) if request < count => self.shown = request,
+            Move::ToRequest(_) => {}
             Move::Next | Move::Previous | Move::To(_) => {
-                let request = self.request();
+                let request = self.request_mut();
+                let index = request.shown;
                 let stops = request.entries.len() + usize::from(request.is_submitted());
-                return match to {
+                let next = match to {
                     Move::Next => (index + 1) % stops,
                     Move::Previous => (index + stops - 1) % stops,
                     Move::To(question) if question < request.entries.len() => question,
                     _ => index,
                 };
+                request.shown = next;
             }
-        };
-        if request == self.shown {
-            return index;
         }
-        self.shown = request;
-        self.first().expect("a request waits")
     }
 
-    /// The draft of the question at `index`, or on the review, every answer ticked.
-    pub fn draft(&self, index: usize) -> Draft {
+    /// The draft of the question shown, or of the review.
+    pub fn draft(&self) -> Draft {
         let request = self.request();
-        match request.entries.get(index) {
+        match request.entries.get(request.shown) {
             Some(entry) => entry.draft.clone(),
-            None => Draft {
-                pick: Pick {
-                    cursor: Cursor::Option(0),
-                    ticked: (0..request.entries.len()).collect(),
-                    is_own_ticked: false,
-                },
-                text: String::new(),
-            },
+            None => request.review.clone(),
         }
     }
 
-    /// Keeps `draft` on the question at `index`, which the review has none of.
-    pub fn keep_draft(&mut self, index: usize, draft: Draft) {
-        if let Some(entry) = self.request_mut().entries.get_mut(index) {
-            entry.draft = draft;
+    /// Keeps `draft` on the question shown, or on the review.
+    pub fn keep_draft(&mut self, draft: Draft) {
+        let request = self.request_mut();
+        match request.entries.get_mut(request.shown) {
+            Some(entry) => entry.draft = draft,
+            None => request.review = draft,
         }
     }
 
-    /// What the question view shows at `index`: a question's text and its options, the call or
-    /// the plan asked about with the options to allow or refuse it, or the review's answers.
-    pub fn view(&self, index: usize) -> View {
+    /// What the question view shows: a question's text and its options, the call or the plan
+    /// asked about with the options to allow or refuse it, or the review's answers.
+    pub fn view(&self) -> View {
         let request = self.request();
+        let index = request.shown;
         let progress: Vec<bool> = (request.entries.iter())
             .map(|entry| entry.is_submitted)
             .collect();
@@ -598,17 +624,18 @@ impl Questions {
         }
     }
 
-    /// Acts on Enter at `index` with `draft`. A plan or a permission is answered at once. Else
-    /// Enter submits a question and moves on, or opens a submitted one again, and keeps a
-    /// question that `draft` answers nothing on, like the user's own answer left empty. A batch
-    /// of one question has nothing to review, so its answer goes at once. On the review, it
-    /// answers the batch once every answer is ticked, and else opens the unticked ones.
-    pub fn send(&mut self, index: usize, draft: Draft) -> Sent {
+    /// Acts on Enter with `draft` on the question shown. A plan or a permission is answered at
+    /// once. Else Enter submits a question and moves on, or opens a submitted one again, and
+    /// keeps a question that `draft` answers nothing on, like the user's own answer left empty.
+    /// A batch of one question has nothing to review, so its answer goes at once. On the review,
+    /// it answers the batch once every answer is ticked, and else opens the unticked ones.
+    pub fn send(&mut self, draft: Draft) -> Sent {
         let request = self.request_mut();
+        let index = request.shown;
         if request.is_decision() {
             let Some(answer) = request.decide(&draft) else {
                 request.entries[0].draft = draft;
-                return Sent::Show(index);
+                return Sent::Show;
             };
             let ask = Box::new(self.requests.remove(self.shown).ask);
             return Sent::Answered {
@@ -625,20 +652,22 @@ impl Questions {
             for (number, entry) in request.entries.iter_mut().enumerate() {
                 entry.is_submitted = draft.pick.ticked.contains(&number);
             }
-            return Sent::Show(request.next_open(count - 1));
+            request.move_on(count - 1);
+            return Sent::Show;
         }
         let answers = choose(&request.questions()[index], &draft).is_some();
         let entry = &mut request.entries[index];
         entry.draft = draft;
         if entry.is_submitted || !answers {
             entry.is_submitted = false;
-            return Sent::Show(index);
+            return Sent::Show;
         }
         entry.is_submitted = true;
         if count == 1 {
             return self.answer();
         }
-        Sent::Show(request.next_open(index))
+        request.move_on(index);
+        Sent::Show
     }
 
     /// Takes away the request the question view shows, and returns what it asked, to refuse,
@@ -766,9 +795,10 @@ mod tests {
         }
     }
 
-    fn shown(sent: &Sent) -> usize {
-        match sent {
-            Sent::Show(index) => *index,
+    /// Sends `draft` on the question shown, and returns the question shown after it.
+    fn send_on(questions: &mut Questions, draft: Draft) -> usize {
+        match questions.send(draft) {
+            Sent::Show => questions.view().index,
             Sent::Answered { .. } => panic!("a question shows"),
         }
     }
@@ -778,49 +808,58 @@ mod tests {
         let mut questions = Questions::default();
         questions.add(two_questions("a"), None, vec![1, 2]);
         assert_eq!(questions.count(), 1);
-        let view = questions.view(0);
+        let view = questions.view();
         assert_eq!(view.label, "Database");
         assert_eq!(view.form, Form::One);
         assert_eq!(view.choices.len(), 2);
-        assert_eq!(questions.view(1).form, Form::Several);
+        questions.go(Move::Next);
+        assert_eq!(questions.view().form, Form::Several);
     }
 
     #[test]
     fn enter_submits_and_moves_on_and_opens_a_submitted_question_again() {
         let mut questions = Questions::default();
         questions.add(two_questions("a"), None, vec![1, 2]);
-        assert_eq!(shown(&questions.send(1, with_ticks(2, &[2]))), 0);
-        assert_eq!(questions.view(0).progress, [false, true]);
-        assert_eq!(questions.go(0, Move::Next), 1);
-        assert!(questions.view(1).is_submitted);
-        assert_eq!(shown(&questions.send(1, questions.draft(1))), 1);
-        assert!(!questions.view(1).is_submitted);
-        assert_eq!(questions.draft(1).pick.cursor, Cursor::Option(2));
+        questions.go(Move::To(1));
+        assert_eq!(send_on(&mut questions, with_ticks(2, &[2])), 0);
+        assert_eq!(questions.view().progress, [false, true]);
+        questions.go(Move::Next);
+        assert!(questions.view().is_submitted);
+        let again = questions.draft();
+        assert_eq!(send_on(&mut questions, again), 1);
+        assert!(!questions.view().is_submitted);
+        assert_eq!(questions.draft().pick.cursor, Cursor::Option(2));
         // The user's own answer left empty answers nothing
-        assert_eq!(shown(&questions.send(0, draft(Cursor::Own, ""))), 0);
-        assert!(!questions.view(0).is_submitted);
+        questions.go(Move::To(0));
+        assert_eq!(send_on(&mut questions, draft(Cursor::Own, "")), 0);
+        assert!(!questions.view().is_submitted);
     }
 
     #[test]
     fn the_review_comes_once_all_are_submitted_and_sends_them_together() {
         let mut questions = Questions::default();
         questions.add(two_questions("a"), None, vec![1, 2]);
-        questions.send(0, draft(Cursor::Option(1), ""));
+        send_on(&mut questions, draft(Cursor::Option(1), ""));
         let mut ticked = Draft::new();
         ticked.pick.ticked = BTreeSet::from([2, 0]);
-        assert_eq!(shown(&questions.send(1, ticked)), 2);
-        assert_eq!(questions.go(1, Move::Next), 2);
-        assert_eq!(questions.go(0, Move::Previous), 2);
-        assert_eq!(questions.go(2, Move::To(1)), 1);
-        assert_eq!(questions.go(2, Move::To(3)), 2);
-        let review = questions.view(2);
+        assert_eq!(send_on(&mut questions, ticked), 2);
+        questions.go(Move::Next);
+        assert_eq!(questions.view().index, 0);
+        questions.go(Move::Previous);
+        assert_eq!(questions.view().index, 2);
+        questions.go(Move::To(1));
+        assert_eq!(questions.view().index, 1);
+        questions.go(Move::Next);
+        questions.go(Move::To(3));
+        let review = questions.view();
+        assert_eq!(review.index, 2);
         assert_eq!(review.form, Form::Review);
         assert_eq!(review.choices[1].label, "Checks: Lint, Types");
         let Sent::Answered {
             answers,
             answer: Answer::Allow { input },
             ..
-        } = questions.send(2, questions.draft(2))
+        } = questions.send(questions.draft())
         else {
             panic!("the batch's answers");
         };
@@ -836,14 +875,48 @@ mod tests {
     fn the_review_opens_the_unticked_answers_keeping_their_drafts() {
         let mut questions = Questions::default();
         questions.add(two_questions("a"), None, vec![1, 2]);
-        questions.send(0, draft(Cursor::Option(1), ""));
-        questions.send(1, with_ticks(0, &[0]));
-        let mut review = questions.draft(2);
+        send_on(&mut questions, draft(Cursor::Option(1), ""));
+        send_on(&mut questions, with_ticks(0, &[0]));
+        let mut review = questions.draft();
         review.pick.ticked.remove(&0);
-        assert_eq!(shown(&questions.send(2, review)), 0);
-        assert_eq!(questions.view(0).progress, [false, true]);
-        assert_eq!(questions.draft(0).pick.cursor, Cursor::Option(1));
-        assert_eq!(questions.first(), Some(0));
+        assert_eq!(send_on(&mut questions, review), 0);
+        assert_eq!(questions.view().progress, [false, true]);
+        assert_eq!(questions.draft().pick.cursor, Cursor::Option(1));
+        // Submitting it again brings the review back with every answer ticked
+        let again = questions.draft();
+        assert_eq!(send_on(&mut questions, again), 2);
+        assert_eq!(questions.draft().pick.ticked, BTreeSet::from([0, 1]));
+    }
+
+    #[test]
+    fn the_view_keeps_the_users_place_in_each_request_and_on_the_review() {
+        let mut questions = Questions::default();
+        questions.add(two_questions("a"), None, vec![1, 2]);
+        questions.add(permission("b", false), None, vec![3]);
+        questions.go(Move::To(1));
+        questions.go(Move::NextRequest);
+        questions.go(Move::PreviousRequest);
+        assert_eq!(questions.view().index, 1);
+        // Going back to the message and opening the view again keeps it too
+        assert!(questions.open());
+        assert_eq!(
+            (questions.view().request_index, questions.view().index),
+            (0, 1)
+        );
+        // An answer unticked on the review stays unticked after going away from it
+        questions.go(Move::To(0));
+        send_on(&mut questions, draft(Cursor::Option(1), ""));
+        send_on(&mut questions, with_ticks(0, &[0]));
+        let mut review = questions.draft();
+        review.pick.ticked.remove(&0);
+        questions.keep_draft(review);
+        questions.go(Move::Next);
+        questions.go(Move::NextRequest);
+        questions.go(Move::PreviousRequest);
+        assert_eq!(questions.view().index, 0);
+        questions.go(Move::Previous);
+        assert_eq!(questions.view().index, 2);
+        assert_eq!(questions.draft().pick.ticked, BTreeSet::from([1]));
     }
 
     #[test]
@@ -884,8 +957,8 @@ mod tests {
     fn a_single_question_sends_its_answer_at_once() {
         let mut questions = Questions::default();
         questions.add(one_question("a"), None, vec![1]);
-        assert!(questions.view(0).sends_at_once);
-        let Sent::Answered { answers, .. } = questions.send(0, draft(Cursor::Option(1), "")) else {
+        assert!(questions.view().sends_at_once);
+        let Sent::Answered { answers, .. } = questions.send(draft(Cursor::Option(1), "")) else {
             panic!("the answer, with no review");
         };
         assert_eq!(answers.len(), 1);
@@ -913,24 +986,26 @@ mod tests {
         questions.add(one_question("b"), Some("Explore".to_string()), vec![3]);
         questions.add(permission("c", false), None, vec![4]);
         assert_eq!(questions.count(), 3);
-        assert_eq!(questions.view(0).title, "Questions");
-        assert_eq!(questions.go(0, Move::ToRequest(1)), 0);
-        let view = questions.view(0);
+        assert_eq!(questions.view().title, "Questions");
+        questions.go(Move::ToRequest(1));
+        let view = questions.view();
         assert_eq!(view.title, "Questions · Explore");
         assert_eq!(view.label, "Cache");
         assert_eq!(view.request_index, 1);
-        assert_eq!(questions.go(0, Move::PreviousRequest), 0);
-        assert_eq!(questions.go(0, Move::ToRequest(3)), 0);
-        assert_eq!(questions.view(0).request_index, 0);
-        questions.go(0, Move::NextRequest);
+        questions.go(Move::PreviousRequest);
+        questions.go(Move::ToRequest(3));
+        assert_eq!(questions.view().request_index, 0);
+        questions.go(Move::NextRequest);
         assert_eq!(questions.remove_shown().tool_use_id, "b");
         // The view stays in place, on the request that slid into it
-        assert_eq!(questions.first(), Some(0));
-        let view = questions.view(0);
+        assert!(questions.open());
+        let view = questions.view();
         assert_eq!((view.title.as_str(), view.request_index), ("Bash", 1));
         assert_eq!(questions.remove_shown().tool_use_id, "c");
-        assert_eq!(questions.first(), Some(0));
-        assert_eq!(questions.view(0).label, "Database");
+        assert!(questions.open());
+        assert_eq!(questions.view().label, "Database");
+        assert_eq!(questions.remove_shown().tool_use_id, "a");
+        assert!(!questions.open());
     }
 
     #[test]
@@ -938,9 +1013,9 @@ mod tests {
         let decide = |draft: Draft| {
             let mut questions = Questions::default();
             questions.add(permission("a", false), None, vec![1]);
-            match questions.send(0, draft) {
+            match questions.send(draft) {
                 Sent::Answered { answer, .. } => answer,
-                Sent::Show(_) => panic!("an answer"),
+                Sent::Show => panic!("an answer"),
             }
         };
         assert!(matches!(
@@ -954,8 +1029,8 @@ mod tests {
         ));
         let mut questions = Questions::default();
         questions.add(permission("a", false), None, vec![1]);
-        assert_eq!(shown(&questions.send(0, draft(Cursor::Writing, ""))), 0);
-        let view = questions.view(0);
+        assert_eq!(send_on(&mut questions, draft(Cursor::Writing, "")), 0);
+        let view = questions.view();
         assert_eq!(view.refusal, "the call");
         assert!(view.sends_at_once);
         assert_eq!(view.choices[0].key, Some('y'));
@@ -973,16 +1048,16 @@ mod tests {
     fn a_guarded_permission_opens_on_the_refusal_and_its_approval_names_the_risk() {
         let mut questions = Questions::default();
         questions.add(permission("a", true), None, vec![1]);
-        assert_eq!(questions.draft(0).pick.cursor, Cursor::Option(REFUSE));
-        let approval = &questions.view(0).choices[ALLOW];
+        assert_eq!(questions.draft().pick.cursor, Cursor::Option(REFUSE));
+        let approval = &questions.view().choices[ALLOW];
         assert_eq!(approval.label, "allow (dangerous)");
         assert_eq!(
             approval.risk.as_deref(),
             Some("allows a call Claude Code deems dangerous")
         );
         questions.add(permission("b", false), None, vec![2]);
-        questions.go(0, Move::NextRequest);
-        assert_eq!(questions.view(0).choices[ALLOW].risk, None);
+        questions.go(Move::NextRequest);
+        assert_eq!(questions.view().choices[ALLOW].risk, None);
     }
 
     #[test]
@@ -1004,7 +1079,7 @@ mod tests {
             };
             let mut questions = Questions::default();
             questions.add(*ask, None, vec![1]);
-            let fields = questions.view(0).fields;
+            let fields = questions.view().fields;
             let reason = fields.last().expect("a reason").clone();
             (reason.value, reason.tone)
         };
@@ -1051,13 +1126,13 @@ mod tests {
         };
         let mut questions = Questions::default();
         questions.add(*ask, None, vec![1]);
-        let view = questions.view(0);
+        let view = questions.view();
         assert_eq!(view.title, "Search Files · claude.ai Google Drive");
         assert!(view.question.contains("Allow this Search Files call?"));
         // Without a name for a person, the tool's own name
         let mut questions = Questions::default();
         questions.add(permission("b", false), None, vec![2]);
-        assert_eq!(questions.view(0).title, "Bash");
+        assert_eq!(questions.view().title, "Bash");
     }
 
     /// The marks, as text, and rows of a block's fields.

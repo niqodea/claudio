@@ -183,6 +183,7 @@ A call of one question has nothing to review, so Enter sends its answer at once,
 `]` and `[` reach the review too, after the last question.
 Claude gets the options' labels and your words, never the numbers, and the conversation shows the answers once sent.
 Each question keeps what you picked and typed on it until the call is answered.
+Each request remembers the question you were on, and the review remembers what you unticked, so you find them as you left them when you come back from another request or from your message.
 
 A plan or a call to allow is a request of one question, whose options are named `y` and `n`, as command-line prompts answer a yes-or-no question.
 `y` and `n` only move the cursor, as numbers do, and Enter answers: allow allows it, and `refuse, and stop Claude` refuses it and stops Claude's turn, as Ctrl+C does.

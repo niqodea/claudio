@@ -79,8 +79,8 @@ impl<'a> Conversation<'a> {
         // What Claude asks waits for the user to open it with Ctrl+Y, so no key typed before a
         // question showed can answer it
         let mut questions = Questions::default();
-        // The question the question view shows, while it shows
-        let mut shown: Option<usize> = None;
+        // Whether the question view shows
+        let mut is_open = false;
         loop {
             match self.session.next_input() {
                 Some(Input::Ask(ask)) => {
@@ -105,53 +105,44 @@ impl<'a> Conversation<'a> {
                 Some(Input::Incompatible(error)) => return Err(error),
                 None => {}
             }
-            match shown {
-                None => {
-                    let phase = Phase::Writing {
-                        waiting: questions.count(),
-                    };
-                    match self.session.input.read(phase, &draft)? {
-                        Outcome::End => return self.end_input(&mut questions),
-                        outcome => {
-                            (draft, shown) = self.act_on_message(outcome, &mut questions)?;
-                        }
-                    }
+            if is_open {
+                let view = questions.view();
+                match self.session.input.read_question(view, questions.draft())? {
+                    Outcome::End => return self.end_input(&mut questions),
+                    outcome => is_open = self.act_on_question(outcome, &mut questions)?,
                 }
-                Some(index) => {
-                    let view = questions.view(index);
-                    match self
-                        .session
-                        .input
-                        .read_question(view, questions.draft(index))?
-                    {
-                        Outcome::End => return self.end_input(&mut questions),
-                        outcome => {
-                            shown = self.act_on_question(outcome, index, &mut questions)?;
-                        }
+            } else {
+                let phase = Phase::Writing {
+                    waiting: questions.count(),
+                };
+                match self.session.input.read(phase, &draft)? {
+                    Outcome::End => return self.end_input(&mut questions),
+                    outcome => {
+                        (draft, is_open) = self.act_on_message(outcome, &mut questions)?;
                     }
                 }
             }
         }
     }
 
-    /// Acts on how the user left the message's line, and returns the message's draft and the
-    /// question the question view shows next, if it opened.
+    /// Acts on how the user left the message's line, and returns the message's draft and
+    /// whether the question view opened.
     fn act_on_message(
         &mut self,
         outcome: Outcome<String>,
         questions: &mut Questions,
-    ) -> Result<(String, Option<usize>), String> {
+    ) -> Result<(String, bool), String> {
         Ok(match outcome {
             Outcome::Send(text) => {
                 if text.trim().is_empty() {
-                    (String::new(), None)
+                    (String::new(), false)
                 } else {
                     self.refuse_questions(questions)?;
                     self.send_message(&text)?;
-                    (String::new(), None)
+                    (String::new(), false)
                 }
             }
-            Outcome::Questions(text) => (text, questions.first()),
+            Outcome::Questions(text) => (text, questions.open()),
             // Claude's turn waits on its questions, so stopping it refuses them
             Outcome::Stop(text) => {
                 if !questions.is_empty() {
@@ -159,11 +150,11 @@ impl<'a> Conversation<'a> {
                 } else if lock(&self.session.shared).output.status() != Status::Idle {
                     self.interrupt(Interruption::Stop)?;
                 }
-                (text, None)
+                (text, false)
             }
             Outcome::Clear(text) => {
                 self.clear(questions)?;
-                (text, None)
+                (text, false)
             }
             // Claude Code runs a command once the turn that runs ends, and cancels the questions
             // that wait for it, as for a message
@@ -171,10 +162,10 @@ impl<'a> Conversation<'a> {
                 self.refuse_questions(questions)?;
                 lock(&self.session.shared).output.show_command(&command);
                 self.send(&Command::Run { command: &command })?;
-                (text, None)
+                (text, false)
             }
             // Claude Code asked something, which the next round of the loop shows
-            Outcome::Break(text) | Outcome::Go(text, _) => (text, None),
+            Outcome::Break(text) | Outcome::Go(text, _) => (text, false),
             Outcome::End => unreachable!("the session ends before"),
         })
     }
@@ -205,17 +196,16 @@ impl<'a> Conversation<'a> {
         Ok(())
     }
 
-    /// Acts on how the user left the question at `index` in the question view, and returns the
-    /// question it shows next, none to go back to the message.
+    /// Acts on how the user left the question shown in the question view, and returns whether
+    /// the question view still shows, false to go back to the message.
     fn act_on_question(
         &mut self,
         outcome: Outcome<Draft>,
-        index: usize,
         questions: &mut Questions,
-    ) -> Result<Option<usize>, String> {
+    ) -> Result<bool, String> {
         Ok(match outcome {
-            Outcome::Send(draft) => match questions.send(index, draft) {
-                Sent::Show(next) => Some(next),
+            Outcome::Send(draft) => match questions.send(draft) {
+                Sent::Show => true,
                 Sent::Answered {
                     answers,
                     ask,
@@ -227,27 +217,28 @@ impl<'a> Conversation<'a> {
                     }
                     drop(shared);
                     self.reply(&ask, answer)?;
-                    questions.first()
+                    questions.open()
                 }
             },
             Outcome::Questions(draft) => {
-                questions.keep_draft(index, draft);
-                None
+                questions.keep_draft(draft);
+                false
             }
             Outcome::Go(draft, to) => {
-                questions.keep_draft(index, draft);
-                Some(questions.go(index, to))
+                questions.keep_draft(draft);
+                questions.go(to);
+                true
             }
             // Claude Code asked something more, which the next round of the loop adds
             Outcome::Break(draft) => {
-                questions.keep_draft(index, draft);
-                Some(index)
+                questions.keep_draft(draft);
+                true
             }
             // Claude Code takes or refuses a call's questions together
             Outcome::Stop(_) => {
                 let ask = questions.remove_shown();
                 self.reply(&ask, Answer::Deny)?;
-                questions.first()
+                questions.open()
             }
             Outcome::End => unreachable!("the session ends before"),
             Outcome::Clear(_) => unreachable!("the question view takes no Ctrl+L"),

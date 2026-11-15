@@ -144,6 +144,7 @@ Meanwhile, Enter on a message refuses them, so it waits for a second press.
 Ctrl+Y shows them one at a time, and Ctrl+Y goes back to the message, as Esc does on the list.
 A rule above the question names its request: its kind, like `Questions`, `Plan` or the tool of the call, as Claude Code names it for a person, with its MCP server, if any, and the subagent that asked, if one did, like `── Bash · Explore the code` or `── Search Files · claude.ai Google Drive`.
 A title too long for the rule loses its end.
+The label row names the question, or the tool of a call without its MCP server, and loses its end when too long, so the progress at its right end stays whole.
 When more than one request waits, the right end of the label row shows the place of the one shown, like `2/3`, then names the requests `q`, `w`, `e` and `r`, and those after the fourth as how many they are, like `+2`, then the request's questions `a`, `s`, `d` and `f`, green once submitted, each with the one shown in reverse, and each only when it has more than one, like `2/3 q w e │ a s`.
 Each request goes to Claude Code as soon as you answer it, apart from the others.
 A question shows in a block of 8 rows under the rule, whatever its length, so the options never move while you answer.

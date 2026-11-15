@@ -884,7 +884,9 @@ impl InputLine {
     /// The label row's line: the label, and at the right edge the keys of a half-typed vi
     /// command, where vim's `showcmd` shows them, so nothing else on the row moves when they
     /// appear or go, and the question view's progress through the batch. On a screen too narrow
-    /// for both, the keys follow the label after a space, and wrap onto the next row.
+    /// for both, the keys follow the label after a space, and wrap onto the next row. The
+    /// question view's label row takes one row, with the options right under it, so there the
+    /// label loses its end instead, and the progress stays whole at the right edge.
     fn label_line(&self, view: Option<&View>) -> String {
         let pending = self.editor.pending();
         let pending = (!pending.is_empty()).then(|| format!("{SUBDUED_ON_BAR}{pending}"));
@@ -893,13 +895,24 @@ impl InputLine {
             .flatten()
             .collect();
         let right = right.join(" ");
+        let width = usize::from(self.layout.width);
+        let label = if view.is_some() {
+            // A space stays between the label and the progress
+            let room = width.saturating_sub(visible_width(&right) + usize::from(!right.is_empty()));
+            cut(
+                &self.label,
+                NonZeroUsize::new(room).unwrap_or(NonZeroUsize::MIN),
+            )
+        } else {
+            self.label.clone()
+        };
         if right.is_empty() {
-            return self.label.clone();
+            return label;
         }
-        let room = usize::from(self.layout.width)
-            .saturating_sub(visible_width(&self.label) + visible_width(&right))
+        let room = width
+            .saturating_sub(visible_width(&label) + visible_width(&right))
             .max(1);
-        format!("{}{}{right}", self.label, " ".repeat(room))
+        format!("{label}{}{right}", " ".repeat(room))
     }
 
     /// Draws the question of `view` in `rows`: the rule, the block under it, and the question,

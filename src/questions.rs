@@ -136,6 +136,15 @@ impl Request {
         }
     }
 
+    /// The name of a plan or a permission on the label row: its kind, without the MCP server
+    /// that the rule above names.
+    fn label(&self) -> String {
+        match &self.ask.kind {
+            AskKind::Permission(permission) => permission.name.clone(),
+            AskKind::Plan(_) | AskKind::Questions(_) => self.kind(),
+        }
+    }
+
     /// What refusing the request refuses.
     fn refusal(&self) -> String {
         match &self.ask.kind {
@@ -592,7 +601,7 @@ impl Questions {
             let own_label = "refuse, and tell Claude why";
             return View {
                 fields,
-                ..view(request.kind(), question, choices, own_label, Form::One)
+                ..view(request.label(), question, choices, own_label, Form::One)
             };
         }
         if index == request.entries.len() {
@@ -1155,6 +1164,7 @@ mod tests {
         questions.add(*ask, None, vec![1]);
         let view = questions.view();
         assert_eq!(view.title, "Search Files · claude.ai Google Drive");
+        assert_eq!(view.label, "Search Files");
         assert!(view.question.contains("Allow this Search Files call?"));
         // Without a name for a person, the tool's own name
         let mut questions = Questions::default();

@@ -31,7 +31,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::climb::{self, Climb};
 use crate::context::COLD_COLOR;
-use crate::cut::{self, Whole, colors_at, cut, cut_before_hidden, cut_path, visible_width};
+use crate::cut::{
+    self, ScreenRow, Whole, colors_at, cut, cut_before_hidden, cut_path, visible_width,
+};
 use crate::keys::{
     self, Action, BLOCK_ROWS, Field, Mark, PREVIEWED_QUESTION_ROWS, Phase, SessionKey, Tone, View,
 };
@@ -763,7 +765,7 @@ impl InputLine {
         }
         let width = usize::from(layout.width);
         let label_rows: Vec<String> = if layout.label_rows > 0 {
-            terminal_rows(&self.label_line(None), width)
+            terminal_rows(&self.label_line(), width)
                 .iter()
                 .map(|row| bar_row(row))
                 .collect()
@@ -822,12 +824,12 @@ impl InputLine {
         let rows = ViewRows::new(layout.height, self.input_rows.get(), view.choices.len());
         self.draw_question(&mut out, view, rows);
         if layout.label_rows > 0 {
-            put_bar_line(&mut out, rows.label, &self.label_line(Some(view)));
+            put_bar_line(&mut out, rows.label, &self.question_label_row(view));
         }
         let (box_rows, cursor_row_in_box, cursor_column) = self.box_rows(rows.box_rows);
+        let columns = self.columns();
         for (row, line) in (rows.box_top..layout.height).zip(&box_rows) {
-            put!(out, MoveTo(0, row));
-            out.extend(line.as_bytes());
+            put_line(&mut out, row, &ScreenRow::cut(line, columns));
         }
         // The cursor shows only while the user writes in the box
         if self.pick.cursor == Cursor::Writing && !view.is_submitted {
@@ -885,36 +887,31 @@ impl InputLine {
 
     /// The label row's line: the label, and at the right edge the keys of a half-typed vi
     /// command, where vim's `showcmd` shows them, so nothing else on the row moves when they
-    /// appear or go, and the question view's progress through the batch. On a screen too narrow
-    /// for both, the keys follow the label after a space, and wrap onto the next row. The
-    /// question view's label row takes one row, with the options right under it, so there the
-    /// label loses its end instead, and the progress stays whole at the right edge.
-    fn label_line(&self, view: Option<&View>) -> String {
+    /// appear or go. On a screen too narrow for both, the keys follow the label after a space, and
+    /// wrap onto the next row.
+    fn label_line(&self) -> String {
         let pending = self.editor.pending();
-        let pending = (!pending.is_empty()).then(|| format!("{SUBDUED_ON_BAR}{pending}"));
-        let right: Vec<String> = [pending, view.and_then(progress)]
-            .into_iter()
-            .flatten()
-            .collect();
-        let right = right.join(" ");
-        let width = usize::from(self.layout.width);
-        let label = if view.is_some() {
-            // A space stays between the label and the progress
-            let room = width.saturating_sub(visible_width(&right) + usize::from(!right.is_empty()));
-            cut(
-                &self.label,
-                NonZeroUsize::new(room).unwrap_or(NonZeroUsize::MIN),
-            )
-        } else {
-            self.label.clone()
-        };
-        if right.is_empty() {
-            return label;
+        if pending.is_empty() {
+            return self.label.clone();
         }
-        let room = width
-            .saturating_sub(visible_width(&label) + visible_width(&right))
+        let right = format!("{SUBDUED_ON_BAR}{pending}");
+        let room = usize::from(self.layout.width)
+            .saturating_sub(visible_width(&self.label) + visible_width(&right))
             .max(1);
-        format!("{label}{}{right}", " ".repeat(room))
+        format!("{}{}{right}", self.label, " ".repeat(room))
+    }
+
+    /// The question view's label row: the label, and at its right end the progress through the
+    /// batch and the keys of a half-typed vi command. Unlike the conversation's, it takes one
+    /// row, with the options right under it, so it gives up text as `ScreenRow::spread` does.
+    fn question_label_row(&self, view: &View) -> ScreenRow {
+        let right = right_end(view, &self.editor.pending());
+        ScreenRow::spread(&self.label, &right, self.columns())
+    }
+
+    /// The screen's width.
+    fn columns(&self) -> NonZeroUsize {
+        NonZeroUsize::new(usize::from(self.layout.width)).unwrap_or(NonZeroUsize::MIN)
     }
 
     /// Draws the question of `view` in `rows`: the stack of the request's title and the block
@@ -927,8 +924,7 @@ impl InputLine {
     /// out of place. When there are more options than rows, they scroll to keep the cursor in view.
     fn draw_question(&self, out: &mut Vec<u8>, view: &View, rows: ViewRows) {
         put!(out, Clear(ClearType::All));
-        let columns =
-            NonZeroUsize::new(usize::from(self.layout.width)).unwrap_or(NonZeroUsize::MIN);
+        let columns = self.columns();
         let mut fields = view.fields.clone();
         if let Some(preview) = picker::preview(&view.choices, &self.pick) {
             fields.push(Field {
@@ -964,10 +960,10 @@ impl InputLine {
         for row in rows.options..rows.own {
             let line = options
                 .next()
-                .map_or_else(String::new, |line| cut(line, columns));
+                .map_or_else(ScreenRow::empty, |line| ScreenRow::cut(line, columns));
             put_bar_line(out, row, &line);
         }
-        put_bar_line(out, rows.own, &cut(&own, columns));
+        put_bar_line(out, rows.own, &ScreenRow::cut(&own, columns));
     }
 
     /// Lays the screen out for its new size, which the frame after it draws. The main screen
@@ -1255,33 +1251,61 @@ fn limit_indicator(letter: char, level: Option<Level>) -> String {
     format!("{color}{letter}{}", show_level(level.map(Level::to_number)))
 }
 
-/// The question view's progress: the names of the questions of the request shown, then those
-/// of the requests that wait, each level only when it has more than one item.
-fn progress(view: &View) -> Option<String> {
-    let requests = request_names(view);
+/// The versions of the question view's label row's right end, from whole to a lone `…`: the
+/// progress, as the names of the questions of the request shown, then those of the requests
+/// that wait, then the place of the request shown, each only when its level has more than one
+/// item, and last the keys of a half-typed vi command, `pending`. Each version after the first
+/// hides one more group from the left, whole, behind `…`, so a name never shows cut, and the
+/// keys, which the user is typing, go last.
+/// Ref: <https://github.com/nvim-lualine/lualine.nvim/wiki/Component-snippets>,
+/// whose status line hides whole components on a narrow window
+fn right_end(view: &View, pending: &str) -> Vec<String> {
     let questions = names(&view.progress, view.index, question_name);
+    let requests = request_names(view);
+    let place = request_place(view);
+    let pending = (!pending.is_empty()).then(|| pending.to_string());
     // The questions change with each request, so they go left of the requests, where they move
     // nothing when they change
-    let levels: Vec<String> = [questions, requests].into_iter().flatten().collect();
-    (!levels.is_empty()).then(|| levels.join(&format!("{SUBDUED_ON_BAR} │ ")))
+    let groups: Vec<(&str, String)> = [
+        (" │ ", questions),
+        (" │ ", requests),
+        (" ", place),
+        (" ", pending),
+    ]
+    .into_iter()
+    .filter_map(|(gap, group)| Some((gap, group?)))
+    .collect();
+    if groups.is_empty() {
+        return Vec::new();
+    }
+    let joined = |groups: &[(&str, String)]| {
+        (groups.iter().enumerate())
+            .map(|(index, (gap, group))| {
+                let gap = if index == 0 { "" } else { gap };
+                format!("{SUBDUED_ON_BAR}{gap}{group}")
+            })
+            .collect::<Vec<_>>()
+            .concat()
+    };
+    let hidden = |from: usize| match &groups[from..] {
+        [] => format!("{SUBDUED_ON_BAR}…"),
+        rest => format!("{SUBDUED_ON_BAR}… {}", joined(rest)),
+    };
+    [joined(&groups)]
+        .into_iter()
+        .chain((1..=groups.len()).map(hidden))
+        .collect()
 }
 
 /// The names of the requests that wait, as for the questions of a batch, where those after the
 /// fourth, which have no key, show as how many they are, like `+2`, in reverse video when one of
-/// them shows. After them goes the place of the request shown, like `2/3`, its number padded to
-/// the width of the count, so the place keeps one width from one request to the next.
+/// them shows.
 fn request_names(view: &View) -> Option<String> {
     let count = view.requests.len();
-    let place = format!(
-        " {SUBDUED_ON_BAR}{:>width$}/{count}",
-        view.request_index + 1,
-        width = count.to_string().len()
-    );
     let keyed = count.min(picker::REQUEST_KEYS.len());
     let mut shown = names(&view.requests[..keyed], view.request_index, |index| {
         request_name(index).expect("a named request")
-    })
-    .or_else(|| (count > 1).then(String::new))?;
+    })?;
     if count > keyed {
         let (on, off) = if view.request_index >= keyed {
             (REVERSE, UNREVERSE)
@@ -1291,7 +1315,21 @@ fn request_names(view: &View) -> Option<String> {
         let rest = count - keyed;
         shown = format!("{shown} {SUBDUED_ON_BAR}{on}+{rest}{off}");
     }
-    Some(format!("{shown}{place}"))
+    Some(shown)
+}
+
+/// The place of the request shown among those that wait, like `2/3`, when more than one waits,
+/// its number padded to the width of the count, so the place keeps one width from one request
+/// to the next.
+fn request_place(view: &View) -> Option<String> {
+    let count = view.requests.len();
+    (count > 1).then(|| {
+        format!(
+            "{:>width$}/{count}",
+            view.request_index + 1,
+            width = count.to_string().len()
+        )
+    })
 }
 
 /// The names of the items of one level of the question view, like the questions of a batch:
@@ -1450,8 +1488,13 @@ fn quoted_lines(key: Option<&str>, field: &Field, columns: NonZeroUsize) -> Vec<
 /// The rows of the stack above the label row, `rows` of them: the request's title, then the
 /// block of `fields` under it, whose last row swallows what does not fit, by `cut::fit`. The
 /// title goes last, as the top of the stack: on one row, the row swallows it too, and says so.
-fn stack_lines(title: &str, fields: &[Field], rows: usize, columns: NonZeroUsize) -> Vec<String> {
-    match rows {
+fn stack_lines(
+    title: &str,
+    fields: &[Field],
+    rows: usize,
+    columns: NonZeroUsize,
+) -> Vec<ScreenRow> {
+    let lines = match rows {
         0 => Vec::new(),
         1 => {
             let request = cut::the_request(Whole::FullView);
@@ -1465,7 +1508,10 @@ fn stack_lines(title: &str, fields: &[Field], rows: usize, columns: NonZeroUsize
             lines.extend(block_lines(fields, rows - 1, columns));
             lines
         }
-    }
+    };
+    (lines.iter())
+        .map(|line| ScreenRow::cut(line, columns))
+        .collect()
 }
 
 /// The `rows` rows of the block under the title, `fields` fitted in them by `cut::fit`: each
@@ -1608,16 +1654,16 @@ fn word_rows(text: &str, width: usize) -> Vec<String> {
 
 /// Writes `line` on `row`, from its start, and resets the colors after it, so they reach nothing
 /// drawn next.
-fn put_line(out: &mut Vec<u8>, row: u16, line: &str) {
+fn put_line(out: &mut Vec<u8>, row: u16, line: &ScreenRow) {
     put!(out, MoveTo(0, row));
-    out.extend(format!("{line}{RESET}").as_bytes());
+    out.extend(format!("{}{RESET}", line.as_str()).as_bytes());
 }
 
 /// Writes `line` on `row` on the bar, like `put_line`. A reset inside the line ends the bar, which
 /// then starts again.
-fn put_bar_line(out: &mut Vec<u8>, row: u16, line: &str) {
+fn put_bar_line(out: &mut Vec<u8>, row: u16, line: &ScreenRow) {
     put!(out, MoveTo(0, row));
-    out.extend(bar_row(line).as_bytes());
+    out.extend(bar_row(line.as_str()).as_bytes());
 }
 
 /// The most rows of the stack above the label row: the request's title and the block under it.
@@ -1742,7 +1788,7 @@ mod tests {
             is_submitted: false,
             sends_at_once: false,
         };
-        assert_eq!(progress(&view(1, 0, 1)), None);
+        assert_eq!(right_end(&view(1, 0, 1), ""), Vec::<String>::new());
         let plain = |text: String| {
             let mut plain = String::new();
             let mut characters = text.chars();
@@ -1755,15 +1801,40 @@ mod tests {
             }
             plain
         };
-        let six = progress(&view(6, 5, 2)).expect("names");
+        let six = &right_end(&view(6, 5, 2), "")[0];
         assert_eq!(plain(six.clone()), "a s │ q w e r +2 6/6");
         assert!(six.contains(&format!("{REVERSE}+2")));
-        assert_eq!(plain(progress(&view(2, 0, 1)).expect("names")), "q w 1/2");
+        assert_eq!(plain(right_end(&view(2, 0, 1), "")[0].clone()), "q w 1/2");
         // The place keeps the width of the count, so the names keep their columns
         assert_eq!(
-            plain(progress(&view(10, 2, 1)).expect("names")),
+            plain(right_end(&view(10, 2, 1), "")[0].clone()),
             "q w e r +6  3/10"
         );
+        // Each shorter version hides one more group from the left, whole
+        let versions: Vec<String> = right_end(&view(6, 5, 2), "")
+            .into_iter()
+            .map(plain)
+            .collect();
+        assert_eq!(
+            versions,
+            ["a s │ q w e r +2 6/6", "… q w e r +2 6/6", "… 6/6", "…"]
+        );
+        let questions: Vec<String> = right_end(&view(1, 0, 2), "")
+            .into_iter()
+            .map(plain)
+            .collect();
+        assert_eq!(questions, ["a s", "…"]);
+        // A half-typed vi command takes the right end, and goes last
+        let typing: Vec<String> = right_end(&view(2, 0, 1), "d2")
+            .into_iter()
+            .map(plain)
+            .collect();
+        assert_eq!(typing, ["q w 1/2 d2", "… 1/2 d2", "… d2", "…"]);
+        let alone: Vec<String> = right_end(&view(1, 0, 1), "d2")
+            .into_iter()
+            .map(plain)
+            .collect();
+        assert_eq!(alone, ["d2", "…"]);
     }
 
     use crate::style::STRONG;
@@ -1962,7 +2033,7 @@ mod tests {
         let columns = NonZeroUsize::new(40).expect("40 is not zero");
         let text = |rows| {
             (stack_lines("Questions", &fields, rows, columns).iter())
-                .map(|line| plain(line))
+                .map(|line| plain(line.as_str()))
                 .collect::<Vec<_>>()
         };
         assert_eq!(

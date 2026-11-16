@@ -147,8 +147,8 @@ The title above the question says its kind alone, `── Question`, `── Pla
 The label row says which one it is: a question by its header, a call by its tool, as Claude Code shows it to the user, and a plan as `Plan`, since Claude Code sends no name for it.
 The block under the title shows the rest.
 The label row gives that name 12 columns, the most Claude Code asks Claude to write in a header, so what follows starts in the same column on every request, and a longer one loses its end.
-The label row loses its end when too long, so the progress at its right end stays whole.
-When more than one request waits, the right end of the label row shows the place of the one shown, like `2/3`, then names the requests `q`, `w`, `e` and `r`, and those after the fourth as how many they are, like `+2`, then the request's questions `a`, `s`, `d` and `f`, green once submitted, each with the one shown in reverse, and each only when it has more than one, like `2/3 q w e │ a s`.
+The right end of the label row shows the progress: the request's questions `a`, `s`, `d` and `f`, green once submitted, then the requests `q`, `w`, `e` and `r`, and those after the fourth as how many they are, like `+2`, then the place of the one shown, like `2/3`, with the one shown in reverse among each, and each only when it has more than one, like `a s │ q w e 2/3`.
+On a narrow screen, each end of the row keeps its edge and gives up text toward the middle: first the progress hides its groups from the left, whole, like `… q w e 2/3`, then `… 2/3`, so a name never shows cut, then the label loses its end.
 Each request goes to Claude Code as soon as you answer it, apart from the others.
 A question shows in a block of 8 rows under the title, whatever its length, so the options never move while you answer.
 A longer question ends in `… N more lines · Ctrl+O shows it whole`: Ctrl+O there opens the whole conversation at the question, to read with less's keys, and `q` brings you back to answer.

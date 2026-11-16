@@ -30,6 +30,52 @@ impl Whole {
     }
 }
 
+/// A row of the question screen, which takes at most the screen's columns, since only a cut,
+/// `spread` or `empty` makes one. A row there must take exactly one row of the terminal: one that wrapped
+/// would land on the row below it, so the screen draws only rows of this type.
+pub struct ScreenRow(String);
+
+impl ScreenRow {
+    /// `line` as a row `columns` wide, cut at its end when longer, by `cut`.
+    pub fn cut(line: &str, columns: NonZeroUsize) -> Self {
+        Self(cut(line, columns))
+    }
+
+    pub fn empty() -> Self {
+        Self(String::new())
+    }
+
+    /// A row `columns` wide with `left` at its start and one of `right`'s versions, from whole
+    /// to shortest, at its end, at least a space apart. The right gives up text first, taking the
+    /// first version that fits beside the whole `left`, then `left` gives up its end, beside the
+    /// shortest version, so every `…` falls between them. When not even that fits, the row is
+    /// `left` alone, cut.
+    /// Ref: <https://ec.europa.eu/component-library/v3.13.0/ec/components/navigation/breadcrumb/code/>,
+    /// whose breadcrumbs keep their first item and their last ones and hide the middle ones
+    /// behind `…`
+    pub fn spread(left: &str, right: &[String], columns: NonZeroUsize) -> Self {
+        let fits_beside = |right: &&String, left_width: usize| {
+            left_width + 1 + visible_width(right) <= columns.get()
+        };
+        let Some(right) = (right.iter())
+            .find(|right| fits_beside(right, visible_width(left)))
+            .or(right.last())
+            .filter(|right| fits_beside(right, 1))
+        else {
+            return Self::cut(left, columns);
+        };
+        let room = NonZeroUsize::new(columns.get() - visible_width(right) - 1)
+            .expect("the version found leaves a column for the left");
+        let left = cut(left, room);
+        let gap = columns.get() - visible_width(&left) - visible_width(right);
+        Self(format!("{left}{}{right}", " ".repeat(gap)))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// The row that counts `count` lines a cut hides of a text, which `whole` shows whole.
 pub fn more_lines(count: usize, whole: Whole) -> String {
     let lines = if count == 1 { "line" } else { "lines" };
@@ -352,6 +398,24 @@ mod tests {
             cut_before_hidden("abcdef", columns(4)),
             format!("abc{RESET}…{RESET}")
         );
+    }
+
+    #[test]
+    fn a_spread_row_gives_up_its_right_first_then_its_left() {
+        let right = [
+            "a s │ q w 1/2".to_string(),
+            "… 1/2".to_string(),
+            "…".to_string(),
+        ];
+        let spread =
+            |columns: usize| ScreenRow::spread("Code style", &right, self::columns(columns));
+        assert_eq!(spread(30).as_str(), "Code style       a s │ q w 1/2");
+        assert_eq!(spread(24).as_str(), "Code style a s │ q w 1/2");
+        assert_eq!(spread(23).as_str(), "Code style        … 1/2");
+        assert_eq!(spread(15).as_str(), "Code style    …");
+        assert_eq!(spread(12).as_str(), "Code style …");
+        assert_eq!(spread(11).as_str(), format!("Code sty{RESET}…{RESET} …"));
+        assert_eq!(spread(2).as_str(), format!("C{RESET}…{RESET}"));
     }
 
     fn field(value: &str, rows: usize) -> Field {

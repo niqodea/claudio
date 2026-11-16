@@ -30,9 +30,9 @@ impl Whole {
     }
 }
 
-/// A row of the question screen, which takes at most the screen's columns, since only a cut,
-/// `spread` or `empty` makes one. A row there must take exactly one row of the terminal: one that wrapped
-/// would land on the row below it, so the screen draws only rows of this type.
+/// A row drawn on the screen, which takes at most the screen's columns, since only a cut,
+/// `spread` or `empty` makes one, and so exactly one row of the terminal. A screen drawn from
+/// these takes as many rows as it has rows, where a row that wrapped would take more.
 pub struct ScreenRow(String);
 
 impl ScreenRow {

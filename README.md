@@ -103,7 +103,7 @@ Keys come in two kinds.
 | Ctrl+N | moves down the options, among the questions             |
 | Ctrl+P | moves up the options, among the questions                |
 
-**Every other key works on your text.** Enter sends it, and the rest edit it with vi keys. The right end of the label row shows in one letter where your keys go, the box's vi mode or the command line: `N` for normal, `I` for insert, `V` for visual and `C` for the command line, and while a vi command is half typed, its keys show just left of it, like `d2 N`. Enter and the session keys still do their usual job then, and cancel the half-typed command. To clear the input, use vi, like `S` or `ggdG` in normal mode; `u` brings it back.
+**Every other key works on your text.** Enter sends it, and the rest edit it with vi keys. The right end of the label row shows in one letter where your keys go, the box's vi mode or the command line: `N` for normal, `I` for insert, `V` for visual and `C` for the command line, and while a vi command is half typed, its keys show just left of it, like `d2 N`. On a screen too narrow for the whole label row, the label loses its end to `…` and the letter keeps the edge, so it never wraps onto a second row. Enter and the session keys still do their usual job then, and cancel the half-typed command. To clear the input, use vi, like `S` or `ggdG` in normal mode; `u` brings it back.
 
 A key that loses what no key brings back waits for a second press in a row, and the label row names the loss in orange, like `Enter again refuses 2 questions and sends on a possibly cold cache`.
 These keys are:
@@ -255,10 +255,16 @@ Below it are the live rows: the line Claude is still writing, the label row and 
 The terminal applies a resize at once, but claudio hears of it only later, so what claudio already sent, drawn for the old size, can land on the new one.
 So claudio never names a row by its number: each redraw finds its way back to the first live row from the cursor, which the terminal keeps on its character as it wraps the rows again.
 As claudio starts, it checks whether a backspace at a row's start goes up only onto a row that wrapped into it, as [tmux's does](https://github.com/tmux/tmux/blob/3.5a/screen-write.c#L983).
-Then backspaces stop exactly at the start of each live row, however the terminal wrapped it, and a resize leaves nothing behind.
+Then backspaces stop exactly at the start of each live row, however the terminal wrapped it, and a resize leaves nothing behind, except in the case below.
 tmux 3.5 passes the check, and is the only terminal checked so far.
 In a terminal that fails it, claudio warns in orange as it starts, and each redraw goes up as many rows as the live rows took.
 A narrower screen splits rows into more, so the conversation is never erased, but stray copies of the label row and the box can stay in the scrollback.
+
+The case in tmux: a narrower screen wraps rows into more, and tmux then shows the last rows that fit the screen, the empty ones below the cursor included, so the extra rows push the screen's top into the scrollback even when the screen has empty rows at its bottom ([`grid_reflow`](https://github.com/tmux/tmux/blob/3.5a/grid.c#L1378)).
+Until the conversation fills the screen, the live rows sit above empty rows, so a narrower screen can push the start of the label row out of the screen, where no climb reaches, and leave a copy of it in the scrollback.
+The label row ends in the mode's letter at the screen's edge, so it fills its row, and any narrower screen wraps it.
+Once the conversation fills the screen, the live rows are at its bottom, and only the conversation's rows go to the scrollback, as they would anyway.
+A shorter screen has no such case, since tmux then drops the empty rows below the cursor first.
 
 One limit holds in any terminal: a program can clear the scrollback only whole, never change a row of it, so live rows taller than the screen push the screen's top into the scrollback for good.
 The line Claude is still writing can grow that tall, and each shrink while it does leaves a copy of the rows it pushed out, sometimes with the row `… its start shows once it ends`, which stood in for the line's start.

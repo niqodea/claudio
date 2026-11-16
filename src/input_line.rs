@@ -742,8 +742,9 @@ impl InputLine {
     /// Draws a frame of the main screen. It climbs back to the first live row and erases from
     /// there down, prints the conversation's whole lines that wait, then draws the live rows,
     /// each as a line of its own, as `climb` needs: the line Claude still writes, the label row
-    /// and the box. Last, it climbs from the end of the last live row to the cursor's row, and
-    /// moves along it to the cursor. No step names a row by its number, so the frame lands where
+    /// and the box. Each is a `ScreenRow`, so the live rows take as many rows of the terminal as
+    /// the layout gives them, and never push the screen's top into the scrollback. Last, it climbs
+    /// from the end of the last live row to the cursor's row, and moves along it to the cursor. No step names a row by its number, so the frame lands where
     /// it should even when a resize reaches the terminal first.
     fn draw_main(&mut self) -> Result<(), String> {
         let layout = self.layout;
@@ -763,22 +764,16 @@ impl InputLine {
             let lines: String = self.pending.drain(..=end).collect();
             out.extend(lines.replace('\n', "\r\n").as_bytes());
         }
-        let width = usize::from(layout.width);
-        let label_rows: Vec<String> = if layout.label_rows > 0 {
-            terminal_rows(&self.label_line(), width)
-                .iter()
-                .map(|row| bar_row(row))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let columns = self.columns();
+        let label_row = (layout.label_rows > 0).then(|| self.label_row());
+        let label_height = usize::from(label_row.is_some());
         // The command line takes the box's last rows, as many as it fills, and the message keeps
         // the rows above it
         let command = (self.command_line.as_ref()).map(|line| {
             command_rows(
                 &line.text(),
                 line.cursor(),
-                width,
+                columns,
                 usize::from(layout.input_rows),
             )
         });
@@ -798,16 +793,20 @@ impl InputLine {
             None => (cursor_row_in_box, cursor_column_in_box),
         };
         let open_rows = if shows_conversation {
-            let room = usize::from(layout.height).saturating_sub(label_rows.len() + box_rows.len());
-            open_line_rows(&self.pending, width, room)
+            let room = usize::from(layout.height).saturating_sub(label_height + box_rows.len());
+            open_line_rows(&self.pending, columns, room)
         } else {
             Vec::new()
         };
         let to_u16 = |index: usize| u16::try_from(index).unwrap_or(u16::MAX);
-        let cursor_line = open_rows.len() + label_rows.len() + cursor_row_in_box;
+        let cursor_line = open_rows.len() + label_height + cursor_row_in_box;
         let cursor_column = cursor_column_in_box;
-        let lines: Vec<String> = [open_rows, label_rows, box_rows].concat();
-        out.extend(lines.join("\r\n").as_bytes());
+        let lines: Vec<ScreenRow> = (open_rows.into_iter())
+            .chain(label_row)
+            .chain(box_rows)
+            .collect();
+        let text: Vec<&str> = lines.iter().map(ScreenRow::as_str).collect();
+        out.extend(text.join("\r\n").as_bytes());
         let lines_below_cursor = lines.len().saturating_sub(cursor_line + 1);
         climb::write(
             &mut out,
@@ -842,9 +841,8 @@ impl InputLine {
             put_bar_line(&mut out, rows.label, &self.question_label_row(view));
         }
         let (box_rows, cursor_row_in_box, cursor_column) = self.box_rows(rows.box_rows);
-        let columns = self.columns();
         for (row, line) in (rows.box_top..layout.height).zip(&box_rows) {
-            put_line(&mut out, row, &ScreenRow::cut(line, columns));
+            put_line(&mut out, row, line);
         }
         // The cursor shows only while the user writes in the box
         if self.pick.cursor == Cursor::Writing && !view.is_submitted {
@@ -859,7 +857,8 @@ impl InputLine {
     /// The box's rows, on the bar, with the row and the column of the cursor among them. The box
     /// scrolls as little as keeps the cursor in it, and shows no empty rows below the text that
     /// the text above could fill. It takes `rows` rows.
-    fn box_rows(&mut self, rows: u16) -> (Vec<String>, usize, u16) {
+    fn box_rows(&mut self, rows: u16) -> (Vec<ScreenRow>, usize, u16) {
+        let columns = self.columns();
         let wrapped = wrap::wrap(
             &self.text(),
             self.editor.cursor(),
@@ -880,7 +879,7 @@ impl InputLine {
                     .rows
                     .get(usize::from(self.scroll + y))
                     .map_or("", |row| row.text.as_str());
-                format!("{}{text}{RESET}", start_bar_row())
+                ScreenRow::cut(&format!("{}{text}{RESET}", start_bar_row()), columns)
             })
             .collect();
         (
@@ -900,15 +899,13 @@ impl InputLine {
         }
     }
 
-    /// The label row's line: the label, and at the right edge where the keys go, as `key_state`
-    /// gives it. On a screen too narrow for both, that state follows the label after a space, and
-    /// wraps onto the next row.
-    fn label_line(&self) -> String {
+    /// The label row: the label, and at its right end where the keys go, as `key_state` gives it,
+    /// on the bar, in one row, which gives up text as `ScreenRow::spread` does: the label loses its end first, and the key state, which tells
+    /// what the user is typing, goes last.
+    fn label_row(&self) -> ScreenRow {
         let right = format!("{SUBDUED_ON_BAR}{}", self.key_state());
-        let room = usize::from(self.layout.width)
-            .saturating_sub(visible_width(&self.label) + visible_width(&right))
-            .max(1);
-        format!("{}{}{right}", self.label, " ".repeat(room))
+        let columns = self.columns();
+        on_bar(&ScreenRow::spread(&self.label, &[right], columns), columns)
     }
 
     /// The question view's label row: the label, and at its right end the progress through the
@@ -1183,15 +1180,20 @@ struct Drawn {
 const COMMAND_PROMPT: &str = "command: ";
 
 /// The command line's rows, on the bar, as vim's command line at the screen's bottom: the prompt
-/// and the command `text` without its `/`, wrapped at `width`, at most `rows` of them, those
+/// and the command `text` without its `/`, wrapped at `columns`, at most `rows` of them, those
 /// around the `cursor`, with the row and the column of the cursor among them.
-fn command_rows(text: &str, cursor: usize, width: usize, rows: usize) -> (Vec<String>, usize, u16) {
+fn command_rows(
+    text: &str,
+    cursor: usize,
+    columns: NonZeroUsize,
+    rows: usize,
+) -> (Vec<ScreenRow>, usize, u16) {
     let prompt_length = COMMAND_PROMPT.chars().count();
     let wrapped = wrap::wrap(
         &format!("{COMMAND_PROMPT}{text}"),
         prompt_length + cursor,
         None,
-        width,
+        columns.get(),
     );
     let rows = rows.min(wrapped.rows.len());
     let first = (wrapped.cursor_row + 1).saturating_sub(rows);
@@ -1205,7 +1207,7 @@ fn command_rows(text: &str, cursor: usize, width: usize, rows: usize) -> (Vec<St
                 }
                 _ => row.text.clone(),
             };
-            bar_row(&text)
+            ScreenRow::cut(&bar_row(&text), columns)
         })
         .collect();
     (
@@ -1219,24 +1221,23 @@ fn command_rows(text: &str, cursor: usize, width: usize, rows: usize) -> (Vec<St
 /// as the terminal will wrap it on a screen `width` wide once it ends, so it moves to the
 /// conversation as it shows. At most `room` rows show: a taller line shows its end, after a row
 /// that says its start is cut, and shows whole once it ends.
-fn open_line_rows(pending: &str, width: usize, room: usize) -> Vec<String> {
+fn open_line_rows(pending: &str, columns: NonZeroUsize, room: usize) -> Vec<ScreenRow> {
     let open = pending
         .rfind('\n')
         .map_or(pending, |end| &pending[end + 1..]);
     if open.is_empty() || room == 0 {
         return Vec::new();
     }
-    let rows = terminal_rows(open, width);
-    let rows: Vec<String> = rows
-        .into_iter()
-        .map(|row| format!("{row}{RESET}"))
-        .collect();
-    if rows.len() <= room {
-        return rows;
-    }
-    let shown = room - 1;
-    let cut = format!("{SUBDUED_ON_BAR}… its start shows once it ends{RESET}");
-    [vec![cut], rows[rows.len() - shown..].to_vec()].concat()
+    let rows = terminal_rows(open, columns.get());
+    let (cut, shown) = if rows.len() <= room {
+        (None, &rows[..])
+    } else {
+        let cut = format!("{SUBDUED_ON_BAR}… its start shows once it ends");
+        (Some(cut), &rows[rows.len() - (room - 1)..])
+    };
+    (cut.iter().chain(shown))
+        .map(|row| ScreenRow::cut(&format!("{row}{RESET}"), columns))
+        .collect()
 }
 
 /// The rows the terminal wraps `line` onto at `width` columns, each after the color codes the
@@ -1270,6 +1271,11 @@ fn terminal_rows(line: &str, width: usize) -> Vec<String> {
         .zip(ends)
         .map(|(&start, end)| format!("{}{}", colors_at(line, start), &line[start..end]))
         .collect()
+}
+
+/// `row` on the bar, as `bar_row` draws it, whose codes take no column.
+fn on_bar(row: &ScreenRow, columns: NonZeroUsize) -> ScreenRow {
+    ScreenRow::cut(&bar_row(row.as_str()), columns)
 }
 
 /// `line` on the bar, whose background fills the row. A reset inside the line ends the bar,
@@ -1824,7 +1830,8 @@ mod tests {
 
     #[test]
     fn the_command_line_starts_with_its_prompt() {
-        let (rows, row, column) = command_rows("model sonnet", 5, 40, 3);
+        let (rows, row, column) = command_rows("model sonnet", 5, columns(40), 3);
+        let rows: Vec<&str> = rows.iter().map(ScreenRow::as_str).collect();
         assert_eq!(rows.len(), 1);
         assert!(
             rows[0].contains(&format!("{MARK}command:{RESET}")),
@@ -1843,15 +1850,15 @@ mod tests {
     fn a_long_command_takes_more_rows_and_keeps_its_cursor() {
         // "command: " and 20 characters wrap at 10 columns onto 3 rows
         let text = "abcdefghijklmnopqrst";
-        let (rows, row, column) = command_rows(text, 20, 10, 5);
+        let (rows, row, column) = command_rows(text, 20, columns(10), 5);
         assert_eq!(rows.len(), 3);
         assert_eq!((row, column), (2, 9));
-        let (rows, row, _) = command_rows(text, 20, 10, 2);
+        let (rows, row, _) = command_rows(text, 20, columns(10), 2);
         assert_eq!(rows.len(), 2);
         assert_eq!(row, 1);
-        assert!(!rows[0].contains("command"), "{:?}", rows[0]);
-        let (rows, row, column) = command_rows(text, 0, 10, 2);
-        assert!(rows[0].contains("command"), "{:?}", rows[0]);
+        assert!(!rows[0].as_str().contains("command"));
+        let (rows, row, column) = command_rows(text, 0, columns(10), 2);
+        assert!(rows[0].as_str().contains("command"));
         assert_eq!((row, column), (0, 9));
     }
 
@@ -1974,18 +1981,26 @@ mod tests {
     #[test]
     fn the_open_line_is_the_text_after_the_last_line_break() {
         assert_eq!(
-            open_line_rows("done\nabcd", 2, 9),
+            open_rows("done\nabcd", 2, 9),
             [format!("ab{RESET}"), format!("cd{RESET}")]
         );
-        assert_eq!(open_line_rows("done\n", 2, 9), Vec::<String>::new());
+        assert_eq!(open_rows("done\n", 2, 9), Vec::<String>::new());
     }
 
     #[test]
     fn an_open_line_taller_than_the_room_shows_its_end() {
-        let rows = open_line_rows("abcdef", 2, 2);
+        let rows = open_rows("abcdef", 2, 2);
         assert_eq!(rows.len(), 2);
         assert!(rows[0].contains('…'));
         assert_eq!(rows[1], format!("ef{RESET}"));
+    }
+
+    #[test]
+    fn the_row_for_a_cut_start_fits_the_screen() {
+        // The row that stands for the start is wider than 2 columns, and is cut to them
+        for row in open_line_rows("abcdef", columns(2), 2) {
+            assert!(visible_width(row.as_str()) <= 2, "{:?}", row.as_str());
+        }
     }
 
     /// The text of the rows of `fields`' block, without colors.
@@ -1993,6 +2008,17 @@ mod tests {
         let columns = NonZeroUsize::new(columns).expect("some columns");
         (block_lines(fields, BLOCK_ROWS, columns).iter())
             .map(|line| plain(line))
+            .collect()
+    }
+
+    fn columns(columns: usize) -> NonZeroUsize {
+        NonZeroUsize::new(columns).expect("some columns")
+    }
+
+    /// The text of the open line's rows on a screen `width` wide, with `room` rows.
+    fn open_rows(pending: &str, width: usize, room: usize) -> Vec<String> {
+        (open_line_rows(pending, columns(width), room).iter())
+            .map(|row| row.as_str().to_string())
             .collect()
     }
 

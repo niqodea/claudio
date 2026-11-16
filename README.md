@@ -103,7 +103,7 @@ Keys come in two kinds.
 | Ctrl+N | moves down the options, among the questions             |
 | Ctrl+P | moves up the options, among the questions                |
 
-**Every other key works on your text.** Enter sends it, and the rest edit it with vi keys. While a vi command is half typed, its keys show at the right end of the label row. Enter and the session keys still do their usual job then, and cancel the half-typed command. To clear the input, use vi, like `S` or `ggdG` in normal mode; `u` brings it back.
+**Every other key works on your text.** Enter sends it, and the rest edit it with vi keys. The right end of the label row shows in one letter where your keys go, the box's vi mode or the command line: `N` for normal, `I` for insert, `V` for visual and `C` for the command line, and while a vi command is half typed, its keys show just left of it, like `d2 N`. Enter and the session keys still do their usual job then, and cancel the half-typed command. To clear the input, use vi, like `S` or `ggdG` in normal mode; `u` brings it back.
 
 A key that loses what no key brings back waits for a second press in a row, and the label row names the loss in orange, like `Enter again refuses 2 questions and sends on a possibly cold cache`.
 These keys are:

@@ -900,16 +900,11 @@ impl InputLine {
         }
     }
 
-    /// The label row's line: the label, and at the right edge the keys of a half-typed vi
-    /// command, where vim's `showcmd` shows them, so nothing else on the row moves when they
-    /// appear or go. On a screen too narrow for both, the keys follow the label after a space, and
-    /// wrap onto the next row.
+    /// The label row's line: the label, and at the right edge where the keys go, as `key_state`
+    /// gives it. On a screen too narrow for both, that state follows the label after a space, and
+    /// wraps onto the next row.
     fn label_line(&self) -> String {
-        let pending = self.editor.pending();
-        if pending.is_empty() {
-            return self.label.clone();
-        }
-        let right = format!("{SUBDUED_ON_BAR}{pending}");
+        let right = format!("{SUBDUED_ON_BAR}{}", self.key_state());
         let room = usize::from(self.layout.width)
             .saturating_sub(visible_width(&self.label) + visible_width(&right))
             .max(1);
@@ -917,11 +912,39 @@ impl InputLine {
     }
 
     /// The question view's label row: the label, and at its right end the progress through the
-    /// batch and the keys of a half-typed vi command. Unlike the conversation's, it takes one
+    /// batch and where the keys go. Unlike the conversation's, it takes one
     /// row, with the options right under it, so it gives up text as `ScreenRow::spread` does.
     fn question_label_row(&self, view: &View) -> ScreenRow {
-        let right = right_end(view, &self.editor.pending());
+        let key_state = if self.pick.cursor == Cursor::Writing {
+            self.key_state()
+        } else {
+            String::new()
+        };
+        let right = right_end(view, &key_state);
         ScreenRow::spread(&self.label, &right, self.columns())
+    }
+
+    /// Where the keys go, for the label row's right end: the keys of a half-typed vi command,
+    /// where vim's `showcmd` shows them, then a letter for the mode, the box's vi mode or the
+    /// command line, which takes the keys from the box while it is open: `N` for normal, `I` for
+    /// insert, `V` for both visual modes and `C` for the command line, as vim's status lines show
+    /// its command-line mode among the others, but in one letter like the label row's other
+    /// indicators. The letter
+    /// takes the edge, so it stays in place, and the keys grow leftward from it. It tells the mode
+    /// in a character where the cursor's shape alone did not, which some terminals do not show.
+    fn key_state(&self) -> String {
+        let mode = match self.editor.mode() {
+            _ if self.command_line.is_some() => 'C',
+            Mode::Normal => 'N',
+            Mode::Insert => 'I',
+            Mode::Visual | Mode::VisualLine => 'V',
+        };
+        let pending = self.editor.pending();
+        if pending.is_empty() {
+            mode.to_string()
+        } else {
+            format!("{pending} {mode}")
+        }
     }
 
     /// The screen's width.
@@ -1300,23 +1323,23 @@ fn limit_indicator(letter: char, level: Option<Level>) -> String {
 /// The versions of the question view's label row's right end, from whole to a lone `…`: the
 /// progress, as the names of the questions of the request shown, then those of the requests
 /// that wait, then the place of the request shown, each only when its level has more than one
-/// item, and last the keys of a half-typed vi command, `pending`. Each version after the first
-/// hides one more group from the left, whole, behind `…`, so a name never shows cut, and the
-/// keys, which the user is typing, go last.
+/// item, and last where the keys go, `key_state`, as `InputLine::key_state` gives it. Each
+/// version after the first hides one more group from the left, whole, behind `…`, so a name
+/// never shows cut, and the key state, which tells what the user is typing, goes last.
 /// Ref: <https://github.com/nvim-lualine/lualine.nvim/wiki/Component-snippets>,
 /// whose status line hides whole components on a narrow window
-fn right_end(view: &View, pending: &str) -> Vec<String> {
+fn right_end(view: &View, key_state: &str) -> Vec<String> {
     let questions = names(&view.progress, view.index, question_name);
     let requests = request_names(view);
     let place = request_place(view);
-    let pending = (!pending.is_empty()).then(|| pending.to_string());
+    let key_state = (!key_state.is_empty()).then(|| key_state.to_string());
     // The questions change with each request, so they go left of the requests, where they move
     // nothing when they change
     let groups: Vec<(&str, String)> = [
         (" │ ", questions),
         (" │ ", requests),
         (" ", place),
-        (" ", pending),
+        (" ", key_state),
     ]
     .into_iter()
     .filter_map(|(gap, group)| Some((gap, group?)))
@@ -1903,17 +1926,17 @@ mod tests {
             .map(plain)
             .collect();
         assert_eq!(questions, ["a s", "…"]);
-        // A half-typed vi command takes the right end, and goes last
-        let typing: Vec<String> = right_end(&view(2, 0, 1), "d2")
+        // Where the keys go, a half-typed command and the mode, takes the right end, and goes last
+        let typing: Vec<String> = right_end(&view(2, 0, 1), "d2 N")
             .into_iter()
             .map(plain)
             .collect();
-        assert_eq!(typing, ["q w 1/2 d2", "… 1/2 d2", "… d2", "…"]);
-        let alone: Vec<String> = right_end(&view(1, 0, 1), "d2")
+        assert_eq!(typing, ["q w 1/2 d2 N", "… 1/2 d2 N", "… d2 N", "…"]);
+        let alone: Vec<String> = right_end(&view(1, 0, 1), "I")
             .into_iter()
             .map(plain)
             .collect();
-        assert_eq!(alone, ["d2", "…"]);
+        assert_eq!(alone, ["I", "…"]);
     }
 
     use crate::style::STRONG;

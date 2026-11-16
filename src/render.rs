@@ -12,8 +12,8 @@ use std::io::Write;
 use std::num::NonZeroUsize;
 
 use serde_json::{Map, Value};
-use unicode_width::UnicodeWidthChar;
 
+use crate::cut::cut;
 use crate::markdown::{Highlighter, code_span};
 use crate::protocol::{
     Ask, AskKind, Level, Question, SettingsError, State, Task, TaskStatus, ToolResult, ToolUse,
@@ -965,127 +965,6 @@ fn reply_mark() -> String {
     format!("{MARK}‹‹{RESET}")
 }
 
-/// `line` cut at its end to take at most `columns` columns on screen, with `…` where it is cut.
-/// Text reads from its start, and an `…` at the end is always in the same place, where the eye
-/// finds it, so every line is cut this way but a path's: `cut_path`.
-/// Ref: <https://www.patternfly.org/components/truncate/design-guidelines>, whose default
-/// truncation is at the end of the text
-///
-/// The line holds its own colors, as for `cut_path`.
-pub fn cut(line: &str, columns: NonZeroUsize) -> String {
-    let mut width = 0;
-    let mut rest = line.char_indices();
-    let mut start_end = None;
-    let kept_columns = columns.get() - 1;
-    while let Some((index, character)) = rest.next() {
-        if character == '\x1b' {
-            // Every sequence a line holds is a CSI, which ends with a letter and takes no column
-            rest.find(|(_, next)| next.is_ascii_alphabetic());
-            continue;
-        }
-        let character_width = character.width().unwrap_or(0);
-        if start_end.is_none() && width + character_width > kept_columns {
-            start_end = Some(index);
-        }
-        width += character_width;
-    }
-    match start_end {
-        Some(start_end) if width > columns.get() => {
-            // The `…` stands for the text it replaces, so it takes the colors of that text
-            format!(
-                "{}{RESET}{}…{RESET}",
-                &line[..start_end],
-                colors_at(line, start_end),
-            )
-        }
-        _ => line.to_string(),
-    }
-}
-
-/// `path`, a file's path or a URL, cut in the middle to take at most `columns` columns on screen,
-/// with `…` where it is cut. Paths often start the same, like `/home/…` or `https://`, and their
-/// last part is the file or the page, so both the start and the end stay.
-/// Ref: <https://www.patternfly.org/components/truncate/design-guidelines>, which cuts in the
-/// middle a text whose end cannot be cut, like a long URL
-/// Ref: <https://v5-archive.patternfly.org/ux-writing/truncation>, which cuts where the part
-/// that tells one text from the next is not
-///
-/// The path holds its own colors, since the `…` and the end take the colors in effect where the
-/// path has them, and know nothing of colors set before it.
-pub fn cut_path(path: &str, columns: NonZeroUsize) -> String {
-    let mut characters = Vec::new();
-    let mut rest = path.char_indices();
-    while let Some((index, character)) = rest.next() {
-        if character == '\x1b' {
-            // Every sequence a path holds is a CSI, which ends with a letter and takes no column
-            rest.find(|(_, next)| next.is_ascii_alphabetic());
-            continue;
-        }
-        characters.push((index, character, character.width().unwrap_or(0)));
-    }
-    if characters.iter().map(|(_, _, width)| width).sum::<usize>() <= columns.get() {
-        return path.to_string();
-    }
-    // The `…` takes a column, and the start takes the odd one of the rest
-    let kept_columns = columns.get() - 1;
-    let (mut start_end, mut start_width) = (0, 0);
-    for (index, character, width) in &characters {
-        if start_width + width > kept_columns.div_ceil(2) {
-            break;
-        }
-        start_width += width;
-        start_end = index + character.len_utf8();
-    }
-    let (mut end_start, mut end_width) = (path.len(), 0);
-    for (index, _, width) in characters.iter().rev() {
-        if end_width + width > kept_columns / 2 {
-            break;
-        }
-        end_width += width;
-        end_start = *index;
-    }
-    // The `…` stands for the text it replaces, so it takes the colors of that text's start
-    let cut_start = characters
-        .iter()
-        .find(|(index, _, _)| *index >= start_end)
-        .map_or(start_end, |(index, _, _)| *index);
-    let end = &path[end_start..];
-    let end = if end.is_empty() {
-        String::new()
-    } else {
-        format!("{}{end}", colors_at(path, end_start))
-    };
-    format!(
-        "{}{RESET}{}…{RESET}{end}",
-        &path[..start_end],
-        colors_at(path, cut_start),
-    )
-}
-
-/// The color codes in effect at byte `end` of `line`, those since its last reset, which set the
-/// colors again where printing starts there.
-pub fn colors_at(line: &str, end: usize) -> String {
-    let mut codes = String::new();
-    let mut characters = line[..end].char_indices();
-    while let Some((index, character)) = characters.next() {
-        if character != '\x1b' {
-            continue;
-        }
-        // Every sequence a line holds is a CSI, which ends with a letter, and those that end with
-        // `m` set colors
-        let sequence_end = characters
-            .find(|(_, next)| next.is_ascii_alphabetic())
-            .map_or(end, |(next_index, next)| next_index + next.len_utf8());
-        let sequence = &line[index..sequence_end];
-        if sequence == RESET {
-            codes.clear();
-        } else if sequence.ends_with('m') {
-            codes.push_str(sequence);
-        }
-    }
-    codes
-}
-
 /// The lines of Markdown, highlighted.
 pub fn markdown_lines(markdown: &str) -> Vec<String> {
     let mut highlighter = Highlighter::new();
@@ -1430,59 +1309,6 @@ mod tests {
                 format!("✓ {SUBDUED}#01 Read: three{RESET}"),
             ]
         );
-    }
-
-    fn columns(count: usize) -> NonZeroUsize {
-        NonZeroUsize::new(count).expect("the count is not zero")
-    }
-
-    #[test]
-    fn a_line_that_fits_stays_whole() {
-        assert_eq!(cut_path("abc", columns(3)), "abc");
-    }
-
-    #[test]
-    fn a_path_too_long_keeps_its_start_and_its_end() {
-        assert_eq!(
-            cut_path("abcdefgh", columns(6)),
-            format!("abc{RESET}…{RESET}gh")
-        );
-    }
-
-    #[test]
-    fn the_end_kept_starts_with_the_colors_in_effect_there() {
-        assert_eq!(
-            cut_path(&format!("{SUBDUED}abcdef"), columns(4)),
-            format!("{SUBDUED}ab{RESET}{SUBDUED}…{RESET}{SUBDUED}f")
-        );
-        assert_eq!(
-            cut_path(&format!("{STRONG}ab{RESET}cdefgh"), columns(4)),
-            format!("{STRONG}ab{RESET}…{RESET}h")
-        );
-    }
-
-    #[test]
-    fn the_ellipsis_takes_the_colors_of_the_text_it_replaces() {
-        assert_eq!(
-            cut_path(&format!("ab{SUBDUED}cdefgh"), columns(4)),
-            format!("ab{RESET}{SUBDUED}…{RESET}{SUBDUED}h")
-        );
-    }
-
-    #[test]
-    fn a_line_too_long_keeps_its_start_and_its_colors() {
-        assert_eq!(cut("abcdef", columns(6)), "abcdef");
-        assert_eq!(cut("abcdefgh", columns(6)), format!("abcde{RESET}…{RESET}"));
-        assert_eq!(
-            cut(&format!("{SUBDUED}abcdef"), columns(4)),
-            format!("{SUBDUED}abc{RESET}{SUBDUED}…{RESET}")
-        );
-        assert_eq!(cut("ab日本", columns(4)), format!("ab{RESET}…{RESET}"));
-    }
-
-    #[test]
-    fn a_wide_character_that_does_not_fit_is_cut_whole() {
-        assert_eq!(cut_path("ab日本", columns(4)), format!("ab{RESET}…{RESET}"));
     }
 
     #[test]

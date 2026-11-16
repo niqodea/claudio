@@ -36,12 +36,27 @@ impl Phase {
     }
 }
 
-/// The rows of the block under the rule, the same on every question and call, so that the rule
-/// and the question stay in place from one to the next.
+/// The rows of the block under the title, the same on every question and call, so that the title
+/// and the options stay in place from one to the next. A short screen gives it fewer rows, the
+/// same on every question and call too.
 pub const BLOCK_ROWS: usize = 8;
 
-/// A part of the block under the rule, which takes `rows` rows: a call's field, its reason, or a
-/// question's text.
+/// The rows of the block that a question whose options have previews keeps for its text. The
+/// preview takes the rows after them, so that the options stay in place on every question, with
+/// or without previews.
+pub const PREVIEWED_QUESTION_ROWS: usize = 3;
+
+/// The block's last rows, which a permission request keeps for what it says about itself rather
+/// than about the call: why Claude Code asks, after `?`, and who asked, after `↳`. Each is always
+/// there, as a grey note when Claude Code says nothing, so these rows read the same on every
+/// request, and the call's fields above them take `INPUT_ROWS` rows on every call of a tool.
+pub const ABOUT_ROWS: usize = 2;
+
+/// The rows of the block a permission request gives the call's fields, above `ABOUT_ROWS`.
+pub const INPUT_ROWS: usize = BLOCK_ROWS - ABOUT_ROWS;
+
+/// A part of the block under the title, which takes `rows` rows: a call's field, a line about a
+/// permission request, a question's text, or an option's preview.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Field {
     /// What shows in front of the value.
@@ -73,6 +88,10 @@ pub enum Mark {
     /// The field's name, cut to a column of the same width on every tool, in front of a value of
     /// one row.
     Name(String),
+    /// A preview of an option: its lines, already colored, each on its own row behind a bar in the
+    /// margin. The option's key, like `2▎`, goes in front of the first row, or nothing when the
+    /// cursor is on no option.
+    Quote(Option<String>),
 }
 
 /// How a field's value shows.
@@ -96,10 +115,11 @@ pub enum Tone {
 /// wait, a call's questions, a plan or a permission.
 #[derive(Clone)]
 pub struct View {
-    /// The question's header, which the label row shows.
+    /// Which one of its kind the request is, which the label row shows: a question's header, a
+    /// call's tool, or `Plan`.
     pub label: String,
-    /// The request's name, which the rule above the question shows: its kind, and the subagent
-    /// that asked.
+    /// The request's kind, `Question`, `Plan` or `Permission`, which the title above the block
+    /// shows, and nothing else: the label row names the request, and the block shows the rest.
     pub title: String,
     /// What Ctrl+C refuses: the request shown, like `the call` or `2 questions`.
     pub refusal: String,
@@ -107,13 +127,9 @@ pub struct View {
     pub request_index: usize,
     /// Whether each request that waits has all its questions submitted.
     pub requests: Vec<bool>,
-    /// What the block of `BLOCK_ROWS` rows under the rule shows: a question's text, a plan, or
-    /// a call's reason and fields.
+    /// What the block of `BLOCK_ROWS` rows under the title shows: a question's text, a plan, or
+    /// a call's fields and reason.
     pub fields: Vec<Field>,
-    /// The line right above the options, like the question that asks to allow a call, empty on
-    /// a question, whose text is in the block. It is one line on every request, so the rule and
-    /// the block keep their rows from one request to the next.
-    pub question: String,
     /// The question's options, or the approval and the refusal of a call or a plan.
     pub choices: Vec<Choice>,
     /// What the item of the user's own answer says.
@@ -363,12 +379,11 @@ mod tests {
     fn answering() -> Phase {
         Phase::Answering(Box::new(View {
             label: "plan".to_string(),
-            title: "Questions".to_string(),
+            title: "Question".to_string(),
             refusal: "2 questions".to_string(),
             request_index: 0,
             requests: vec![false],
             fields: vec![],
-            question: String::new(),
             choices: vec![],
             own_label: String::new(),
             form: Form::One,

@@ -142,13 +142,26 @@ Each request waits until you open it, so no key meant for your message answers o
 `Y` on the label row counts them, a call's questions as one request, up to 9 and then `+`, in orange while any waits.
 Meanwhile, Enter on a message refuses them, so it waits for a second press.
 Ctrl+Y shows them one at a time, and Ctrl+Y goes back to the message, as Esc does on the list.
-A rule above the question names its request: its kind, like `Questions`, `Plan` or the tool of the call, as Claude Code names it for a person, with its MCP server, if any, and the subagent that asked, if one did, like `── Bash · Explore the code` or `── Search Files · claude.ai Google Drive`.
-A title too long for the rule loses its end.
-The label row names the question, or the tool of a call without its MCP server, and loses its end when too long, so the progress at its right end stays whole.
+Each part of the screen says one thing about the request.
+The title above the question says its kind alone, `── Question`, `── Plan` or `── Permission`, so it reads the same on every request of a kind.
+The label row says which one it is: a question by its header, a call by its tool, as Claude Code shows it to the user, and a plan as `Plan`, since Claude Code sends no name for it.
+The block under the title shows the rest.
+The label row gives that name 12 columns, the most Claude Code asks Claude to write in a header, so what follows starts in the same column on every request, and a longer one loses its end.
+The label row loses its end when too long, so the progress at its right end stays whole.
 When more than one request waits, the right end of the label row shows the place of the one shown, like `2/3`, then names the requests `q`, `w`, `e` and `r`, and those after the fourth as how many they are, like `+2`, then the request's questions `a`, `s`, `d` and `f`, green once submitted, each with the one shown in reverse, and each only when it has more than one, like `2/3 q w e │ a s`.
 Each request goes to Claude Code as soon as you answer it, apart from the others.
-A question shows in a block of 8 rows under the rule, whatever its length, so the options never move while you answer.
+A question shows in a block of 8 rows under the title, whatever its length, so the options never move while you answer.
 A longer question ends in `… N more lines · Ctrl+O shows it whole`: Ctrl+O there opens the whole conversation at the question, to read with less's keys, and `q` brings you back to answer.
+When the options of a question have previews, like code to compare, the question keeps the block's first 3 rows, and the preview of the option under the cursor the last 5, without the code's fences, behind a bar in the margin that starts with the option's key, like `2▎`.
+A longer preview ends in the same row that counts the lines left out.
+
+A screen too short for all of it, 18 rows with a box of 3, gives up rows in an order that depends on its height alone, so at any height, every request shows its parts in the same rows.
+The box gives up its rows first, down to 1.
+Then the block does, from its end: first the rows a value leaves empty, then the rows of the last value of more rows, down to 1, a preview too, whose one row ends in `…`.
+Then its last row swallows whole parts from the end, and names what it swallowed: the fields of a call, like `… 2 more fields · Ctrl+O shows them`, and anything else, like a question, or the title too on the last row left, as the request, `… Ctrl+O shows the request`.
+So a shorter screen only makes that one row swallow more, and name it more broadly, and Ctrl+O always shows it all.
+Below 8 rows, the options give up rows too, and scroll to keep the one under the cursor in view.
+Every `…` and every row that counts, here and in the conversation, stands for text that Ctrl+O shows whole.
 
 Each question shows its options as numbered lines between the label row and the input box, and last, an item marked `>` for your own answer, which you write in the box.
 The cursor starts on the first option.
@@ -190,10 +203,15 @@ A plan or a call to allow is a request of one question, whose options are named 
 `y` and `n` only move the cursor, as numbers do, and Enter answers: allow allows it, and `refuse, and stop Claude` refuses it and stops Claude's turn, as Ctrl+C does.
 Your own answer refuses it too, but Claude reads your words and goes on from them, in the same turn.
 A plan shows in the same 8 rows as a question, as written, and a longer plan ends in `… N more lines · Ctrl+O shows it whole`.
-A call shows in the same 8 rows as a question: first the fields of its input that matter most, each after a sign that reads as what it is, then the others, by name, and on the last row, after `?`, why Claude Code asks, as it sends it: its words, or else the kind of check that asks, like `A rule in your settings asks before this call`, or else the path that made it ask, and `no reason given` when it sends none of them.
+A call shows in the same 8 rows as a question: its input in the first 6, and on the last 2, what the request says about itself, always there, in grey when Claude Code says nothing.
+The input shows first the fields that matter most, each after a sign that reads as what it is, then the others, by name.
+After `?` comes why Claude Code asks, as it sends it: its words, or else the kind of check that asks, like `A rule in your settings asks before this call`, or else the path that made it ask, and `no reason given` when it sends none of them.
+After `↳` comes who asked: the subagent, by the description of the call that started it, or `main agent`.
+Only a call can come from a subagent, since Claude Code gives subagents no tool to ask questions or propose a plan.
 The signs come from a shell and a diff: Bash shows `$` before its command, `#` before its description, `t` before its timeout and `&` before where it runs, like `& in background`, an Edit shows `-` and `+` before what it takes out and puts in, in red and green, `@` comes before a file or a URL, and `│` before a Write's content or a WebFetch's prompt.
 A field the call leaves out shows what that means in grey, like `t default` or `& in foreground`.
 A call of another tool, like an MCP tool's, shows each field on a row of its own, after its name, which loses its end past 10 columns, so all its values start in one column.
+A call of an MCP tool starts with the server it comes from, as `mcp_server: claude.ai Google Drive`, which says both that the tool is an MCP server's and whose.
 Each field takes the same rows on every call of its tool, and a short value leaves them empty, so a field stays in its place from one call to the next, and each value starts in the column its mark sets.
 A longer value ends in `… N more lines · Ctrl+O shows it whole`, a value of one row loses its end to `…`, or its middle if it is a file's path or a URL, and the fields that do not fit end in `… N more fields · Ctrl+O shows them`.
 A call that Claude Code deems dangerous opens on `n`, as Claude Code's own prompt does, and its option to allow reads `allow (dangerous)`, in orange, and waits for a second Enter, which the label row asks for.

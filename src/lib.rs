@@ -15,6 +15,7 @@ mod code;
 mod config;
 mod context;
 pub mod contract;
+mod cut;
 mod fake_api;
 mod input_line;
 mod keys;

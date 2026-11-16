@@ -21,10 +21,12 @@
 
 use serde_json::{Map, Value};
 
-use crate::keys::{BLOCK_ROWS, Field, Mark, Tone, View, questions};
-use crate::picker::{Choice, Cursor, Draft, Form, Move, Pick};
+use crate::cut;
+use crate::keys::{
+    ABOUT_ROWS, BLOCK_ROWS, Field, INPUT_ROWS, Mark, PREVIEWED_QUESTION_ROWS, Tone, View, questions,
+};
+use crate::picker::{self, Choice, Cursor, Draft, Form, Move, Pick};
 use crate::protocol::{Answer, Ask, AskKind, Permission, Question};
-use crate::style::{RESET, STRONG};
 
 #[derive(Default)]
 pub struct Questions {
@@ -38,7 +40,10 @@ pub struct Questions {
 struct Request {
     ask: Ask,
     /// The subagent that asked, by the description of the call that started it, none for Claude
-    /// itself.
+    /// itself. Only a permission can come from a subagent, since Claude Code gives no subagent
+    /// `AskUserQuestion` or `ExitPlanMode`, so only a permission shows it.
+    /// Seen with Claude Code 2.1.322: a subagent asked to call either reported neither among its
+    /// tools.
     agent: Option<String>,
     entries: Vec<Entry>,
     /// The question the question view shows, from 0, where one past the last is the review.
@@ -123,25 +128,25 @@ impl Request {
             .collect()
     }
 
-    /// The request's kind: the tool asked about, or the questions or the plan.
-    fn kind(&self) -> String {
+    /// The title of every request of its kind, and nothing else, so the title reads the same on
+    /// every request of a kind: what is particular to one request is on the label row, which
+    /// names it, and in the block, which shows it.
+    fn kind(&self) -> &'static str {
         match &self.ask.kind {
-            AskKind::Questions(_) => "Questions".to_string(),
-            AskKind::Plan(_) => "Plan".to_string(),
-            // An MCP tool's name for a person says what it does, and its server's whose it is
-            AskKind::Permission(permission) => match &permission.server {
-                Some(server) => format!("{} · {server}", permission.name),
-                None => permission.name.clone(),
-            },
+            AskKind::Questions(_) => "Question",
+            AskKind::Plan(_) => "Plan",
+            AskKind::Permission(_) => "Permission",
         }
     }
 
-    /// The name of a plan or a permission on the label row: its kind, without the MCP server
-    /// that the rule above names.
+    /// The name of a plan or a permission on the label row, which says which one of its kind it
+    /// is, as a question's header does: the tool's name as Claude Code shows it to the user, and
+    /// for a plan, its kind, since a plan has no name of its own that Claude Code sends.
     fn label(&self) -> String {
         match &self.ask.kind {
             AskKind::Permission(permission) => permission.name.clone(),
-            AskKind::Plan(_) | AskKind::Questions(_) => self.kind(),
+            AskKind::Plan(_) => self.kind().to_string(),
+            AskKind::Questions(_) => unreachable!("a question's label is its header"),
         }
     }
 
@@ -154,22 +159,24 @@ impl Request {
         }
     }
 
-    /// What the question view shows of a plan or a permission: the plan, or the call's reason and
-    /// fields, in the block under the rule, then the question, right above the options.
-    fn decision_view(&self) -> (Vec<Field>, String, Vec<Choice>) {
-        let (fields, question) = match &self.ask.kind {
-            AskKind::Plan(plan) => (
-                vec![text_field(plan, Tone::Plain)],
-                "Carry out this plan?".to_string(),
-            ),
-            AskKind::Permission(permission) => (
-                call_fields(
+    /// What the question view shows of a plan or a permission: the plan, or the call's fields
+    /// and then the lines about the request, in the block under the title, and its options,
+    /// which ask whether to allow it.
+    fn decision_view(&self) -> (Vec<Field>, Vec<Choice>) {
+        let fields = match &self.ask.kind {
+            AskKind::Plan(plan) => vec![text_field(plan, Tone::Plain, BLOCK_ROWS)],
+            AskKind::Permission(permission) => {
+                let mut fields = call_fields(
                     &self.ask.tool_name,
                     &self.ask.input,
+                    permission.server.as_deref(),
+                );
+                fields.extend(about_fields(
                     reason(permission).as_deref(),
-                ),
-                format!("Allow this {} call?", permission.name),
-            ),
+                    self.agent.as_deref(),
+                ));
+                fields
+            }
             AskKind::Questions(_) => unreachable!("a call's questions have options of their own"),
         };
         let keyed = |label: &str, key: char| Choice {
@@ -186,7 +193,7 @@ impl Request {
             _ => keyed("allow", 'y'),
         };
         let choices = vec![approval, keyed("refuse, and stop Claude", 'n')];
-        (fields, format!("{STRONG}{question}{RESET}"), choices)
+        (fields, choices)
     }
 
     /// The answer that `draft` gives to a plan or a permission, none when it gives none, like
@@ -273,13 +280,15 @@ fn background_text(value: &Value) -> String {
 /// marked with the sign that reads as what it is: a shell's `$` in front of a command, `#` in
 /// front of a comment and `&` in front of where it runs, a diff's `-` and `+` in front of what
 /// an edit takes out and puts in, `@` in front of where a call acts, `│` in front of a body of
-/// text, and `t` in front of a timeout. The field that matters most, like a command, takes the
-/// most rows. A call of any other tool shows each field on a row of its own, by its name.
+/// text, and `t` in front of a timeout. The field that matters most, like a command, or what an
+/// edit puts in, which allowing it writes, takes the most rows, and the rows of a layout add up
+/// to `INPUT_ROWS`, so every field of it shows on a call that gives them all. A call of any other
+/// tool shows each field on a row of its own, by its name.
 const LAYOUTS: [(&str, &[Laid]); 4] = [
     (
         "Bash",
         &[
-            Laid::new("command", 4, '$', false, Tone::Plain),
+            Laid::new("command", 3, '$', false, Tone::Plain),
             Laid::new("description", 1, '#', false, Tone::Comment),
             Laid {
                 missing: "default",
@@ -300,7 +309,7 @@ const LAYOUTS: [(&str, &[Laid]); 4] = [
                 is_path: true,
                 ..Laid::new("file_path", 1, '@', false, Tone::Plain)
             },
-            Laid::new("old_string", 3, '-', true, Tone::Removed),
+            Laid::new("old_string", 2, '-', true, Tone::Removed),
             Laid::new("new_string", 3, '+', true, Tone::Added),
         ],
     ),
@@ -311,7 +320,7 @@ const LAYOUTS: [(&str, &[Laid]); 4] = [
                 is_path: true,
                 ..Laid::new("file_path", 1, '@', false, Tone::Plain)
             },
-            Laid::new("content", 6, '│', true, Tone::Plain),
+            Laid::new("content", 5, '│', true, Tone::Plain),
         ],
     ),
     (
@@ -321,56 +330,56 @@ const LAYOUTS: [(&str, &[Laid]); 4] = [
                 is_path: true,
                 ..Laid::new("url", 1, '@', false, Tone::Plain)
             },
-            Laid::new("prompt", 6, '│', true, Tone::Plain),
+            Laid::new("prompt", 5, '│', true, Tone::Plain),
         ],
     ),
 ];
 
-/// The block under the rule of a call of `tool` with `input`: the fields of its layout, then the
-/// others, by name, then on the last row, after a `?`, the reason Claude Code gives for asking,
-/// or a note that it gives none, in `BLOCK_ROWS` rows in all. Each field keeps its rows when its
-/// value is shorter, so a field shows in the same place on every call of the tool. A field the
-/// layout lacks, like Bash's `timeout`, takes a row from the last field of more rows, and the
-/// fields that still do not fit give their place to a row that counts them.
-fn call_fields(tool: &str, input: &Map<String, Value>, reason: Option<&str>) -> Vec<Field> {
-    let field = |mark, value: String, tone, rows| Field {
+/// The name of the field that names the server of an MCP tool. Only the word MCP tells the user
+/// that the tool comes from an MCP server, so the name says it, and the value says which one.
+const MCP_SERVER: &str = "mcp_server";
+
+/// A field of `rows` rows that shows `value` in `tone`, after `mark`.
+fn field(mark: Mark, value: String, tone: Tone, rows: usize) -> Field {
+    Field {
         mark,
         value,
         is_path: false,
         tone,
         rows,
-    };
-    // A sign is dim, but for a diff's, whose red and green say what it takes out and puts in
-    let sign = |sign, every_row, tone| Mark::Sign {
+    }
+}
+
+/// The mark `sign`, in front of each row of the value on `every_row`. A sign is dim, but for a
+/// diff's, whose red and green say what it takes out and puts in.
+fn sign(sign: char, every_row: bool, tone: Tone) -> Mark {
+    Mark::Sign {
         sign,
         every_row,
         tone: match tone {
             Tone::Removed | Tone::Added => tone,
             _ => Tone::Comment,
         },
-    };
+    }
+}
+
+/// The fields of a call of `tool` with `input`, in `INPUT_ROWS` rows: first the MCP server the
+/// tool comes from, if any, by `MCP_SERVER`, then the fields of the tool's layout, then the
+/// others, by name. Each field keeps its rows when its value is shorter, so a field shows in the
+/// same place on every call of the tool, and rows the fields leave are left empty. The fields
+/// are fitted by `cut::fit`: a field the layout lacks, like Bash's `timeout`, takes a row from
+/// the last field of more rows, and the last row swallows the fields that still do not fit.
+fn call_fields(tool: &str, input: &Map<String, Value>, mcp_server: Option<&str>) -> Vec<Field> {
     let name = |name: &str| Mark::Name(name.to_string());
-    let reason = match reason {
-        Some(reason) => field(
-            sign('?', false, Tone::Plain),
-            reason.to_string(),
-            Tone::Plain,
-            1,
-        ),
-        None => field(
-            sign('?', false, Tone::Plain),
-            "no reason given".to_string(),
-            Tone::Note,
-            1,
-        ),
-    };
     let layout = LAYOUTS
         .iter()
         .find(|(name, _)| *name == tool)
         .map_or(&[][..], |(_, layout)| *layout);
     // Edit's `replace_all` changes what the file's line means, so it goes with it
     let is_folded = |name: &str| tool == "Edit" && name == "replace_all";
-    let mut fields: Vec<Field> = Vec::new();
+    let mut fields: Vec<Field> = (mcp_server.iter())
+        .map(|server| field(name(MCP_SERVER), (*server).to_string(), Tone::Plain, 1))
+        .collect();
     for laid in layout {
         let mark = sign(laid.sign, laid.every_row, laid.tone);
         let mut shown = match input.get(laid.name) {
@@ -392,31 +401,39 @@ fn call_fields(tool: &str, input: &Map<String, Value>, reason: Option<&str>) -> 
             })
             .map(|(field_name, value)| field(name(field_name), value_text(value), Tone::Plain, 1)),
     );
-    if fields.is_empty() {
+    if layout.is_empty() && input.is_empty() {
         fields.push(field(name("input"), "none".to_string(), Tone::Note, 1));
     }
-    let room = BLOCK_ROWS - 1;
-    while fields.iter().map(|field| field.rows).sum::<usize>() > room {
-        if let Some(field) = fields.iter_mut().rev().find(|field| field.rows > 1) {
-            field.rows -= 1;
-        } else {
-            let hidden = fields.len() - (room - 1);
-            fields.truncate(room - 1);
-            fields.push(field(
-                name(""),
-                format!("… {hidden} more fields · Ctrl+O shows them"),
-                Tone::Note,
-                1,
-            ));
-        }
-    }
-    // the reason stays on the block's last row, however few rows the fields take
+    let mut fields = cut::fit(&fields, INPUT_ROWS, |_| 0);
     let taken = fields.iter().map(|field| field.rows).sum::<usize>();
-    if taken < room {
-        fields.push(field(Mark::None, String::new(), Tone::Plain, room - taken));
+    if taken < INPUT_ROWS {
+        fields.push(field(
+            Mark::None,
+            String::new(),
+            Tone::Plain,
+            INPUT_ROWS - taken,
+        ));
     }
-    fields.push(reason);
     fields
+}
+
+/// The lines about a permission request, in its `ABOUT_ROWS` rows at the block's end: why Claude
+/// Code asks, after `?`, then who asked, after `↳`, the subagent or the main agent. Who asked
+/// comes last, so a short screen, which cuts the block from its end, hides it before the reason,
+/// since it matters less to the answer. Each is always there, as a grey note when Claude Code
+/// says nothing, so that both keep their rows on every request.
+fn about_fields(reason: Option<&str>, agent: Option<&str>) -> [Field; ABOUT_ROWS] {
+    let line = |mark: char, value: Option<&str>, missing: &str| {
+        let (value, tone) = match value {
+            Some(value) => (value, Tone::Plain),
+            None => (missing, Tone::Note),
+        };
+        field(sign(mark, false, Tone::Plain), value.to_string(), tone, 1)
+    };
+    [
+        line('?', reason, "no reason given"),
+        line('↳', agent, "main agent"),
+    ]
 }
 
 /// Why Claude Code asks about a call: its `decision_reason`, or else a sentence for its
@@ -454,15 +471,15 @@ fn all_ticked(count: usize) -> Draft {
     }
 }
 
-/// The block under the rule of a question, of the review or of a plan: its text, in `tone`, in
-/// all the block's rows.
-fn text_field(text: &str, tone: Tone) -> Field {
+/// The block under the title of a question, of the review or of a plan: its text, in `tone`, in
+/// `rows` rows.
+fn text_field(text: &str, tone: Tone, rows: usize) -> Field {
     Field {
         mark: Mark::None,
         value: text.to_string(),
         is_path: false,
         tone,
-        rows: BLOCK_ROWS,
+        rows,
     }
 }
 
@@ -574,16 +591,13 @@ impl Questions {
             .map(|entry| entry.is_submitted)
             .collect();
         let requests: Vec<bool> = self.requests.iter().map(Request::is_submitted).collect();
-        let agent =
-            (request.agent.as_ref()).map_or_else(String::new, |agent| format!(" · {agent}"));
-        let view = |label: String, question, choices, own_label: &str, form| View {
+        let view = |label: String, choices, own_label: &str, form| View {
             label,
-            title: format!("{}{agent}", request.kind()),
+            title: request.kind().to_string(),
             refusal: request.refusal(),
             request_index: self.shown,
             requests: requests.clone(),
             fields: Vec::new(),
-            question,
             choices,
             own_label: own_label.to_string(),
             form,
@@ -597,11 +611,11 @@ impl Questions {
                 .is_some_and(|entry| entry.is_submitted),
         };
         if request.is_decision() {
-            let (fields, question, choices) = request.decision_view();
+            let (fields, choices) = request.decision_view();
             let own_label = "refuse, and tell Claude why";
             return View {
                 fields,
-                ..view(request.label(), question, choices, own_label, Form::One)
+                ..view(request.label(), choices, own_label, Form::One)
             };
         }
         if index == request.entries.len() {
@@ -609,34 +623,28 @@ impl Questions {
                 .map(|(header, answer)| Choice::new(&format!("{header}: {answer}"), "", None))
                 .collect();
             return View {
-                fields: vec![text_field("Send these answers?", Tone::Bold)],
-                ..view(
-                    "Review".to_string(),
-                    String::new(),
-                    choices,
-                    "",
-                    Form::Review,
-                )
+                fields: vec![text_field("Send these answers?", Tone::Bold, BLOCK_ROWS)],
+                ..view("Review".to_string(), choices, "", Form::Review)
             };
         }
         let question = &request.questions()[index];
-        let choices = (question.options.iter())
+        let choices: Vec<Choice> = (question.options.iter())
             .map(|choice| Choice::new(&choice.label, &choice.description, choice.preview.clone()))
             .collect();
+        // The preview takes the block's rows after the question's
+        let rows = if picker::has_previews(&choices) {
+            PREVIEWED_QUESTION_ROWS
+        } else {
+            BLOCK_ROWS
+        };
         let (own_label, form) = if question.is_multi_select {
             ("more of your own", Form::Several)
         } else {
             ("your own answer", Form::One)
         };
         View {
-            fields: vec![text_field(&question.text, Tone::Bold)],
-            ..view(
-                question.header.clone(),
-                String::new(),
-                choices,
-                own_label,
-                form,
-            )
+            fields: vec![text_field(&question.text, Tone::Bold, rows)],
+            ..view(question.header.clone(), choices, own_label, form)
         }
     }
 
@@ -999,13 +1007,13 @@ mod tests {
     fn requests_wait_each_on_its_own_and_the_view_moves_between_them() {
         let mut questions = Questions::default();
         questions.add(two_questions("a"), None, vec![1, 2]);
-        questions.add(one_question("b"), Some("Explore".to_string()), vec![3]);
+        questions.add(one_question("b"), None, vec![3]);
         questions.add(permission("c", false), None, vec![4]);
         assert_eq!(questions.count(), 3);
-        assert_eq!(questions.view().title, "Questions");
+        assert_eq!(questions.view().title, "Question");
         questions.go(Move::ToRequest(1));
         let view = questions.view();
-        assert_eq!(view.title, "Questions · Explore");
+        assert_eq!(view.title, "Question");
         assert_eq!(view.label, "Cache");
         assert_eq!(view.request_index, 1);
         questions.go(Move::PreviousRequest);
@@ -1016,7 +1024,7 @@ mod tests {
         // The view stays in place, on the request that slid into it
         assert!(questions.open());
         let view = questions.view();
-        assert_eq!((view.title.as_str(), view.request_index), ("Bash", 1));
+        assert_eq!((view.title.as_str(), view.request_index), ("Permission", 1));
         assert_eq!(questions.remove_shown().tool_use_id, "c");
         assert!(questions.open());
         assert_eq!(questions.view().label, "Database");
@@ -1050,13 +1058,12 @@ mod tests {
         assert_eq!(view.refusal, "the call");
         assert!(view.sends_at_once);
         assert_eq!(view.choices[0].key, Some('y'));
-        // The call shows in the block under the rule, and only the question above the options
+        // The call shows in the block under the title
         assert!(
             view.fields
                 .iter()
                 .any(|field| field.value == "rm -rf build")
         );
-        assert!(view.question.contains("Allow this Bash call?"));
     }
 
     #[test]
@@ -1077,7 +1084,6 @@ mod tests {
         assert_eq!(view.fields.len(), 1);
         assert_eq!(view.fields[0].value, "# Plan\n\n1. Add `greet`");
         assert_eq!(view.fields[0].rows, BLOCK_ROWS);
-        assert!(view.question.contains("Carry out this plan?"));
     }
 
     #[test]
@@ -1116,7 +1122,7 @@ mod tests {
             let mut questions = Questions::default();
             questions.add(*ask, None, vec![1]);
             let fields = questions.view().fields;
-            let reason = fields.last().expect("a reason").clone();
+            let reason = fields[fields.len() - ABOUT_ROWS].clone();
             (reason.value, reason.tone)
         };
         assert_eq!(
@@ -1161,15 +1167,69 @@ mod tests {
             panic!("an ask");
         };
         let mut questions = Questions::default();
-        questions.add(*ask, None, vec![1]);
+        questions.add(*ask, Some("Explore".to_string()), vec![1]);
         let view = questions.view();
-        assert_eq!(view.title, "Search Files · claude.ai Google Drive");
+        // The title names the kind alone, the label row the tool, and the block the rest
+        assert_eq!(view.title, "Permission");
         assert_eq!(view.label, "Search Files");
-        assert!(view.question.contains("Allow this Search Files call?"));
-        // Without a name for a person, the tool's own name
+        assert_eq!(
+            (view.fields[0].mark.clone(), view.fields[0].value.as_str()),
+            (Mark::Name(MCP_SERVER.to_string()), "claude.ai Google Drive")
+        );
+        assert_eq!(view.fields[1].mark, Mark::Name("query".to_string()));
+        let agent = view.fields.last().expect("who asked");
+        assert_eq!((agent.value.as_str(), agent.tone), ("Explore", Tone::Plain));
+        // Without a name to show the user, the tool's own name
         let mut questions = Questions::default();
         questions.add(permission("b", false), None, vec![2]);
-        assert_eq!(questions.view().title, "Bash");
+        assert_eq!(questions.view().label, "Bash");
+    }
+
+    #[test]
+    fn a_permission_ends_in_why_claude_code_asks_then_who_asked_on_the_same_rows_always() {
+        let shown = |fields: &[Field]| {
+            (fields.iter())
+                .map(|field| (field.value.clone(), field.tone))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            shown(&about_fields(Some("why"), Some("Explore"))),
+            [
+                ("why".to_string(), Tone::Plain),
+                ("Explore".to_string(), Tone::Plain)
+            ]
+        );
+        assert_eq!(
+            shown(&about_fields(None, None)),
+            [
+                ("no reason given".to_string(), Tone::Note),
+                ("main agent".to_string(), Tone::Note)
+            ]
+        );
+        // The call's fields take the same rows above them, whatever the call gives
+        let mut questions = Questions::default();
+        questions.add(permission("a", false), None, vec![1]);
+        let fields = questions.view().fields;
+        assert_eq!(
+            fields.iter().map(|field| field.rows).sum::<usize>(),
+            BLOCK_ROWS
+        );
+        let marks = fields[fields.len() - ABOUT_ROWS..]
+            .iter()
+            .map(|field| field.mark.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            marks,
+            [sign('?', false, Tone::Plain), sign('↳', false, Tone::Plain)]
+        );
+    }
+
+    #[test]
+    fn every_layout_fills_the_rows_of_a_calls_fields() {
+        for (tool, layout) in LAYOUTS {
+            let rows = layout.iter().map(|laid| laid.rows).sum::<usize>();
+            assert_eq!(rows, INPUT_ROWS, "{tool}");
+        }
     }
 
     /// The marks, as text, and rows of a block's fields.
@@ -1178,6 +1238,7 @@ mod tests {
             Mark::None => String::new(),
             Mark::Sign { sign, .. } => sign.to_string(),
             Mark::Name(name) => name.clone(),
+            Mark::Quote(key) => key.clone().unwrap_or_default(),
         };
         (fields.iter())
             .map(|field| (mark(field), field.rows))
@@ -1188,8 +1249,8 @@ mod tests {
     fn a_call_of_a_known_tool_takes_its_layout_and_its_other_fields_take_rows_from_the_last() {
         let input = |json: Value| json.as_object().expect("an object").clone();
         let bash = input(json!({"command": "ls", "description": "List", "timeout": 90000}));
-        let fields = call_fields("Bash", &bash, Some("why"));
-        let expected = [("$", 4), ("#", 1), ("t", 1), ("&", 1), ("?", 1)];
+        let fields = call_fields("Bash", &bash, None);
+        let expected = [("$", 3), ("#", 1), ("t", 1), ("&", 1)];
         assert_eq!(
             shape(&fields),
             expected.map(|(name, rows)| (name.to_string(), rows))
@@ -1199,15 +1260,14 @@ mod tests {
             (fields[3].value.as_str(), fields[3].tone),
             ("in foreground", Tone::Note)
         );
-        assert_eq!(fields[4].value, "why");
         assert_eq!(
             fields.iter().map(|field| field.rows).sum::<usize>(),
-            BLOCK_ROWS
+            INPUT_ROWS
         );
         // A field the layout lacks shows by name, on a row the command gives up
         let bash = input(json!({"command": "ls", "run_in_background": true, "new": 1}));
         let fields = call_fields("Bash", &bash, None);
-        let expected = [("$", 3), ("#", 1), ("t", 1), ("&", 1), ("new", 1), ("?", 1)];
+        let expected = [("$", 2), ("#", 1), ("t", 1), ("&", 1), ("new", 1)];
         assert_eq!(
             shape(&fields),
             expected.map(|(name, rows)| (name.to_string(), rows))
@@ -1220,10 +1280,6 @@ mod tests {
         // A sign is the field's, whatever the value, given or not
         let left_out = call_fields("Bash", &input(json!({"command": "ls"})), None);
         assert_eq!(fields[3].mark, left_out[3].mark);
-        assert_eq!(
-            (left_out[4].value.as_str(), left_out[4].tone),
-            ("no reason given", Tone::Note)
-        );
         let edit = input(json!({"file_path": "a.rs", "new_string": "y"}));
         let fields = call_fields("Edit", &edit, None);
         assert_eq!(fields[1].tone, Tone::Note);
@@ -1238,7 +1294,7 @@ mod tests {
             "replace_all": true, "file_path": "a.rs", "old_string": "x", "new_string": "y"
         }));
         let fields = call_fields("Edit", &edit, None);
-        let expected = [("@", 1), ("-", 3), ("+", 3), ("?", 1)];
+        let expected = [("@", 1), ("-", 2), ("+", 3)];
         assert_eq!(
             shape(&fields),
             expected.map(|(mark, rows)| (mark.to_string(), rows))
@@ -1246,7 +1302,6 @@ mod tests {
         assert_eq!(fields[0].value, "a.rs (all matches)");
         assert_eq!(fields[1].tone, Tone::Removed);
         assert_eq!(fields[2].tone, Tone::Added);
-        assert_eq!(fields[3].tone, Tone::Note);
     }
 
     #[test]
@@ -1254,15 +1309,18 @@ mod tests {
         let input = json!({
             "a": "1", "b": "2", "c": "3", "d": "4", "e": "5", "f": "6", "g": 7, "h": 8, "i": 9
         });
-        let fields = call_fields("mcp__x__y", input.as_object().expect("an object"), None);
-        assert_eq!(fields.len(), BLOCK_ROWS);
-        assert_eq!(fields[5].mark, Mark::Name("f".to_string()));
-        assert_eq!(fields[6].value, "… 3 more fields · Ctrl+O shows them");
-        assert_eq!(shape(&fields)[7], ("?".to_string(), 1));
+        let fields = call_fields(
+            "mcp__x__y",
+            input.as_object().expect("an object"),
+            Some("x"),
+        );
+        assert_eq!(fields.len(), INPUT_ROWS);
+        assert_eq!(fields[0].mark, Mark::Name(MCP_SERVER.to_string()));
+        assert_eq!(fields[4].mark, Mark::Name("d".to_string()));
+        assert_eq!(fields[5].value, "… 5 more fields · Ctrl+O shows them");
         let fields = call_fields("ListAgents", &Map::new(), None);
         assert_eq!(fields[0].value, "none");
-        assert_eq!(shape(&fields)[1], (String::new(), BLOCK_ROWS - 2));
-        assert_eq!(shape(&fields)[2], ("?".to_string(), 1));
+        assert_eq!(shape(&fields)[1], (String::new(), INPUT_ROWS - 1));
     }
 
     #[test]

@@ -17,6 +17,7 @@ use std::collections::BTreeSet;
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::keys::Input;
+use crate::markdown::is_fence;
 use crate::render::markdown_lines;
 use crate::style::{ATTENTION, DONE_OR_ADDED, MARK, RESET, STRONG, SUBDUED};
 
@@ -450,16 +451,22 @@ pub fn lines(
 
 /// The preview of the option the cursor is on.
 pub struct Preview {
-    /// The option as its line shows it, like `1. Postgres`, none off the options.
-    pub title: Option<String>,
+    /// The key of the option as its line shows it, like `1`, none off the options.
+    pub key: Option<String>,
     /// None when the option has no preview.
     pub lines: Vec<String>,
+}
+
+/// Whether any option of a question has a preview, which gives every option of it the preview's
+/// rows, so the layout stays as the cursor moves.
+pub fn has_previews(choices: &[Choice]) -> bool {
+    choices.iter().any(|choice| choice.preview.is_some())
 }
 
 /// The preview of the option the cursor is on, or none when no option of the question has a
 /// preview.
 pub fn preview(choices: &[Choice], pick: &Pick) -> Option<Preview> {
-    if choices.iter().all(|choice| choice.preview.is_none()) {
+    if !has_previews(choices) {
         return None;
     }
     let focused = match pick.cursor {
@@ -467,19 +474,31 @@ pub fn preview(choices: &[Choice], pick: &Pick) -> Option<Preview> {
         Cursor::Own | Cursor::Writing => None,
     };
     Some(Preview {
-        title: focused.map(|(index, choice)| {
-            let key = choice
+        key: focused.map(|(index, choice)| {
+            choice
                 .key
-                .map_or_else(|| (index + 1).to_string(), String::from);
-            format!("{key}. {}", choice.label)
+                .map_or_else(|| (index + 1).to_string(), String::from)
         }),
         // Claude Code shows a preview as Markdown, which Claude then writes it in
-        lines: markdown_lines(
+        lines: preview_lines(
             focused
                 .and_then(|(_, choice)| choice.preview.as_deref())
                 .unwrap_or_default(),
         ),
     })
+}
+
+/// The lines of a preview, highlighted as Markdown, without its code fences, which would take 2
+/// of its few rows, while the code's colors already set the code apart. Ctrl+O shows it whole,
+/// fences included.
+fn preview_lines(markdown: &str) -> Vec<String> {
+    let markdown = markdown.trim();
+    // The highlighter keeps every line, so each colored line is the one of the Markdown
+    (markdown.lines())
+        .zip(markdown_lines(markdown))
+        .filter(|(line, _)| !is_fence(line))
+        .map(|(_, colored)| colored)
+        .collect()
 }
 
 /// What the label row says the keys do, after the question's header, with `pick` on `choices`
@@ -736,13 +755,22 @@ mod tests {
         let choice = |preview: Option<&str>| Choice::new("", "", preview.map(str::to_string));
         let choices = [choice(Some("a\nb\nc")), choice(None)];
         let first = preview(&choices, &pick(Cursor::Option(0))).expect("a preview");
-        assert_eq!(first.title.as_deref(), Some("1. "));
+        assert_eq!(first.key.as_deref(), Some("1"));
         assert_eq!(first.lines.len(), 3);
         let second = preview(&choices, &pick(Cursor::Option(1))).expect("a preview");
         assert_eq!(second.lines, Vec::<String>::new());
         let own = preview(&choices, &pick(Cursor::Own)).expect("a preview");
-        assert!(own.title.is_none());
+        assert!(own.key.is_none());
         assert!(preview(&choices[1..], &pick(Cursor::Option(0))).is_none());
+    }
+
+    #[test]
+    fn a_preview_hides_its_code_fences_and_keeps_its_other_lines() {
+        let lines = preview_lines("Intro\n```js\nconst a = 1;\n```\nOutro");
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("Intro"));
+        assert!(lines[1].contains("const"));
+        assert!(lines[2].contains("Outro"));
     }
 
     #[test]

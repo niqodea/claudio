@@ -31,10 +31,13 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::climb::{self, Climb};
 use crate::context::COLD_COLOR;
-use crate::keys::{self, Action, BLOCK_ROWS, Field, Mark, Phase, SessionKey, Tone, View};
+use crate::cut::{self, Whole, colors_at, cut, cut_before_hidden, cut_path, visible_width};
+use crate::keys::{
+    self, Action, BLOCK_ROWS, Field, Mark, PREVIEWED_QUESTION_ROWS, Phase, SessionKey, Tone, View,
+};
 use crate::limits::{Level, limit_level};
 use crate::picker::{self, Cursor, Draft, Form, Move, Pick, question_name, request_name};
-use crate::render::{Output, Status, colors_at, cut, cut_path, marks, start_bar_row, user_line};
+use crate::render::{Output, Status, marks, start_bar_row, user_line};
 use crate::status;
 use crate::style::{
     ATTENTION, DONE_OR_ADDED, FAILED_OR_REMOVED, RESET, REVERSE, STRONG, SUBDUED, SUBDUED_ON_BAR,
@@ -767,7 +770,7 @@ impl InputLine {
         } else {
             Vec::new()
         };
-        let (box_rows, cursor_row_in_box, cursor_column_in_box) = self.box_rows();
+        let (box_rows, cursor_row_in_box, cursor_column_in_box) = self.box_rows(layout.input_rows);
         let open_rows = if shows_conversation {
             let room = usize::from(layout.height).saturating_sub(label_rows.len() + box_rows.len());
             open_line_rows(&self.pending, width, room)
@@ -816,12 +819,12 @@ impl InputLine {
         let mut out = Vec::new();
         out.extend(BEGIN_FRAME.as_bytes());
         put!(out, Hide);
-        let rows = ViewRows::new(layout, view.choices.len());
+        let rows = ViewRows::new(layout.height, self.input_rows.get(), view.choices.len());
         self.draw_question(&mut out, view, rows);
         if layout.label_rows > 0 {
             put_bar_line(&mut out, rows.label, &self.label_line(Some(view)));
         }
-        let (box_rows, cursor_row_in_box, cursor_column) = self.box_rows();
+        let (box_rows, cursor_row_in_box, cursor_column) = self.box_rows(rows.box_rows);
         for (row, line) in (rows.box_top..layout.height).zip(&box_rows) {
             put!(out, MoveTo(0, row));
             out.extend(line.as_bytes());
@@ -838,8 +841,8 @@ impl InputLine {
 
     /// The box's rows, on the bar, with the row and the column of the cursor among them. The box
     /// scrolls as little as keeps the cursor in it, and shows no empty rows below the text that
-    /// the text above could fill.
-    fn box_rows(&mut self) -> (Vec<String>, usize, u16) {
+    /// the text above could fill. It takes `rows` rows.
+    fn box_rows(&mut self, rows: u16) -> (Vec<String>, usize, u16) {
         let wrapped = wrap::wrap(
             &self.text(),
             self.editor.cursor(),
@@ -849,7 +852,6 @@ impl InputLine {
         let to_u16 = |index: usize| u16::try_from(index).unwrap_or(u16::MAX);
         let cursor_y = to_u16(wrapped.cursor_row);
         let used_rows = to_u16(wrapped.rows.len());
-        let rows = self.layout.input_rows;
         self.scroll = self
             .scroll
             .min(used_rows.max(cursor_y + 1).saturating_sub(rows))
@@ -915,62 +917,31 @@ impl InputLine {
         format!("{label}{}{right}", " ".repeat(room))
     }
 
-    /// Draws the question of `view` in `rows`: the rule, the block under it, and the question,
-    /// right above the label row. On a question whose
-    /// options have previews, it draws the preview of the option the cursor is on from the
-    /// top of the screen, between an edge titled with the option and a rule above the question,
-    /// as fzf's preview window with a label, so only the preview changes as the cursor moves.
-    /// Below the label row go the options, on the bar, and the user's own answer right above the
-    /// box. Each option and preview line takes one row, and loses its end to `…` when it is
-    /// wider than the screen, since a line that wrapped would push the rows below it out of
-    /// place. The limit of noisy lines is for the scrollback, which this screen never reaches.
+    /// Draws the question of `view` in `rows`: the stack of the request's title and the block
+    /// under it, right above the label row, and below the label row the options, on the bar,
+    /// and the user's own answer right above the box. On a question whose options have previews,
+    /// the block's last field is the preview of the option the cursor is on, quoted by a bar in
+    /// its margin with the option's key in front of its first row, so only the preview changes as
+    /// the cursor moves. Each option and preview line takes one row, and loses its end to `…`
+    /// when it is wider than the screen, since a line that wrapped would push the rows below it
+    /// out of place. When there are more options than rows, they scroll to keep the cursor in view.
     fn draw_question(&self, out: &mut Vec<u8>, view: &View, rows: ViewRows) {
-        let width = self.layout.width;
         put!(out, Clear(ClearType::All));
-        let columns = NonZeroUsize::new(usize::from(width)).unwrap_or(NonZeroUsize::MIN);
-        let preview = picker::preview(&view.choices, &self.pick);
-        // An edge across the screen, with `title` in it, as fzf's preview label
-        let rule = |title: &str| {
-            let title = if title.is_empty() {
-                String::new()
-            } else {
-                let room = usize::from(width).saturating_sub("──  ".len());
-                let room = NonZeroUsize::new(room).unwrap_or(NonZeroUsize::MIN);
-                format!(
-                    "── {}{RESET}{SUBDUED} ",
-                    cut(&format!("{STRONG}{title}"), room)
-                )
-            };
-            let fill = "─".repeat(usize::from(width).saturating_sub(visible_width(&title)));
-            format!("{SUBDUED}{title}{fill}")
-        };
-        // The rule above the question names the request, which the label row names the question
-        // of
-        let mut lines = vec![rule(&view.title)];
-        lines.extend(block_lines(&view.fields, columns));
-        lines.push(view.question.clone());
-        let top = draw_lines_above(out, &lines, width, rows.label);
-        if let Some(preview) = preview {
-            put_line(out, 0, &rule(preview.title.as_deref().unwrap_or_default()));
-            // The rows between the edge and the rule above the question, less a blank row
-            // above the rule. A cut keeps the last of them for the …
-            let room = usize::from(top.saturating_sub(2));
-            let is_cut = preview.lines.len() > room;
-            let shown = if is_cut {
-                room.saturating_sub(1)
-            } else {
-                preview.lines.len()
-            };
-            let mut lines: Vec<String> = preview.lines[..shown]
-                .iter()
-                .map(|line| cut(line, columns))
-                .collect();
-            if is_cut && room > 0 {
-                lines.push(format!("{SUBDUED}… Ctrl+O shows it whole"));
-            }
-            for (row, line) in (1..).zip(lines) {
-                put_line(out, row, &line);
-            }
+        let columns =
+            NonZeroUsize::new(usize::from(self.layout.width)).unwrap_or(NonZeroUsize::MIN);
+        let mut fields = view.fields.clone();
+        if let Some(preview) = picker::preview(&view.choices, &self.pick) {
+            fields.push(Field {
+                mark: Mark::Quote(preview.key),
+                value: preview.lines.join("\n"),
+                is_path: false,
+                tone: Tone::Plain,
+                rows: BLOCK_ROWS - PREVIEWED_QUESTION_ROWS,
+            });
+        }
+        let stack = stack_lines(&view.title, &fields, usize::from(rows.stack), columns);
+        for (row, line) in (rows.stack_top..).zip(stack) {
+            put_line(out, row, &line);
         }
         let submitted = view
             .is_submitted
@@ -982,8 +953,14 @@ impl InputLine {
             &self.pick,
             submitted.as_ref(),
         );
+        // The first option shown: the first, or else as few after it as keeps the cursor in view
+        let shown_rows = usize::from(rows.option_rows);
+        let first = match self.pick.cursor {
+            Cursor::Option(index) => (index + 1).saturating_sub(shown_rows),
+            Cursor::Own | Cursor::Writing => 0,
+        };
         // The rows the options leave empty stay on the bar, above the user's own answer
-        let mut options = options.iter();
+        let mut options = options.iter().skip(first);
         for row in rows.options..rows.own {
             let line = options
                 .next()
@@ -1072,7 +1049,7 @@ impl InputLine {
                 format!(
                     "{} {STRONG}{}{RESET} {SUBDUED_ON_BAR}│ {hint}",
                     marks(),
-                    view.label
+                    header(&view.label)
                 )
             }
             Phase::Ending => {
@@ -1240,25 +1217,6 @@ fn bar_row(line: &str) -> String {
     )
 }
 
-/// The columns `text` takes on screen, without its escape sequences.
-fn visible_width(text: &str) -> usize {
-    let mut visible = String::new();
-    let mut characters = text.chars();
-    while let Some(character) = characters.next() {
-        if character == '\x1b' {
-            // Every sequence the label holds is a CSI, which ends with a letter
-            for next in characters.by_ref() {
-                if next.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else {
-            visible.push(character);
-        }
-    }
-    visible.width()
-}
-
 /// Scrolls the whole screen up by `rows`, which sends its top rows to the scrollback.
 fn scroll_screen(out: &mut Vec<u8>, layout: Layout, rows: u16) {
     put!(out, MoveTo(0, layout.height.saturating_sub(1)));
@@ -1388,32 +1346,6 @@ fn show_count(count: usize) -> String {
     }
 }
 
-/// Draws `lines` so that they end right above `bottom`, after a blank row, on a screen `width`
-/// wide that wraps them. Lines taller than the rows left lose their start, where `…` shows, since
-/// the conversation has them whole.
-fn draw_lines_above(out: &mut Vec<u8>, lines: &[String], width: u16, bottom: u16) -> u16 {
-    let mut row = bottom.saturating_sub(1);
-    for (index, line) in lines.iter().enumerate().rev() {
-        let line_rows = rows_of(line, width);
-        // A cut keeps a row for the …
-        let room = if index == 0 {
-            row
-        } else {
-            row.saturating_sub(1)
-        };
-        if line_rows > room {
-            if row > 0 {
-                put!(out, MoveTo(0, row - 1));
-                out.extend(format!("{SUBDUED}… Ctrl+O shows it whole{RESET}").as_bytes());
-            }
-            return row.saturating_sub(1);
-        }
-        row -= line_rows;
-        put_line(out, row, line);
-    }
-    row
-}
-
 /// The columns a field's name takes at most, cut at its end when longer.
 const NAME_WIDTH: usize = 10;
 
@@ -1421,16 +1353,136 @@ const NAME_WIDTH: usize = 10;
 /// name starts in the same column.
 const NAME_COLUMNS: usize = NAME_WIDTH + ": ".len();
 
-/// The rows of the block under the rule: each field's mark, then its value from a column that
-/// depends on the mark alone, so that a value starts in the same column on every call of a
-/// tool, in the rows the field takes. A sign takes 2 columns, and a name `NAME_COLUMNS`, losing
-/// its end when longer than `NAME_WIDTH`. A value of one row shows its line breaks as `↵`, and
-/// when it is too wide, loses its end to `…`, or its middle if it is a path. A value of more
-/// rows wraps, and when it still does not fit, its last row counts the rows left out. Rows a value leaves empty stay empty, so the block always
-/// takes `BLOCK_ROWS` rows.
-fn block_lines(fields: &[Field], columns: NonZeroUsize) -> Vec<String> {
+/// The columns of a question's header, as Claude Code limits it, which a call's tool takes too.
+/// Ref: `AskUserQuestionInput` in `sdk-tools.d.ts` of the npm package
+/// @anthropic-ai/claude-agent-sdk, which asks Claude for a header of at most 12 characters
+const HEADER_COLUMNS: usize = 12;
+
+/// `label`, a question's header or a call's tool, in `HEADER_COLUMNS` columns: padded when
+/// shorter, and cut at its end when longer, since Claude can write a longer one, so the hint
+/// after it starts in the same column on every request.
+fn header(label: &str) -> String {
+    let columns = NonZeroUsize::new(HEADER_COLUMNS).unwrap_or(NonZeroUsize::MIN);
+    let label = cut(label, columns);
+    let pad = " ".repeat(HEADER_COLUMNS.saturating_sub(visible_width(&label)));
+    format!("{label}{pad}")
+}
+
+/// The columns a field's mark takes in front of its value: 2 for a sign, `NAME_COLUMNS` for a
+/// name, none for no mark, and for a quote, whose lines are cut rather than wrapped, its margin.
+fn mark_columns(mark: &Mark) -> usize {
+    match mark {
+        Mark::None => 0,
+        Mark::Quote(key) => quote_margin(key.as_deref(), true).1,
+        Mark::Sign { .. } => 2,
+        Mark::Name(_) => NAME_COLUMNS,
+    }
+}
+
+/// A title across a screen `width` wide: `title` between two dashes, then dashes to the edge,
+/// as fzf labels its preview window.
+fn title_line(title: &str, width: NonZeroUsize) -> String {
+    let room = width.get().saturating_sub("──  ".len());
+    let room = NonZeroUsize::new(room).unwrap_or(NonZeroUsize::MIN);
+    let title = format!(
+        "── {}{RESET}{SUBDUED} ",
+        cut(&format!("{STRONG}{title}"), room)
+    );
+    let fill = "─".repeat(width.get().saturating_sub(visible_width(&title)));
+    format!("{SUBDUED}{title}{fill}")
+}
+
+/// The rows of a field on a screen `columns` wide that its value takes, as `block_lines` shows
+/// it: none for an empty value, its lines for a quote, and its rows wrapped for any other.
+fn used_rows(field: &Field, columns: NonZeroUsize) -> usize {
+    match &field.mark {
+        _ if field.value.is_empty() => 0,
+        Mark::Quote(_) => field.value.lines().count(),
+        _ if field.rows == 1 => 1,
+        mark => word_rows(
+            field.value.trim_end_matches('\n'),
+            columns.get().saturating_sub(mark_columns(mark)),
+        )
+        .len(),
+    }
+}
+
+/// The margin of a quote's row and its width: the key of the option the quote previews in
+/// front of the first row, which takes the style of the key under the cursor in the options, and
+/// on every row a bar, which stays in the same column on each, as `2▎ `.
+fn quote_margin(key: Option<&str>, is_first: bool) -> (String, usize) {
+    let key_width = key.map_or(1, |key| key.width().max(1));
+    let key = match key {
+        Some(key) if is_first => format!("{STRONG}{key}{RESET}"),
+        _ => " ".repeat(key_width),
+    };
+    (format!("{key}{SUBDUED}▎{RESET} "), key_width + 2)
+}
+
+/// The `field.rows` rows of a quote, the preview of an option: its lines, each cut to a row, with
+/// a bar in their margin, as a long value does, ending in a row that counts the lines left out.
+/// On one row, which has no room to count, its first line ends in `…`, as a value of one row
+/// does, which says more is hidden.
+fn quoted_lines(key: Option<&str>, field: &Field, columns: NonZeroUsize) -> Vec<String> {
+    let content: Vec<&str> = field.value.lines().collect();
+    let (_, margin_width) = quote_margin(key, true);
+    let room =
+        NonZeroUsize::new(columns.get().saturating_sub(margin_width)).unwrap_or(NonZeroUsize::MIN);
+    let rows: Vec<String> = if field.rows == 1 && content.len() > 1 {
+        vec![cut_before_hidden(content[0], room)]
+    } else if content.len() > field.rows {
+        let shown = field.rows - 1;
+        let more = cut::more_lines(content.len() - shown, Whole::FullView);
+        (content[..shown].iter())
+            .map(|line| cut(line, room))
+            .chain([cut(&format!("{SUBDUED}{more}"), room)])
+            .collect()
+    } else {
+        content.iter().map(|line| cut(line, room)).collect()
+    };
+    let mut lines: Vec<String> = (rows.iter().enumerate())
+        .map(|(index, row)| format!("{}{row}{RESET}", quote_margin(key, index == 0).0))
+        .collect();
+    lines.resize(field.rows, String::new());
+    lines
+}
+
+/// The rows of the stack above the label row, `rows` of them: the request's title, then the
+/// block of `fields` under it, whose last row swallows what does not fit, by `cut::fit`. The
+/// title goes last, as the top of the stack: on one row, the row swallows it too, and says so.
+fn stack_lines(title: &str, fields: &[Field], rows: usize, columns: NonZeroUsize) -> Vec<String> {
+    match rows {
+        0 => Vec::new(),
+        1 => {
+            let request = cut::the_request(Whole::FullView);
+            vec![format!(
+                "{}{RESET}",
+                cut(&format!("{SUBDUED}{request}"), columns)
+            )]
+        }
+        _ => {
+            let mut lines = vec![title_line(title, columns)];
+            lines.extend(block_lines(fields, rows - 1, columns));
+            lines
+        }
+    }
+}
+
+/// The `rows` rows of the block under the title, `fields` fitted in them by `cut::fit`: each
+/// field's mark, then its value from the column `mark_columns` gives, so that a value starts in
+/// the same column on every call of a tool, in the rows the field takes. A value of one row
+/// shows its line breaks as `↵`, and when it is too wide, loses its end to `…`, or its middle if
+/// it is a path. A value of more rows wraps, and when it still does not fit, its last row counts
+/// the rows left out. A quote shows its lines by `quoted_lines`. Rows a value leaves empty stay
+/// empty, so the block always takes `rows` rows.
+fn block_lines(fields: &[Field], rows: usize, columns: NonZeroUsize) -> Vec<String> {
+    let fields = cut::fit(fields, rows, |field| used_rows(field, columns));
     let mut lines = Vec::new();
-    for field in fields {
+    for field in &fields {
+        if let Mark::Quote(key) = &field.mark {
+            lines.extend(quoted_lines(key.as_deref(), field, columns));
+            continue;
+        }
         let tone = match field.tone {
             Tone::Plain => RESET,
             Tone::Bold => STRONG,
@@ -1454,6 +1506,7 @@ fn block_lines(fields: &[Field], columns: NonZeroUsize) -> Vec<String> {
                 (format!("{color}{sign}{RESET} "), *every_row)
             }
             Mark::Name(name) if name.is_empty() => (" ".repeat(NAME_COLUMNS), false),
+            Mark::Quote(_) => unreachable!("a quote shows its own rows"),
             Mark::Name(name) => {
                 // The name holds its color, which the cut sets again after the `…`
                 let width = NonZeroUsize::new(NAME_WIDTH).unwrap_or(NonZeroUsize::MIN);
@@ -1486,7 +1539,7 @@ fn block_lines(fields: &[Field], columns: NonZeroUsize) -> Vec<String> {
                 let mut rows: Vec<(String, bool)> = (wrapped[..shown].iter())
                     .map(|row| (format!("{tone}{row}"), true))
                     .collect();
-                let more = more_lines(wrapped.len() - shown);
+                let more = cut::more_lines(wrapped.len() - shown, Whole::FullView);
                 rows.push((cut(&format!("{SUBDUED}{more}"), value_columns), false));
                 rows
             }
@@ -1504,7 +1557,7 @@ fn block_lines(fields: &[Field], columns: NonZeroUsize) -> Vec<String> {
             lines.push(line);
         }
     }
-    lines.resize(BLOCK_ROWS, String::new());
+    lines.resize(rows, String::new());
     lines
 }
 
@@ -1553,12 +1606,6 @@ fn word_rows(text: &str, width: usize) -> Vec<String> {
     rows
 }
 
-/// The row that stands for `count` rows left out, and tells how to see them.
-fn more_lines(count: usize) -> String {
-    let lines = if count == 1 { "line" } else { "lines" };
-    format!("… {count} more {lines} · Ctrl+O shows it whole")
-}
-
 /// Writes `line` on `row`, from its start, and resets the colors after it, so they reach nothing
 /// drawn next.
 fn put_line(out: &mut Vec<u8>, row: u16, line: &str) {
@@ -1573,37 +1620,68 @@ fn put_bar_line(out: &mut Vec<u8>, row: u16, line: &str) {
     out.extend(bar_row(line).as_bytes());
 }
 
+/// The most rows of the stack above the label row: the request's title and the block under it.
+const STACK_ROWS: usize = 1 + BLOCK_ROWS;
+
 /// The rows of the question view, from the bottom of the screen up: the input box, the user's own
-/// answer right above it, the options above that, and the label row above them.
-#[derive(Clone, Copy)]
+/// answer right above it, the options above that, the label row above them, and the stack of the
+/// title and the block above it all. The rows of each part depend on the screen's height alone,
+/// so no part moves from one question to the next.
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct ViewRows {
+    /// The first row of the stack, and how many it takes.
+    stack_top: u16,
+    stack: u16,
     label: u16,
-    /// The first row of the options.
+    /// The first row of the options, and how many they take.
     options: u16,
+    option_rows: u16,
     own: u16,
     box_top: u16,
+    box_rows: u16,
 }
 
 impl ViewRows {
-    /// The rows of the question view of a question of `choices` options, on a screen laid out as
-    /// `layout`.
-    fn new(layout: Layout, choices: usize) -> Self {
-        let box_top = layout.height.saturating_sub(layout.input_rows);
-        let own = box_top.saturating_sub(1);
-        let options = own.saturating_sub(picker::option_rows(choices));
+    /// The rows of the question view of a question of `choices` options, on a screen `height`
+    /// rows high, with an input box of at most `box_rows` rows. A screen too short for all of it
+    /// takes rows first from the box, down to 1, then from the stack, which `cut::fit` cuts
+    /// with a sign, down to 1, then from the options, which scroll to keep the cursor in view,
+    /// down to 1. The label row, the user's own answer and a row of the box stay to the last,
+    /// since the user answers with them.
+    /// Ref: fzf's `src/terminal.go`, where the preview gives up its rows before the list
+    /// Ref: <https://www.w3.org/WAI/WCAG22/Understanding/focus-not-obscured-minimum.html>, which
+    /// keeps the item under the cursor in view
+    fn new(height: u16, box_rows: u16, choices: usize) -> Self {
+        let mut left = height;
+        let mut take = |wanted: u16| {
+            let taken = wanted.min(left);
+            left -= taken;
+            taken
+        };
+        // The parts in the order they get their rows, the reverse of the one they give them up in
+        let label = take(1);
+        let own = take(1);
+        let first_box_row = take(1);
+        let first_option_row = take(1);
+        let first_stack_row = take(1);
+        let option_rows = first_option_row + take(picker::option_rows(choices).saturating_sub(1));
+        let stack = first_stack_row + take(u16::try_from(STACK_ROWS - 1).unwrap_or(u16::MAX));
+        let box_rows = first_box_row + take(box_rows.saturating_sub(1));
+        let box_top = height - box_rows;
+        let own_row = box_top.saturating_sub(own);
+        let options = own_row.saturating_sub(option_rows);
+        let label_row = options.saturating_sub(label);
         ViewRows {
-            label: options.saturating_sub(1),
+            stack_top: label_row.saturating_sub(stack),
+            stack,
+            label: label_row,
             options,
-            own,
+            option_rows,
+            own: own_row,
             box_top,
+            box_rows,
         }
     }
-}
-
-/// The rows `line` takes on a screen `width` wide, which wraps it.
-fn rows_of(line: &str, width: u16) -> u16 {
-    let width = usize::from(width.max(1));
-    u16::try_from(visible_width(line).div_ceil(width).max(1)).unwrap_or(u16::MAX)
 }
 
 /// The Esc key, which takes the box to normal mode.
@@ -1655,7 +1733,6 @@ mod tests {
             request_index,
             requests: vec![false; requests],
             fields: vec![],
-            question: String::new(),
             choices: vec![],
             own_label: String::new(),
             form: Form::One,
@@ -1741,21 +1818,24 @@ mod tests {
     /// The text of the rows of `fields`' block, without colors.
     fn block_text(fields: &[Field], columns: usize) -> Vec<String> {
         let columns = NonZeroUsize::new(columns).expect("some columns");
-        (block_lines(fields, columns).iter())
-            .map(|line| {
-                // Every sequence a row holds is a CSI, which ends with a letter
-                let mut text = String::new();
-                let mut characters = line.chars();
-                while let Some(character) = characters.next() {
-                    if character == '\x1b' {
-                        characters.find(char::is_ascii_alphabetic);
-                    } else {
-                        text.push(character);
-                    }
-                }
-                text.trim_end().to_string()
-            })
+        (block_lines(fields, BLOCK_ROWS, columns).iter())
+            .map(|line| plain(line))
             .collect()
+    }
+
+    /// A row's text without its colors and the spaces at its end.
+    fn plain(line: &str) -> String {
+        // Every sequence a row holds is a CSI, which ends with a letter
+        let mut text = String::new();
+        let mut characters = line.chars();
+        while let Some(character) = characters.next() {
+            if character == '\x1b' {
+                characters.find(char::is_ascii_alphabetic);
+            } else {
+                text.push(character);
+            }
+        }
+        text.trim_end().to_string()
     }
 
     #[test]
@@ -1772,7 +1852,7 @@ mod tests {
             field("/home/user/src/greet.js", true),
         ];
         let columns = NonZeroUsize::new(20).expect("20 is not zero");
-        let lines = block_lines(&fields, columns);
+        let lines = block_lines(&fields, 2, columns);
         assert!(lines[0].contains("cargo test") && !lines[0].contains("targets"));
         assert!(lines[1].contains("/home") && lines[1].contains("greet.js"));
     }
@@ -1834,11 +1914,73 @@ mod tests {
             block_text(&fields, 40),
             ["a_very_lo…: 1", "", "", "", "", "", "", "? why"]
         );
-        let line = &block_lines(&fields, NonZeroUsize::new(40).expect("columns"))[0];
+        let columns = NonZeroUsize::new(40).expect("columns");
+        let line = &block_lines(&fields, BLOCK_ROWS, columns)[0];
         assert!(
             line.contains(&format!("{SUBDUED}a_very_lo{RESET}{SUBDUED}…{RESET}:")),
             "{line:?}"
         );
+    }
+
+    #[test]
+    fn a_short_screen_takes_rows_from_the_box_then_the_stack_then_the_options() {
+        // The rows of the stack, the options and the box, on a screen of each height
+        let parts = |height| {
+            let rows = ViewRows::new(height, 3, 2);
+            (rows.stack, rows.option_rows, rows.box_rows)
+        };
+        assert_eq!(parts(30), (9, 4, 3));
+        assert_eq!(parts(18), (9, 4, 3));
+        assert_eq!(parts(17), (9, 4, 2));
+        assert_eq!(parts(16), (9, 4, 1));
+        assert_eq!(parts(15), (8, 4, 1));
+        assert_eq!(parts(8), (1, 4, 1));
+        assert_eq!(parts(7), (1, 3, 1));
+        assert_eq!(parts(5), (1, 1, 1));
+        assert_eq!(parts(4), (0, 1, 1));
+        // The parts fill the screen from the bottom, and the stack ends right above the label
+        let rows = ViewRows::new(16, 3, 2);
+        assert_eq!(rows.box_top, 15);
+        assert_eq!(rows.own, 14);
+        assert_eq!((rows.options, rows.label), (10, 9));
+        assert_eq!(rows.stack_top, 0);
+    }
+
+    #[test]
+    fn the_title_goes_last_and_a_stack_of_one_row_says_it_swallowed_the_request() {
+        let field = |mark: Mark, value: &str| Field {
+            mark,
+            value: value.to_string(),
+            is_path: false,
+            tone: Tone::Plain,
+            rows: 1,
+        };
+        let fields = [
+            field(Mark::None, "Which style?"),
+            field(Mark::Quote(Some("1".to_string())), "a\nb"),
+        ];
+        let columns = NonZeroUsize::new(40).expect("40 is not zero");
+        let text = |rows| {
+            (stack_lines("Questions", &fields, rows, columns).iter())
+                .map(|line| plain(line))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            text(3),
+            [
+                "── Questions ───────────────────────────",
+                "Which style?",
+                "1▎ a…"
+            ]
+        );
+        assert_eq!(
+            text(2),
+            [
+                "── Questions ───────────────────────────",
+                "… Ctrl+O shows the request"
+            ]
+        );
+        assert_eq!(text(1), ["… Ctrl+O shows the request"]);
     }
 
     #[test]

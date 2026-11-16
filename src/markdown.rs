@@ -281,7 +281,7 @@ fn kind(start: &str, in_code_block: bool, is_whole: bool) -> Option<Kind> {
     }
 }
 
-fn is_fence(line: &str) -> bool {
+pub fn is_fence(line: &str) -> bool {
     line.trim_start().starts_with(FENCE)
 }
 

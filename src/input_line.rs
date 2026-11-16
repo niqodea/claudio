@@ -42,8 +42,8 @@ use crate::picker::{self, Cursor, Draft, Form, Move, Pick, question_name, reques
 use crate::render::{Output, Status, marks, start_bar_row, user_line};
 use crate::status;
 use crate::style::{
-    ATTENTION, DONE_OR_ADDED, FAILED_OR_REMOVED, RESET, REVERSE, STRONG, SUBDUED, SUBDUED_ON_BAR,
-    UNREVERSE,
+    ATTENTION, DONE_OR_ADDED, FAILED_OR_REMOVED, MARK, RESET, REVERSE, STRONG, SUBDUED,
+    SUBDUED_ON_BAR, UNREVERSE,
 };
 use crate::terminal::{Settings, run_in_terminal};
 use crate::vi::{Editor, Mode};
@@ -772,7 +772,31 @@ impl InputLine {
         } else {
             Vec::new()
         };
-        let (box_rows, cursor_row_in_box, cursor_column_in_box) = self.box_rows(layout.input_rows);
+        // The command line takes the box's last rows, as many as it fills, and the message keeps
+        // the rows above it
+        let command = (self.command_line.as_ref()).map(|line| {
+            command_rows(
+                &line.text(),
+                line.cursor(),
+                width,
+                usize::from(layout.input_rows),
+            )
+        });
+        let command_height = command.as_ref().map_or(0, |(rows, ..)| rows.len());
+        let message_rows = layout.input_rows - u16::try_from(command_height).unwrap_or(0);
+        let (mut box_rows, cursor_row_in_box, cursor_column_in_box) = if message_rows > 0 {
+            self.box_rows(message_rows)
+        } else {
+            (Vec::new(), 0, 0)
+        };
+        let message_height = box_rows.len();
+        let (cursor_row_in_box, cursor_column_in_box) = match command {
+            Some((rows, row, column)) => {
+                box_rows.extend(rows);
+                (message_height + row, column)
+            }
+            None => (cursor_row_in_box, cursor_column_in_box),
+        };
         let open_rows = if shows_conversation {
             let room = usize::from(layout.height).saturating_sub(label_rows.len() + box_rows.len());
             open_line_rows(&self.pending, width, room)
@@ -780,17 +804,8 @@ impl InputLine {
             Vec::new()
         };
         let to_u16 = |index: usize| u16::try_from(index).unwrap_or(u16::MAX);
-        // The command line ends the label row, where its cursor then is, as on vim's
-        let (cursor_line, cursor_column) = if let Some(line) = &self.command_line {
-            let after: String = line.text().chars().skip(line.cursor()).collect();
-            let column = visible_width(&self.label).saturating_sub(visible_width(&after));
-            (open_rows.len(), to_u16(column).min(layout.width - 1))
-        } else {
-            (
-                open_rows.len() + label_rows.len() + cursor_row_in_box,
-                cursor_column_in_box,
-            )
-        };
+        let cursor_line = open_rows.len() + label_rows.len() + cursor_row_in_box;
+        let cursor_column = cursor_column_in_box;
         let lines: Vec<String> = [open_rows, label_rows, box_rows].concat();
         out.extend(lines.join("\r\n").as_bytes());
         let lines_below_cursor = lines.len().saturating_sub(cursor_line + 1);
@@ -972,11 +987,6 @@ impl InputLine {
         self.layout = Layout::new(width, height, self.input_rows);
     }
 
-    /// The command line, in the label row's state while the user writes it, as on vim's.
-    fn command_line(&self) -> Option<String> {
-        (self.command_line.as_ref()).map(|line| format!("{RESET}:{}", line.text()))
-    }
-
     /// What the label row says while a key waits for its second press, in the color of a
     /// warning.
     fn confirmation(&self) -> Option<String> {
@@ -1018,7 +1028,6 @@ impl InputLine {
                 );
                 let indicators = format!("{}{budgets} {SUBDUED_ON_BAR}│ {activity}", marks());
                 let state = (self.confirmation())
-                    .or_else(|| self.command_line())
                     .or_else(|| describe_work(&shared.output))
                     .unwrap_or_else(|| "idle".to_string());
                 format!("{indicators} {SUBDUED_ON_BAR}│ {state}")
@@ -1144,6 +1153,43 @@ struct Drawn {
     lines_above_cursor: u16,
     /// The screen's width then, which no live row was wider than.
     width: u16,
+}
+
+/// What starts the command line, a word rather than vim's lone `:`, so the row says what it holds
+/// whatever the box holds, as Emacs's `M-x` does.
+const COMMAND_PROMPT: &str = "command: ";
+
+/// The command line's rows, on the bar, as vim's command line at the screen's bottom: the prompt
+/// and the command `text` without its `/`, wrapped at `width`, at most `rows` of them, those
+/// around the `cursor`, with the row and the column of the cursor among them.
+fn command_rows(text: &str, cursor: usize, width: usize, rows: usize) -> (Vec<String>, usize, u16) {
+    let prompt_length = COMMAND_PROMPT.chars().count();
+    let wrapped = wrap::wrap(
+        &format!("{COMMAND_PROMPT}{text}"),
+        prompt_length + cursor,
+        None,
+        width,
+    );
+    let rows = rows.min(wrapped.rows.len());
+    let first = (wrapped.cursor_row + 1).saturating_sub(rows);
+    let lines = wrapped.rows[first..first + rows]
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let text = match row.text.strip_prefix(COMMAND_PROMPT.trim_end()) {
+                Some(rest) if first + index == 0 => {
+                    format!("{MARK}{}{RESET}{rest}", COMMAND_PROMPT.trim_end())
+                }
+                _ => row.text.clone(),
+            };
+            bar_row(&text)
+        })
+        .collect();
+    (
+        lines,
+        wrapped.cursor_row - first,
+        u16::try_from(wrapped.cursor_column).unwrap_or(u16::MAX),
+    )
 }
 
 /// The rows of the line Claude still writes, the text after the last line break in `pending`,
@@ -1752,6 +1798,39 @@ fn describe_work(output: &Output) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_command_line_starts_with_its_prompt() {
+        let (rows, row, column) = command_rows("model sonnet", 5, 40, 3);
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0].contains(&format!("{MARK}command:{RESET}")),
+            "{:?}",
+            rows[0]
+        );
+        assert!(
+            rows[0].ends_with(&format!(" model sonnet{RESET}")),
+            "{:?}",
+            rows[0]
+        );
+        assert_eq!((row, column), (0, 14));
+    }
+
+    #[test]
+    fn a_long_command_takes_more_rows_and_keeps_its_cursor() {
+        // "command: " and 20 characters wrap at 10 columns onto 3 rows
+        let text = "abcdefghijklmnopqrst";
+        let (rows, row, column) = command_rows(text, 20, 10, 5);
+        assert_eq!(rows.len(), 3);
+        assert_eq!((row, column), (2, 9));
+        let (rows, row, _) = command_rows(text, 20, 10, 2);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(row, 1);
+        assert!(!rows[0].contains("command"), "{:?}", rows[0]);
+        let (rows, row, column) = command_rows(text, 0, 10, 2);
+        assert!(rows[0].contains("command"), "{:?}", rows[0]);
+        assert_eq!((row, column), (0, 9));
+    }
 
     #[test]
     fn a_count_keeps_one_character() {

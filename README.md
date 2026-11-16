@@ -260,9 +260,9 @@ tmux 3.5 passes the check, and is the only terminal checked so far.
 In a terminal that fails it, claudio warns in orange as it starts, and each redraw goes up as many rows as the live rows took.
 A narrower screen splits rows into more, so the conversation is never erased, but stray copies of the label row and the box can stay in the scrollback.
 
-One limit holds in any terminal: live rows taller than the screen push the screen's top into the scrollback, where claudio can no longer erase it.
-The line Claude is still writing can grow that tall, and a shrink while it does leaves a copy of its first rows in the scrollback.
-The line itself still prints once, whole, when it ends, and nothing is ever lost.
+One limit holds in any terminal: a program can clear the scrollback only whole, never change a row of it, so live rows taller than the screen push the screen's top into the scrollback for good.
+The line Claude is still writing can grow that tall, and each shrink while it does leaves a copy of the rows it pushed out, sometimes with the row `… its start shows once it ends`, which stood in for the line's start.
+The line itself still prints once, whole, when it ends, so the scrollback can hold copies of the start of a line above it, but never lacks a line.
 
 No redraw can avoid this, given three things claudio wants:
 

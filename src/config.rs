@@ -18,6 +18,22 @@ pub struct Config {
     /// The columns a noisy line takes at most on screen: a line that shows a tool's input or
     /// output as it is.
     pub max_noisy_line_columns: NonZeroUsize,
+    /// How Claude's text shows while Claude writes it.
+    pub stream: Stream,
+}
+
+/// How Claude's text shows while Claude writes it.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Stream {
+    /// Each piece of text as Claude Code sends it: the line Claude still writes shows among the
+    /// live rows, below the conversation, until it ends. On a resize, a line taller than the
+    /// screen can leave copies of its start in the scrollback, as the README's Resizing tells.
+    Chunk,
+    /// Each line once it ends, so the live rows hold only the label row and the box, which fit
+    /// the screen, and no resize leaves a copy of Claude's text. A long paragraph shows only once
+    /// Claude ends it, while the label row says `writing`.
+    Line,
 }
 
 impl Default for Config {
@@ -27,6 +43,7 @@ impl Default for Config {
             // A cut keeps 44 columns at the start and 43 at the end, which hold a noisy line's
             // marks, tags, tool name and counts whole, since each end's fixed part takes about 20
             max_noisy_line_columns: NonZeroUsize::new(88).expect("88 is not zero"),
+            stream: Stream::Chunk,
         }
     }
 }
@@ -59,6 +76,13 @@ mod tests {
             config.max_noisy_line_columns,
             Config::default().max_noisy_line_columns
         );
+    }
+
+    #[test]
+    fn the_stream_reads_as_a_word() {
+        let config: Config = toml::from_str("stream = \"line\"").expect("the file reads");
+        assert_eq!(config.stream, Stream::Line);
+        assert!(toml::from_str::<Config>("stream = \"paragraph\"").is_err());
     }
 
     #[test]

@@ -30,6 +30,7 @@ use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlt
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::climb::{self, Climb};
+use crate::config::Stream;
 use crate::context::COLD_COLOR;
 use crate::cut::{
     self, ScreenRow, Whole, colors_at, cut, cut_before_hidden, cut_path, visible_width,
@@ -123,6 +124,8 @@ pub struct InputLine {
     original_settings: Settings,
     /// The rows the user chose for the input box, which a short screen gives fewer.
     input_rows: NonZeroU16,
+    /// Whether the line Claude still writes shows among the live rows, or waits until it ends.
+    stream: Stream,
     editor: Editor,
     /// The field of the command of Claude Code's that the user writes after `:`, without its
     /// `/`, while the message waits in the box, none while the command line is closed. It is a
@@ -140,7 +143,7 @@ pub struct InputLine {
     scroll: u16,
     /// The conversation's text not printed yet: whole lines, which wait for the main screen and
     /// for a screen with rows to show them, then the line Claude still writes, which shows among
-    /// the live rows until it ends.
+    /// the live rows until it ends, when the user streams by chunk.
     pending: String,
     /// How each frame gets back to the first live row.
     climb: Climb,
@@ -165,6 +168,7 @@ impl InputLine {
         full_view: PathBuf,
         original_settings: Settings,
         input_rows: NonZeroU16,
+        stream: Stream,
         break_signal: Arc<AtomicBool>,
         shared: Arc<Mutex<Shared>>,
     ) -> Result<Self, String> {
@@ -202,6 +206,7 @@ impl InputLine {
             full_view,
             original_settings,
             input_rows,
+            stream,
             editor: Editor::new(""),
             command_line: None,
             pick: Draft::new().pick,
@@ -792,7 +797,7 @@ impl InputLine {
             }
             None => (cursor_row_in_box, cursor_column_in_box),
         };
-        let open_rows = if shows_conversation {
+        let open_rows = if shows_conversation && self.stream == Stream::Chunk {
             let room = usize::from(layout.height).saturating_sub(label_height + box_rows.len());
             open_line_rows(&self.pending, columns, room)
         } else {

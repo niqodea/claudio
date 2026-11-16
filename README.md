@@ -80,9 +80,13 @@ Every setting is optional, and these are the defaults:
 input_rows = 3
 # The columns a noisy line takes at most: a tool call's input or a tool's output
 max_noisy_line_columns = 88
+# How Claude's text shows while Claude writes it: "chunk", each piece as Claude Code sends it,
+# or "line", each line once it ends
+stream = "chunk"
 ```
 
 A noisy line wider than that loses its end to `…`, and Ctrl+O shows it whole.
+With `stream = "line"`, a paragraph shows only once Claude ends it, while the label row says `writing`, but no resize leaves a copy of Claude's text in the scrollback, as [Resizing](#resizing) tells.
 A setting claudio does not know, or a 0, stops claudio with an error that names it.
 
 ## Keys
@@ -269,6 +273,7 @@ A shorter screen has no such case, since tmux then drops the empty rows below th
 One limit holds in any terminal: a program can clear the scrollback only whole, never change a row of it, so live rows taller than the screen push the screen's top into the scrollback for good.
 The line Claude is still writing can grow that tall, and each shrink while it does leaves a copy of the rows it pushed out, sometimes with the row `… its start shows once it ends`, which stood in for the line's start.
 The line itself still prints once, whole, when it ends, so the scrollback can hold copies of the start of a line above it, but never lacks a line.
+With `stream = "line"` in the config, the line Claude is still writing stays out of the live rows, which then hold only the label row and the box. claudio fits those to the screen, so a resize leaves no copy of Claude's text, at the cost of a paragraph showing only once it ends.
 
 No redraw can avoid this, given three things claudio wants:
 

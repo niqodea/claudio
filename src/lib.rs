@@ -165,6 +165,7 @@ fn run() -> Result<ExitCode, String> {
         full_view.path().to_path_buf(),
         quiet_terminal.original(),
         config.input_rows,
+        config.stream,
         Arc::clone(&break_signal),
         Arc::clone(&shared),
     )?;

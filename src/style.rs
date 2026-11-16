@@ -12,6 +12,7 @@ const DIM: &str = "\x1b[2m";
 const RED: &str = "\x1b[31m";
 const GREEN: &str = "\x1b[32m";
 const MAGENTA: &str = "\x1b[35m";
+const CYAN: &str = "\x1b[36m";
 const ORANGE: &str = "\x1b[38;5;208m";
 /// Light enough for a contrast of 4.5:1 on the bar, where dim text would not read.
 const BAR_GREY: &str = "\x1b[38;5;248m";
@@ -33,9 +34,10 @@ pub const SUBDUED: &str = DIM;
 pub const SUBDUED_ON_BAR: &str = BAR_GREY;
 /// The background of what is the user's: their lines and the input box.
 pub const YOURS: &str = BAR_BACKGROUND;
-/// The marks of the conversation: those of the user's lines and of Claude's replies, and the
-/// cursor among options. Warm by choice, where cyan read as cold.
-pub const MARK: &str = MAGENTA;
+/// The marks of the conversation: those of the user's lines and of Claude's replies, the
+/// cursor among options, and the command line's prompt. Cyan, which reads clearly on a dark
+/// background in most themes, where magenta faded into it.
+pub const MARK: &str = CYAN;
 /// What needs the user's attention, like a warning, a key that waits for a second press, or a
 /// cache that turns cold.
 pub const ATTENTION: &str = ORANGE;

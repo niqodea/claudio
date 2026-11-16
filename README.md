@@ -293,7 +293,7 @@ Each color means one thing, and a character on the line says it too, as [Design]
 | Bold | headings, strong text, code, tool names, question names and the option under the cursor |
 | Dim, or grey on the bar | what stays in the background, like a call's result |
 | The bar's background | what is yours: your lines and the input box |
-| Magenta | the conversation's marks: `››`, `‹‹` and the cursor `❯` among options |
+| Cyan | the conversation's marks: `››`, `‹‹`, the cursor `❯` among options and the command line's `command:` |
 | Orange | what needs your attention: a warning, a key that waits for a second press, questions that wait, a cache that turns cold, a limit near its end |
 | Red | what failed or was removed: an error, Claude Code's error output, a limit reached, the lines a diff removes |
 | Green | what is done or added: a submitted answer, the lines a diff adds |

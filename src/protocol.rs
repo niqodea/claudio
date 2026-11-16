@@ -724,6 +724,9 @@ fn read_system(system: System, line: &str) -> Class {
         }
         System::ThinkingTokens => Skipped("claudio leaves Claude's thinking out"),
         System::SessionTitleChanged => Skipped("claudio shows the session's title nowhere"),
+        System::CommandsChanged => {
+            Skipped("the user types a command whole, so claudio needs no list of them")
+        }
         System::TaskUpdated { .. } => {
             Skipped("a task's other changes, like its end, come in messages of their own")
         }
@@ -1018,6 +1021,9 @@ enum System {
     ThinkingTokens,
     /// The title Claude Code gives the session.
     SessionTitleChanged,
+    /// The slash commands and skills the session offers, sent again as they change, like after
+    /// `/clear`.
+    CommandsChanged,
     /// Sent as a task starts, before the result of the call that started it, which
     /// `tool_use_id` names, as for a command that runs in the background, as `is_backgrounded`
     /// says, or that has run for a few seconds in the foreground.
@@ -1893,6 +1899,7 @@ mod tests {
         let lines = [
             json!({"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 5}),
             json!({"type": "system", "subtype": "session_title_changed", "title": "A title"}),
+            json!({"type": "system", "subtype": "commands_changed", "commands": [{"name": "init"}]}),
             json!({"type": "system", "subtype": "hook_started", "hook_event": "Stop"}),
             json!({"type": "system", "subtype": "hook_progress", "hook_event": "Stop"}),
             json!({

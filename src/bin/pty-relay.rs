@@ -49,7 +49,7 @@ fn relay(commands: &str, output_log: &str, program: &[String]) -> io::Result<()>
         libc::forkpty(
             &raw mut controller,
             ptr::null_mut(),
-            ptr::null(),
+            ptr::null_mut(),
             &raw mut size,
         )
     };

@@ -5,10 +5,18 @@
 //! - a turn whose last user message asks `Run <command> with Bash` gets a call of Bash with the
 //!   command, and one that asks `Run <command> in the background with Bash` gets one that runs it
 //!   in the background
+//! - a turn whose last user message asks `<prompt> in a subagent` gets a call of `Agent` with
+//!   the prompt, and one that asks `<prompt> in a background subagent` gets one that runs it in
+//!   the background
+//! - a subagent's turn, which offers `SubagentHandback`, whose last user message says `Reply ok`,
+//!   alone or in a message sent to it, gets a call of `SubagentHandback` with the report `ok`,
+//!   which ends the subagent
+//! - a turn whose last user message asks `Resume <agent id> with SendMessage` gets a call of
+//!   `SendMessage` to the subagent, whose message says `Reply ok`
 //! - a turn whose last user message asks `Stop <task id> with TaskStop` gets a call of `TaskStop`
 //!   with the task's id
-//! - a turn whose last user message says `Reply ok`, holds a tool's result, or Claude Code's
-//!   notification that a background task ended, gets the text `ok`
+//! - a turn whose last user message says `Reply ok`, holds a tool's result, Claude Code's
+//!   notification that a background task ended, or a subagent's report, gets the text `ok`
 //! - the question of the auto mode classifier, the one request that stops at `</severity>`, gets
 //!   a severity of 5, which allows the call, after the delay the fake started with
 //! - Claude Code's check of the connection, `HEAD /api/hello`, gets an empty answer
@@ -70,6 +78,11 @@ impl FakeApi {
     }
 }
 
+/// The count of the calls the fake made, which gives each call an id of its own across
+/// requests, since a subagent's turn is a request of its own, whose calls Claude Code tells
+/// apart from its parent's by their ids.
+static CALLS: AtomicU64 = AtomicU64::new(0);
+
 /// Answers the request on `stream` by its rule, or with an error that `errors` gets.
 fn answer(stream: &TcpStream, classifier_delay: Duration, errors: &Sender<String>) {
     let result = read_request(stream).and_then(|(start, body)| {
@@ -118,6 +131,9 @@ fn reply(request: &Value, classifier_delay: Duration) -> Result<(Value, &'static
             "stop_sequence",
         ));
     }
+    let hands_back = request["tools"]
+        .as_array()
+        .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "SubagentHandback"));
     let messages = request["messages"].as_array().cloned().unwrap_or_default();
     // Claude Code can add a system message after the user's
     let last = messages.iter().rfind(|message| message["role"] == "user");
@@ -133,10 +149,26 @@ fn reply(request: &Value, classifier_delay: Duration) -> Result<(Value, &'static
     let request = |prefix: &str, suffix: &str| {
         (texts.iter()).find_map(|text| text.trim().strip_prefix(prefix)?.strip_suffix(suffix))
     };
-    // One id per turn, as each turn adds messages
-    let id = format!("toolu_fake_{}", messages.len());
+    let id = format!("toolu_fake_{}", CALLS.fetch_add(1, Ordering::Relaxed));
+    if let Some(agent) = request("Resume ", " with SendMessage") {
+        let input = json!({"to": agent, "summary": "Reply ok", "message": "Reply ok"});
+        let call = json!({"type": "tool_use", "id": id, "name": "SendMessage", "input": input});
+        return Ok((call, "tool_use"));
+    }
     if let Some(task_id) = request("Stop ", " with TaskStop") {
         let call = json!({"type": "tool_use", "id": id, "name": "TaskStop", "input": {"task_id": task_id}});
+        return Ok((call, "tool_use"));
+    }
+    let subagent = (request("", " in a subagent").map(|prompt| (prompt, false)))
+        .or_else(|| request("", " in a background subagent").map(|prompt| (prompt, true)));
+    if let Some((prompt, is_backgrounded)) = subagent {
+        let input = json!({
+            "description": prompt,
+            "prompt": prompt,
+            "subagent_type": "general-purpose",
+            "run_in_background": is_backgrounded,
+        });
+        let call = json!({"type": "tool_use", "id": id, "name": "Agent", "input": input});
         return Ok((call, "tool_use"));
     }
     if let Some(command) = request("Run ", " with Bash") {
@@ -151,11 +183,18 @@ fn reply(request: &Value, classifier_delay: Duration) -> Result<(Value, &'static
         let call = json!({"type": "tool_use", "id": id, "name": "Bash", "input": input});
         return Ok((call, "tool_use"));
     }
-    let says_ok = texts.iter().any(|text| text.trim() == "Reply ok");
+    let says = |words: &str| texts.iter().any(|text| text.trim() == words);
+    let says_ok = says("Reply ok");
+    // A message sent to a subagent comes inside a block that names its sender
+    let is_sent_ok = texts.iter().any(|text| text.contains("Reply ok"));
+    if hands_back && is_sent_ok {
+        let call = json!({"type": "tool_use", "id": id, "name": "SubagentHandback", "input": {"message": "ok"}});
+        return Ok((call, "tool_use"));
+    }
     let has_result = blocks.iter().any(|block| block["type"] == "tool_result");
     let is_notification = texts
         .iter()
-        .any(|text| text.contains("<task-notification>"));
+        .any(|text| text.contains("<task-notification>") || text.contains("<agent-message "));
     if says_ok || has_result || is_notification {
         return Ok((json!({"type": "text", "text": "ok"}), "end_turn"));
     }

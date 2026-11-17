@@ -120,15 +120,18 @@ impl Fake {
         if !asks.is_empty() {
             return self.send_asks(asks);
         }
+        if let Some((lines, turn_lines)) = subagent(text.trim()) {
+            return self.send_task(&lines, turn_lines);
+        }
         match text.trim() {
             contract::SLOW_PERMISSION_CHECK_MESSAGE => {
                 return self.send_turn(&contract::slow_permission_check());
             }
             contract::BACKGROUND_TASK_MESSAGE => {
-                return self.send_task(&contract::background_task("completed"));
+                return self.send_task(&contract::background_task("completed"), 4);
             }
             contract::FAILED_BACKGROUND_TASK_MESSAGE => {
-                return self.send_task(&contract::background_task("failed"));
+                return self.send_task(&contract::background_task("failed"), 4);
             }
             contract::LONG_BACKGROUND_TASK_MESSAGE => {
                 return self.send_turn(&contract::stopped_background_task()[..4]);
@@ -201,10 +204,10 @@ impl Fake {
         self.send_turn(&[text_line(&format!("{start}{LONG_LINE_END}"))]);
     }
 
-    /// Sends the lines of a background task: up to the call's result as a turn, and the task's
-    /// end after it, at once.
-    fn send_task(&self, lines: &[String]) {
-        let (turn, end) = lines.split_at(4);
+    /// Sends the lines of a background task: its first `turn_lines`, up to the call's result, as
+    /// a turn, and the task's end after it, at once.
+    fn send_task(&self, lines: &[String], turn_lines: usize) {
+        let (turn, end) = lines.split_at(turn_lines);
         self.send_turn(turn);
         for line in end {
             send(line);
@@ -570,4 +573,22 @@ fn turn() -> Vec<Value> {
     }
     lines.push(json!({"type": "result", "subtype": "success"}));
     lines
+}
+
+/// The lines of the subagent that `text` asks for, or asks to resume, as a check of subagents
+/// sends it, and how many of them make the turn, before the end of a subagent in the
+/// background.
+fn subagent(text: &str) -> Option<(Vec<String>, usize)> {
+    let lines = match text {
+        contract::SUBAGENT_MESSAGE => contract::subagent(false),
+        contract::BACKGROUND_SUBAGENT_MESSAGE => return Some((contract::subagent(true), 4)),
+        text if text.starts_with("Resume ") && text.ends_with(" with SendMessage") => {
+            let lines = contract::resumed_subagent();
+            let resumed = lines[contract::subagent(false).len()..].to_vec();
+            return Some((resumed, 4));
+        }
+        _ => return None,
+    };
+    let turn_lines = lines.len();
+    Some((lines, turn_lines))
 }

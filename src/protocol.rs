@@ -68,11 +68,13 @@ pub enum Event {
     BackgroundTasks(Vec<Task>),
     /// A task started for the tool use with `tool_use_id`, as a command does once it runs in the
     /// background, or has run for a few seconds, and runs in the background when
-    /// `is_backgrounded`.
+    /// `is_backgrounded`. A subagent's task, when `is_agent`, starts with its `Agent` call, in
+    /// the foreground too.
     TaskStarted {
         task_id: String,
         tool_use_id: Option<String>,
         is_backgrounded: bool,
+        is_agent: bool,
     },
     /// A task that started in the foreground moved to the background.
     TaskBackgrounded {
@@ -135,7 +137,19 @@ pub struct Task {
     pub id: String,
     /// What the task does, as the call that started it describes it.
     pub description: String,
+    #[serde(rename = "task_type")]
+    pub(crate) kind: String,
 }
+
+impl Task {
+    /// Whether the task is a subagent's, rather than a command's or another kind's.
+    pub fn is_agent(&self) -> bool {
+        self.kind == AGENT_TASK
+    }
+}
+
+/// The type of a subagent's task, as `SDKTaskStartedMessage` in `sdk.d.ts` names it.
+const AGENT_TASK: &str = "local_agent";
 
 /// How a task ended.
 ///
@@ -208,6 +222,8 @@ pub struct ToolUse {
     /// The `Agent` call that started the subagent that makes the call, none when Claude itself
     /// makes it.
     pub agent_call: Option<String>,
+    /// The subagent that makes the call, none when Claude itself makes it.
+    pub agent: Option<String>,
 }
 
 impl ToolUse {
@@ -222,7 +238,15 @@ pub struct ToolResult {
     /// None when the result holds content but no text, like references to tools.
     pub text: Option<String>,
     pub is_error: bool,
-    pub is_subagent: bool,
+    /// The subagent whose call the result answers, none for Claude's own call.
+    pub agent: Option<String>,
+}
+
+impl ToolResult {
+    /// Whether the result answers a call of a subagent of Claude, rather than Claude's own.
+    pub fn is_subagent(&self) -> bool {
+        self.agent.is_some()
+    }
 }
 
 pub struct Ask {
@@ -481,21 +505,35 @@ pub fn read_events(line: &str) -> Result<Vec<Event>, String> {
             message,
             parent_tool_use_id: None,
             error: Some(_),
+            agent_id: _,
         } => Shown(vec![Event::ApiError(message.content.into_text())]),
         // Claude Code sends each block whole once it has streamed it
         Message::Assistant {
             message,
             parent_tool_use_id,
+            agent_id,
             error: _,
-        } => Shown(read_assistant(message, parent_tool_use_id.as_ref(), line)),
+        } => {
+            let agent = subagent(agent_id, parent_tool_use_id.as_ref());
+            Shown(read_assistant(
+                message,
+                parent_tool_use_id.as_ref(),
+                agent.as_ref(),
+                line,
+            ))
+        }
         Message::User {
             is_replay: true, ..
         } => Skipped("it repeats what Claude Code's history holds, like a command's output"),
         Message::User {
             message,
             parent_tool_use_id,
+            agent_id,
             is_replay: false,
-        } => Shown(read_user(message, parent_tool_use_id.is_some(), line)),
+        } => {
+            let agent = subagent(agent_id, parent_tool_use_id.as_ref());
+            Shown(read_user(message, agent.as_ref(), line))
+        }
         Message::ControlRequest {
             request_id,
             request,
@@ -568,9 +606,22 @@ fn read_stream_event(event: StreamEvent, is_subagent: bool, line: &str) -> Class
     }
 }
 
-/// The events of a reply's blocks, from `line`, those of the subagent that `agent_call` started,
-/// when it is some.
-fn read_assistant(message: Body, agent_call: Option<&String>, line: &str) -> Vec<Event> {
+/// The subagent that sent a message, by its `agent_id`, or by the `Agent` call that started it,
+/// `agent_call`, for a message without one, none for Claude's own message. The types promise
+/// `agent_id` on every message of a subagent, so the call is only a fallback, under which a
+/// subagent whose messages carried the id only now and then would count as two.
+fn subagent(agent_id: Option<String>, agent_call: Option<&String>) -> Option<String> {
+    agent_id.or_else(|| agent_call.cloned())
+}
+
+/// The events of a reply's blocks, from `line`, those of the subagent `agent`, which the
+/// `Agent` call `agent_call` started, when they are some.
+fn read_assistant(
+    message: Body,
+    agent_call: Option<&String>,
+    agent: Option<&String>,
+    line: &str,
+) -> Vec<Event> {
     let is_subagent = agent_call.is_some();
     (message.content.into_blocks().into_iter().enumerate())
         .flat_map(|(index, block)| {
@@ -584,6 +635,7 @@ fn read_assistant(message: Body, agent_call: Option<&String>, line: &str) -> Vec
                     name,
                     input,
                     agent_call: agent_call.cloned(),
+                    agent: agent.cloned(),
                 })]),
                 Block::Thinking => Skipped("claudio leaves Claude's thinking out"),
                 Block::ToolResult { .. } => Skipped("a tool's result comes in a user message"),
@@ -594,9 +646,9 @@ fn read_assistant(message: Body, agent_call: Option<&String>, line: &str) -> Vec
         .collect()
 }
 
-/// The events of the tool results a user message carries, those of a subagent's when
-/// `is_subagent`, from `line`.
-fn read_user(message: Body, is_subagent: bool, line: &str) -> Vec<Event> {
+/// The events of the tool results a user message carries, those of the subagent `agent` when it
+/// is some, from `line`.
+fn read_user(message: Body, agent: Option<&String>, line: &str) -> Vec<Event> {
     (message.content.into_blocks().into_iter().enumerate())
         .flat_map(|(index, block)| match block {
             Block::ToolResult {
@@ -610,7 +662,7 @@ fn read_user(message: Body, is_subagent: bool, line: &str) -> Vec<Event> {
                     tool_use_id,
                     text,
                     is_error,
-                    is_subagent,
+                    agent: agent.cloned(),
                 })]);
                 let unknown_block = unknown_block.map(|inner| {
                     let pointer = format!("/message/content/{index}/content/{inner}/type");
@@ -665,10 +717,12 @@ fn read_system(system: System, line: &str) -> Class {
             task_id,
             tool_use_id,
             is_backgrounded,
+            task_type,
         } => Shown(vec![Event::TaskStarted {
             task_id,
             tool_use_id,
             is_backgrounded,
+            is_agent: task_type.as_deref() == Some(AGENT_TASK),
         }]),
         System::TaskUpdated {
             task_id,
@@ -901,12 +955,14 @@ enum Message {
     Assistant {
         message: Body,
         parent_tool_use_id: Option<String>,
+        agent_id: Option<String>,
         /// The kind of API error the message reports, on a message Claude Code makes for one.
         error: Option<String>,
     },
     User {
         message: Body,
         parent_tool_use_id: Option<String>,
+        agent_id: Option<String>,
         /// Whether the message repeats what Claude Code's history holds, like a command's
         /// output after `/compact`.
         #[serde(rename = "isReplay", default)]
@@ -1029,11 +1085,14 @@ enum System {
     /// says, or that has run for a few seconds in the foreground.
     ///
     /// Undocumented: [`crate::contract::a_background_task_is_told_from_start_to_end`],
-    /// [`crate::contract::a_call_moved_to_the_background_is_told`]
+    /// [`crate::contract::a_call_moved_to_the_background_is_told`],
+    /// [`crate::contract::a_subagent_is_told_from_start_to_end`], for a subagent, whose task
+    /// starts in the foreground too
     TaskStarted {
         task_id: String,
         tool_use_id: Option<String>,
         is_backgrounded: bool,
+        task_type: Option<String>,
     },
     /// Sent as a task changes, like as it ends, or as it moves to the background, before the
     /// result of the call that started it.

@@ -12,6 +12,12 @@
 //!
 //! A free check makes no call to the API, or calls the fake of `fake_api` instead. A paid one
 //! makes a few, with the cheapest model, and runs only with `--paid`.
+//!
+//! A check against the fake sees Claude Code with the defaults of the flags it fetches from
+//! Anthropic's servers, since its config directory and key are its own, so the fetch fails. A
+//! user's session fetches them with the user's login, and may differ, also with no new version
+//! of Claude Code. The other checks run with the user's login, so they see the flags a session
+//! gets.
 //! Ref: <https://martinfowler.com/bliki/ContractTest.html>, on checking a test double against
 //! the real service
 
@@ -36,7 +42,7 @@ pub struct Check {
     pub run: fn(&Path) -> Result<(), String>,
 }
 
-pub const CHECKS: [Check; 12] = [
+pub const CHECKS: [Check; 14] = [
     Check {
         name: "session state comes with its variable",
         is_paid: false,
@@ -71,6 +77,16 @@ pub const CHECKS: [Check; 12] = [
         name: "a call moved to the background is told",
         is_paid: false,
         run: a_call_moved_to_the_background_is_told,
+    },
+    Check {
+        name: "a subagent is told from start to end",
+        is_paid: false,
+        run: a_subagent_is_told_from_start_to_end,
+    },
+    Check {
+        name: "a message to a subagent resumes it",
+        is_paid: false,
+        run: a_message_to_a_subagent_resumes_it,
     },
     Check {
         name: "a stopped call gets its result",
@@ -381,6 +397,217 @@ pub(crate) fn a_call_moved_to_the_background_is_told(program: &Path) -> Result<(
         Ok(lines)
     })?;
     compare(TASK_KINDS, &lines, &moved_call())
+}
+
+/// Seen with Claude Code 2.1.322: a subagent's task starts with its `Agent` call, as
+/// `task_started`, and ends as `task_notification` tells, whether it runs in the foreground or
+/// in the background. `background_tasks_changed` lists only one that runs in the background.
+///
+/// A subagent that Claude asks for in the foreground stays there in this check, while Claude
+/// Code's interactive mode, seen in a terminal, sends every subagent to the background, by its
+/// fork subagent feature. The check runs on the flags' defaults, since Claude Code fetches its
+/// flags from Anthropic with the user's credentials, which the fake lacks, so a user's sessions
+/// may differ. In one that sends every subagent to the background, claudio shows them all as
+/// ones in the background, which it shows as well.
+pub(crate) fn a_subagent_is_told_from_start_to_end(program: &Path) -> Result<(), String> {
+    for (message, is_backgrounded) in [
+        (SUBAGENT_MESSAGE, false),
+        (BACKGROUND_SUBAGENT_MESSAGE, true),
+    ] {
+        let lines = on_fake(program, Duration::ZERO, |run| {
+            run.send_message(message)?;
+            run.read_until(FREE_TIMEOUT, |line| line["subtype"] == "task_notification")
+        })?;
+        compare(
+            &["task started", "task ended"],
+            &lines,
+            &subagent(is_backgrounded),
+        )
+        .map_err(|error| format!("{message}: {error}"))?;
+    }
+    Ok(())
+}
+
+/// The messages of the check of subagents, which `fake-claude` answers with their fixtures.
+pub const SUBAGENT_MESSAGE: &str = "Reply ok in a subagent";
+pub const BACKGROUND_SUBAGENT_MESSAGE: &str = "Reply ok in a background subagent";
+
+/// The task id of the subagent of the fixtures.
+const AGENT_TASK_ID: &str = "a259478d0d71f063d";
+
+/// What Claude Code writes, as 2.1.322 did, for a subagent that replies ok, in the background
+/// when `is_backgrounded`, without the turn's other lines.
+#[must_use]
+pub fn subagent(is_backgrounded: bool) -> Vec<String> {
+    let (call, handback) = ("toolu_agent", "toolu_handback");
+    let input = json!({
+        "description": "Reply ok",
+        "prompt": "Reply ok",
+        "subagent_type": "general-purpose",
+        "run_in_background": is_backgrounded,
+    });
+    let mut handback_use = tool_use(handback, "SubagentHandback", &json!({"message": "ok"}));
+    let mut handback_result = tool_result(
+        handback,
+        r#"{"success":true,"message":"Report delivered to your caller."}"#,
+    );
+    for line in [&mut handback_use, &mut handback_result] {
+        line["parent_tool_use_id"] = json!(call);
+        line["agent_id"] = json!(AGENT_TASK_ID);
+    }
+    let agent_tasks = |listed: bool| {
+        let tasks = if listed {
+            vec![json!({
+                "task_id": AGENT_TASK_ID,
+                "task_type": "local_agent",
+                "subagent_type": "general-purpose",
+                "description": "Reply ok",
+            })]
+        } else {
+            Vec::new()
+        };
+        json!({"type": "system", "subtype": "background_tasks_changed", "tasks": tasks})
+    };
+    let started = json!({
+        "type": "system",
+        "subtype": "task_started",
+        "task_id": AGENT_TASK_ID,
+        "tool_use_id": call,
+        "description": "Reply ok",
+        "subagent_type": "general-purpose",
+        "is_backgrounded": is_backgrounded,
+        "spawn_depth": 1,
+        "task_type": "local_agent",
+    });
+    let ended = json!({
+        "type": "system",
+        "subtype": "task_notification",
+        "task_id": AGENT_TASK_ID,
+        "tool_use_id": call,
+        "status": "completed",
+        "summary": "This agent's report was delivered to you as a message from \"a259478d0d71f063d\" (its SubagentHandback call). Read it there; it is not repeated here.",
+        "output_file": format!("/tmp/claude-1000/tasks/{AGENT_TASK_ID}.output"),
+    });
+    let lines = if is_backgrounded {
+        vec![
+            tool_use(call, "Agent", &input),
+            agent_tasks(true),
+            started,
+            tool_result(
+                call,
+                &format!("Async agent launched successfully.\nagentId: {AGENT_TASK_ID}"),
+            ),
+            handback_use,
+            handback_result,
+            ended,
+            agent_tasks(false),
+        ]
+    } else {
+        vec![
+            tool_use(call, "Agent", &input),
+            started,
+            handback_use,
+            handback_result,
+            ended,
+            tool_result(call, "ok"),
+        ]
+    };
+    lines.iter().map(Value::to_string).collect()
+}
+
+/// Seen with Claude Code 2.1.322: a `SendMessage` whose `to` is the id of a subagent that
+/// ended, which its task's id is, resumes it, as a task of the same id that the call starts,
+/// in the background. `SendMessage` is absent from the SDK's types of tools, and only Claude
+/// Code's result for an `Agent` call tells Claude to send to the id.
+pub(crate) fn a_message_to_a_subagent_resumes_it(program: &Path) -> Result<(), String> {
+    let lines = on_fake(program, Duration::ZERO, |run| {
+        run.send_message(SUBAGENT_MESSAGE)?;
+        let mut lines = run.read_until(FREE_TIMEOUT, |line| line["type"] == "result")?;
+        let agent = lines
+            .iter()
+            .find(|line| line["subtype"] == "task_started")
+            .map_or("", |line| line["task_id"].as_str().unwrap_or(""));
+        run.send(&protocol::Command::Message {
+            id: "claudio-check-resume",
+            text: &resume_message(agent),
+        })?;
+        lines.extend(run.read_until(FREE_TIMEOUT, |line| line["subtype"] == "task_notification")?);
+        Ok(lines)
+    })?;
+    compare(&["task started", "task ended"], &lines, &resumed_subagent())
+}
+
+/// The message that has Claude resume the subagent `agent` with `SendMessage`.
+#[must_use]
+pub fn resume_message(agent: &str) -> String {
+    format!("Resume {agent} with SendMessage")
+}
+
+/// What Claude Code writes, as 2.1.322 did, for a subagent that replies ok, and that Claude
+/// then resumes with `SendMessage`, without the turns' other lines. The lines of
+/// [`subagent`] come of the first message, and the rest of the second one.
+#[must_use]
+pub fn resumed_subagent() -> Vec<String> {
+    let (call, send, handback) = ("toolu_agent", "toolu_send", "toolu_handback_again");
+    let mut handback_use = tool_use(handback, "SubagentHandback", &json!({"message": "ok"}));
+    let mut handback_result = tool_result(
+        handback,
+        r#"{"success":true,"message":"Report delivered to your caller."}"#,
+    );
+    // The resumed subagent's calls name the call that first started it
+    for line in [&mut handback_use, &mut handback_result] {
+        line["parent_tool_use_id"] = json!(call);
+        line["agent_id"] = json!(AGENT_TASK_ID);
+    }
+    let agent_tasks = |tasks: Vec<Value>| json!({"type": "system", "subtype": "background_tasks_changed", "tasks": tasks});
+    let resumed = [
+        tool_use(
+            send,
+            "SendMessage",
+            &json!({"to": AGENT_TASK_ID, "summary": "Reply ok", "message": "Reply ok"}),
+        ),
+        agent_tasks(vec![json!({
+            "task_id": AGENT_TASK_ID,
+            "task_type": "local_agent",
+            "subagent_type": "general-purpose",
+            "description": "Reply ok",
+        })]),
+        json!({
+            "type": "system",
+            "subtype": "task_started",
+            "task_id": AGENT_TASK_ID,
+            "tool_use_id": send,
+            "description": "Reply ok",
+            "subagent_type": "general-purpose",
+            "is_backgrounded": true,
+            "spawn_depth": 1,
+            "task_type": "local_agent",
+        }),
+        tool_result(
+            send,
+            &json!({
+                "success": true,
+                "message": "Resuming agent a259478",
+                "resumedAgentId": AGENT_TASK_ID,
+            })
+            .to_string(),
+        ),
+        handback_use,
+        handback_result,
+        json!({
+            "type": "system",
+            "subtype": "task_notification",
+            "task_id": AGENT_TASK_ID,
+            "tool_use_id": send,
+            "status": "completed",
+            "summary": "This agent's report was delivered to you as a message from \"a259478d0d71f063d\" (its SubagentHandback call). Read it there; it is not repeated here.",
+            "output_file": format!("/tmp/claude-1000/tasks/{AGENT_TASK_ID}.output"),
+        }),
+        agent_tasks(Vec::new()),
+    ];
+    (subagent(false).into_iter())
+        .chain(resumed.iter().map(Value::to_string))
+        .collect()
 }
 
 /// Seen with Claude Code 2.1.322: an interrupt fails the call that runs with a result of its
@@ -854,6 +1081,7 @@ fn summary(kinds: &[&str], events: &[Event]) -> Vec<String> {
                     task_id,
                     tool_use_id,
                     is_backgrounded,
+                    is_agent,
                 } => (
                     "task started",
                     [Some(task_id), tool_use_id.as_ref()]
@@ -861,7 +1089,11 @@ fn summary(kinds: &[&str], events: &[Event]) -> Vec<String> {
                         .flatten()
                         .map(String::as_str)
                         .collect(),
-                    if *is_backgrounded { "backgrounded" } else { "" }.to_string(),
+                    [(*is_agent, "agent"), (*is_backgrounded, "backgrounded")]
+                        .into_iter()
+                        .filter_map(|(is, word)| is.then_some(word))
+                        .collect::<Vec<_>>()
+                        .join(" "),
                 ),
                 Event::TaskBackgrounded { task_id } => {
                     ("task backgrounded", vec![task_id], String::new())

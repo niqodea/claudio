@@ -1024,7 +1024,7 @@ impl InputLine {
     /// rules for the label row group them. The budgets are the context's level, marked and red
     /// on a cold cache, and the levels of the plan's usage limits. The activity is the questions
     /// that wait, in the color of a warning since only the user moves them on, the tasks that run
-    /// in the background, and what Claude does, `idle` too, so the user always sees whether it is
+    /// in the background, the subagents that run, and what Claude does, `idle` too, so the user always sees whether it is
     /// their turn. For an answer, the question; at the end, the work Claude still does.
     fn make_label(&self) -> String {
         let shared = lock(&self.shared);
@@ -1046,10 +1046,16 @@ impl InputLine {
                     limit_indicator('S', shared.limits.session().map(limit_level)),
                     limit_indicator('W', shared.limits.week().map(limit_level)),
                 );
+                let output = &shared.output;
+                // A subagent counts in A alone, as it runs in the background or not
+                let commands = (output.background_tasks().iter())
+                    .filter(|task| !task.is_agent())
+                    .count();
                 let activity = format!(
-                    "{} {}",
+                    "{} {} {}",
                     waiting_indicator(*waiting),
-                    background_indicator(shared.output.background_tasks().len()),
+                    background_indicator(commands),
+                    agents_indicator(output.running_agents()),
                 );
                 let indicators = format!("{}{budgets} {SUBDUED_ON_BAR}│ {activity}", marks());
                 let state = (self.confirmation())
@@ -1454,6 +1460,12 @@ fn background_indicator(tasks: usize) -> String {
     format!("{SUBDUED_ON_BAR}B{}", show_count(tasks))
 }
 
+/// A and how many subagents run, in the foreground or in the background, in the bar's grey, as
+/// for B.
+fn agents_indicator(agents: usize) -> String {
+    format!("{SUBDUED_ON_BAR}A{}", show_count(agents))
+}
+
 /// A count up to 9, and + for more, which keeps one character for the count, so the label's
 /// width stays.
 fn show_count(count: usize) -> String {
@@ -1824,8 +1836,12 @@ fn describe_work(output: &Output) -> Option<String> {
             Some("writing, stderr waiting".to_string())
         }
         Status::Writing => Some("writing".to_string()),
-        Status::Running { tool, .. } => Some(format!("running {tool}")),
-        Status::Checking { tool, .. } => Some(format!("checking {tool}")),
+        Status::Running { tool, call } => {
+            Some(format!("running {}", output.name_call(&tool, &call)))
+        }
+        Status::Checking { tool, call } => {
+            Some(format!("checking {}", output.name_call(&tool, &call)))
+        }
     }
 }
 

@@ -28,6 +28,7 @@ mod render;
 mod session;
 mod status;
 mod style;
+mod subagents;
 mod table;
 mod terminal;
 mod vi;
@@ -345,9 +346,13 @@ fn read_claude(from_claude: ChildStdout, shared: &Mutex<Shared>, forward: &dyn F
                     task_id,
                     tool_use_id,
                     is_backgrounded,
-                } => shared
-                    .output
-                    .note_task_started(task_id, tool_use_id, is_backgrounded),
+                    is_agent,
+                } => (shared.output).note_task_started(
+                    task_id,
+                    tool_use_id,
+                    is_backgrounded,
+                    is_agent,
+                ),
                 Event::TaskBackgrounded { task_id } => {
                     shared.output.note_task_backgrounded(&task_id);
                 }

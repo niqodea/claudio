@@ -7,6 +7,7 @@
 //! rest of the conversation a whole line at a time.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::{self, Display, Formatter};
 use std::fs::File;
 use std::io::Write;
 use std::num::NonZeroUsize;
@@ -19,6 +20,7 @@ use crate::protocol::{
     Ask, AskKind, Level, Question, SettingsError, State, Task, TaskStatus, ToolResult, ToolUse,
 };
 use crate::status::grouped;
+use crate::subagents::Subagents;
 
 use crate::style::{
     ATTENTION, DONE_OR_ADDED, FAILED_OR_REMOVED, MARK, RESET, STRONG, SUBDUED, SUBDUED_ON_BAR,
@@ -36,14 +38,22 @@ const FILL_ROW: &str = "\x1b[K";
 /// 60 days of one user's sessions had it, so a Bash call shows its command only in the full view.
 const DESCRIBED_TOOLS: [&str; 2] = ["Agent", "Bash"];
 
+/// The type of the subagent that Claude Code starts by default, which Claude also often names.
+/// Ref: <https://code.claude.com/docs/en/sub-agents>, on the built-in subagents
+const DEFAULT_AGENT: &str = "general-purpose";
+
 /// The field that sums up a call of each tool that has one, when the call has no description.
-const SUMMARY_FIELDS: [(&str, &str); 9] = [
+const SUMMARY_FIELDS: [(&str, &str); 10] = [
     ("Bash", "command"),
     ("Edit", "file_path"),
     ("ExitPlanMode", "planFilePath"),
     ("Glob", "pattern"),
     ("Grep", "pattern"),
     ("Read", "file_path"),
+    // Whom the message goes to, which a subagent's id names by its tag instead. A name stays as
+    // written, since Claude Code renames a subagent whose name another one that runs holds, and
+    // a message can go to Claude, a teammate or another session too
+    ("SendMessage", "to"),
     ("WebFetch", "url"),
     ("WebSearch", "query"),
     ("Write", "file_path"),
@@ -89,8 +99,9 @@ pub struct Output {
     background_calls: HashMap<String, BackgroundCall>,
     /// The columns a noisy line takes at most on screen.
     max_noisy_line_columns: NonZeroUsize,
-    /// The tag of the next tool use.
-    next_tag: u8,
+    /// The count of Claude's next call.
+    next_call: u8,
+    subagents: Subagents,
     /// How the user stopped the turn that runs, if they did.
     interruption: Option<Interruption>,
     highlighter: Highlighter,
@@ -132,11 +143,36 @@ struct BackgroundCall {
 #[derive(Clone)]
 struct PendingCall {
     name: String,
-    /// What ties the result's line to the call's line: two hexadecimal digits, which keep the
-    /// columns of both lines in place. Tags count up and wrap from ff to 00, on the assumption
-    /// that a call's result arrives before 255 more calls start. A call that waits longer
-    /// shares its tag with a newer call.
-    tag: u8,
+    tag: Tag,
+    /// The subagent that the call started, by its id, for an `Agent` call whose subagent's task
+    /// started.
+    agent: Option<String>,
+}
+
+/// What names a call and ties the result's line to the call's line: the call's count among
+/// Claude's calls, like `#0a`, or, for a subagent's call, which shows only in the full view,
+/// the tag of the call that started the subagent, then the call's count among the subagent's,
+/// like `#0a#03`, so a search for `#0a` finds the subagent's calls too. A tag is one word, which
+/// a search finds whole, of two hexadecimal digits each, which keep the columns of a line in
+/// place. Counts wrap from ff to 00, on the assumption that a call's result arrives before 255
+/// more calls of its agent start. A call that waits longer shares its tag with a newer one.
+#[derive(Clone, Copy)]
+enum Tag {
+    Claude(u8),
+    /// A subagent's call, after the count of the call that started the subagent, unknown for a
+    /// call that comes before the subagent's task. Claude Code tells the task first, as the
+    /// checks of subagents saw, and a call that came before would show `#??`.
+    Subagent(Option<u8>, u8),
+}
+
+impl Display for Tag {
+    fn fmt(&self, formatter: &mut Formatter) -> fmt::Result {
+        match self {
+            Tag::Claude(call) => write!(formatter, "#{call:02x}"),
+            Tag::Subagent(Some(start), call) => write!(formatter, "#{start:02x}#{call:02x}"),
+            Tag::Subagent(None, call) => write!(formatter, "#??#{call:02x}"),
+        }
+    }
 }
 
 /// What Claude does, which the marker in front of the input line shows.
@@ -216,7 +252,8 @@ impl Output {
             call_tasks: HashMap::new(),
             background_calls: HashMap::new(),
             max_noisy_line_columns,
-            next_tag: 0,
+            next_call: 0,
+            subagents: Subagents::default(),
             interruption: None,
             highlighter: Highlighter::new(),
             waiting_stderr: Vec::new(),
@@ -234,6 +271,30 @@ impl Output {
         &self.background_tasks
     }
 
+    /// The subagents that run, in the foreground or in the background.
+    pub fn running_agents(&self) -> usize {
+        self.subagents.running()
+    }
+
+    /// The call `call` of the tool `tool`, as the label row names it: by its tool and its tag,
+    /// like `Bash #03`, and for a call whose subagent runs in the foreground, with how many
+    /// others run in the foreground beside it, like `Agent #01 +2`, and `+N` for 10 or more.
+    pub fn name_call(&self, tool: &str, call: &str) -> String {
+        let Some(call) = self.pending_calls.get(call) else {
+            return tool.to_string();
+        };
+        let others = match call.agent {
+            Some(_) => self.subagents.foreground().saturating_sub(1),
+            None => 0,
+        };
+        let others = match others {
+            0 => String::new(),
+            1..10 => format!(" +{others}"),
+            _ => " +N".to_string(),
+        };
+        format!("{tool} {}{others}", call.tag)
+    }
+
     /// Notes the tasks that run in the background. A task that an earlier list held and this one
     /// does not has ended, so its call is forgotten, even if its end never came. A task that no
     /// list held yet stays, since it may join a later list.
@@ -248,13 +309,27 @@ impl Output {
     }
 
     /// Notes that the tool use with `tool_use_id` started the task `task_id`, which runs in the
-    /// background when `is_backgrounded`.
+    /// background when `is_backgrounded`, and is a subagent's, whose id it is, when `is_agent`.
     pub fn note_task_started(
         &mut self,
         task_id: String,
         tool_use_id: Option<String>,
         is_backgrounded: bool,
+        is_agent: bool,
     ) {
+        if is_agent {
+            let call = (tool_use_id.as_ref()).and_then(|id| self.pending_calls.get_mut(id));
+            let start = call.map(|call| {
+                call.agent = Some(task_id.clone());
+                call.tag
+            });
+            let start = match start {
+                Some(Tag::Claude(start)) => Some(start),
+                _ => None,
+            };
+            self.subagents
+                .note_started(&task_id, start, is_backgrounded);
+        }
         if let Some(tool_use_id) = tool_use_id {
             let task = CallTask {
                 id: task_id,
@@ -267,6 +342,7 @@ impl Output {
 
     /// Notes that the task `task_id` moved to the background.
     pub fn note_task_backgrounded(&mut self, task_id: &str) {
+        self.subagents.note_backgrounded(task_id);
         if let Some(task) = self.call_task(task_id) {
             task.is_backgrounded = true;
         }
@@ -275,7 +351,11 @@ impl Output {
     /// Shows how the task `task_id` ended in the background, under the tag of the call that
     /// started it, or keeps the end for the call's result, when it comes first. A task that ends
     /// in the foreground shows as its call's result.
+    ///
+    /// Undocumented: [`crate::contract::a_subagent_is_told_from_start_to_end`], for a subagent,
+    /// which counts as running until then
     pub fn show_task_end(&mut self, task_id: &str, status: TaskStatus, summary: &str) {
+        self.subagents.note_ended(task_id);
         let end = TaskEnd {
             status,
             summary: summary.to_string(),
@@ -294,18 +374,26 @@ impl Output {
     }
 
     /// Adds the line of how the task of `call` ended, with Claude Code's summary for Claude in
-    /// the full view.
+    /// the full view. The line of a subagent's end counts its calls, which show only in the
+    /// full view.
     fn push_task_end(&mut self, call: &PendingCall, end: &TaskEnd) {
         let (outcome, word) = match end.status {
             TaskStatus::Completed => ("✓", "completed"),
             TaskStatus::Failed => ("✗", "failed"),
             TaskStatus::Stopped => ("✗", "stopped"),
         };
+        let subagent = (call.agent.as_ref()).and_then(|agent| self.subagents.get(agent));
+        let calls = subagent.map_or_else(String::new, |subagent| match subagent.calls {
+            1 => " · 1 call".to_string(),
+            calls => format!(" · {calls} calls"),
+        });
         self.push_detail(&format!(
-            "{outcome} {SUBDUED}#{:02x} {}: {word}{RESET}",
+            "{outcome} {SUBDUED}{} {}: {word}{calls}{RESET}",
             call.tag, call.name
         ));
-        self.write_full_view_line(&format!("  {}", end.summary));
+        for line in end.summary.lines() {
+            self.write_full_view_line(&format!("  {line}"));
+        }
     }
 
     /// Takes the text that waits to be printed above the input line.
@@ -336,8 +424,10 @@ impl Output {
     }
 
     /// Marks where the context was cleared, which ended the session with `previous_session`, so
-    /// the conversation reads as a new one from there.
+    /// the conversation reads as a new one from there, and forgets the subagents that ended,
+    /// which the new session cannot resume.
     pub fn show_reset(&mut self, previous_session: &str) {
+        self.subagents.forget_ended();
         self.show_user_line(&format!("cleared │ session {previous_session}"));
     }
 
@@ -397,16 +487,16 @@ impl Output {
     }
 
     /// Shows the user's decision on a tool use that Claude Code asked about, like `allowed #01
-    /// Bash Run the tests`, which names the call by its tag, and by its summary, since the tag of
-    /// a subagent's call is missing and the call's line can be far above. The user's `reason`
+    /// Bash: Run the tests`, which names the call by its tag, and by its summary, since the call's
+    /// line can be far above. The user's `reason`
     /// follows, when they gave one.
     pub fn show_decision(&mut self, ask: &Ask, decision: &str, reason: Option<&str>) {
         let tag = (self.pending_calls.get(&ask.tool_use_id))
-            .map_or_else(String::new, |call| format!("#{:02x} ", call.tag));
+            .map_or_else(String::new, |call| format!("{} ", call.tag));
         let summary = summarize(&ask.tool_name, &ask.input);
         let first = summary.text.lines().next().unwrap_or_default();
         let line = format!(
-            "{}{decision} {tag}{} {first}",
+            "{}{decision} {tag}{}: {first}",
             start_bar_row(),
             ask.tool_name
         );
@@ -502,6 +592,11 @@ impl Output {
         self.write(&colored);
     }
 
+    /// Shows a call, on a line of the conversation for Claude's, and in the full view for a
+    /// subagent's.
+    ///
+    /// Undocumented: [`crate::contract::a_message_to_a_subagent_resumes_it`], for a call that
+    /// names a subagent by its id, in `to`
     pub fn show_tool_use(&mut self, tool_use: &ToolUse) {
         if tool_use.name == "Agent" {
             let description = read_field(&tool_use.input, "description");
@@ -521,29 +616,36 @@ impl Output {
             self.hidden_results.insert(tool_use.id.clone());
             return;
         }
-        // What a subagent did shows in what it reports back to Claude, so its calls have no
-        // result line to tie to
-        let mark = if tool_use.is_subagent() {
-            format!("  {STRONG}○")
+        let tag = if let Some(agent) = &tool_use.agent {
+            let subagent = self.subagents.get_or_add(agent);
+            let start = subagent.start;
+            Tag::Subagent(start, subagent.next_call())
         } else {
-            let tag = self.next_tag;
-            self.next_tag = tag.wrapping_add(1);
-            self.pending_calls.insert(
-                tool_use.id.clone(),
-                PendingCall {
-                    name: tool_use.name.clone(),
-                    tag,
-                },
-            );
-            format!("{STRONG}○{RESET} {SUBDUED}#{tag:02x}{RESET}{STRONG}")
+            let call = self.next_call;
+            self.next_call = call.wrapping_add(1);
+            Tag::Claude(call)
         };
-        self.begin(Section::Tools);
+        self.pending_calls.insert(
+            tool_use.id.clone(),
+            PendingCall {
+                name: tool_use.name.clone(),
+                tag,
+                agent: None,
+            },
+        );
+        let mark = format!("{STRONG}○{RESET} {SUBDUED}{tag}{RESET}{STRONG}");
         // One line per call keeps the tool calls out of the way of the conversation. A call that
-        // names a task, like TaskStop's, names it by the tag of the call that started it
+        // names a task, like TaskStop's, names it by the tag of the call that started it, and
+        // one that names a subagent, like SendMessage's, which resumes it, by the tag of the
+        // call that first started the subagent
         let task_call = (self.background_calls).get(read_field(&tool_use.input, "task_id"));
-        let summary = match task_call {
-            Some(BackgroundCall { call, .. }) => Summary {
-                text: format!("{SUBDUED}#{:02x}{RESET}", call.tag),
+        let target = task_call.map(|background| background.call.tag).or_else(|| {
+            let subagent = self.subagents.get(read_field(&tool_use.input, "to"))?;
+            subagent.start.map(Tag::Claude)
+        });
+        let summary = match target {
+            Some(tag) => Summary {
+                text: format!("{SUBDUED}{tag}{RESET}"),
                 is_input: false,
             },
             None => summarize(&tool_use.name, &tool_use.input),
@@ -566,53 +668,74 @@ impl Output {
         } else {
             String::new()
         };
-        let line = format!("{mark} {}{RESET} {first}{more}{changes}", tool_use.name);
-        // A description is Claude's sentence about the call, so only the call's input is noisy
-        if summary.is_input {
+        let line = format!("{mark} {}:{RESET} {first}{more}{changes}", tool_use.name);
+        // A subagent's calls show only in the full view, since what it did shows in what it
+        // reports back to Claude, and its end line counts them
+        if tool_use.agent.is_some() {
+            self.write_full_view_line(&line);
+        } else if summary.is_input {
+            self.begin(Section::Tools);
             self.push_noisy(&line);
         } else {
+            self.begin(Section::Tools);
             self.push_detail(&line);
         }
-        let indent = if tool_use.is_subagent() { "    " } else { "  " };
         for (field, value) in &tool_use.input {
             if let Value::String(text) = value {
-                self.write_full_view_line(&format!("{indent}{SUBDUED}{field}:{RESET}"));
+                self.write_full_view_line(&format!("  {SUBDUED}{field}:{RESET}"));
                 for line in text.lines() {
-                    self.write_full_view_line(&format!("{indent}  {line}"));
+                    self.write_full_view_line(&format!("    {line}"));
                 }
             } else {
-                let line = format!("{indent}{SUBDUED}{field}:{RESET} {value}");
+                let line = format!("  {SUBDUED}{field}:{RESET} {value}");
                 self.write_full_view_line(&line);
             }
         }
     }
 
     pub fn show_tool_result(&mut self, result: &ToolResult) {
-        if !result.is_subagent {
+        if !result.is_subagent() {
             self.set_status(Status::Working);
         }
         self.agents.remove(&result.tool_use_id);
         self.call_agents.remove(&result.tool_use_id);
         let call = self.pending_calls.remove(&result.tool_use_id);
-        let task = self.call_tasks.remove(&result.tool_use_id);
-        // What a subagent did shows in what it reports back to Claude. A tool the interrupt
-        // stopped fails with Claude Code's message to Claude.
-        if result.is_subagent
-            || self.hidden_results.remove(&result.tool_use_id)
+        let mut task = self.call_tasks.remove(&result.tool_use_id);
+        let text = result.text.as_deref().map_or("(no text)", str::trim);
+        // The outcome is all the line adds to the call's line, so the rest stays in the back
+        let outcome = if result.is_error { "✗" } else { "✓" };
+        let first = text.lines().next().unwrap_or("(no output)");
+        let more = match text.lines().count().saturating_sub(1) {
+            0 => String::new(),
+            count => format!(" (+{count} lines)"),
+        };
+        // Other lines can come between a call and its result, so the result stands on its own
+        let label = (call.as_ref())
+            .map_or_else(String::new, |call| format!("{} {}: ", call.tag, call.name));
+        let line = format!("{outcome} {SUBDUED}{label}{first}{more}{RESET}");
+        // Like its call, a subagent's result shows only in the full view
+        if result.is_subagent() {
+            self.write_full_view_line(&line);
+            for line in text.lines().skip(1) {
+                self.write_full_view_line(&format!("  {line}"));
+            }
+            return;
+        }
+        // A tool the interrupt stopped fails with Claude Code's message to Claude
+        if self.hidden_results.remove(&result.tool_use_id)
             || (self.interruption.is_some() && result.is_error)
         {
             return;
         }
         self.begin(Section::Tools);
-        let text = result.text.as_deref().map_or("(no text)", str::trim);
         // A call whose task goes on in the background has only started, and its result is
         // Claude Code's note to Claude with the task's id and output file, so the line says that
         // the task runs, and the task's end shows the outcome
-        if let (Some(call), Some(task)) = (&call, task)
-            && task.is_backgrounded
+        if let Some(call) = &call
+            && let Some(task) = task.take_if(|task| task.is_backgrounded)
         {
             self.push_detail(&format!(
-                "◌ {SUBDUED}#{:02x} {}: running in background{RESET}",
+                "◌ {SUBDUED}{} {}: running in background{RESET}",
                 call.tag, call.name
             ));
             for line in text.lines() {
@@ -630,20 +753,27 @@ impl Output {
             }
             return;
         }
-        // The outcome is all the line adds to the call's line, so the rest stays in the back
-        let outcome = if result.is_error { "✗" } else { "✓" };
-        let mut lines = text.lines();
-        let first = lines.next().unwrap_or("(no output)");
-        let rest = lines.count();
-        let more = match rest {
-            0 => String::new(),
-            count => format!(" (+{count} lines)"),
-        };
-        // Other lines can come between a call and its result, so the result stands on its own
-        let label = call.map_or_else(String::new, |call| {
-            format!("#{:02x} {}: ", call.tag, call.name)
-        });
-        self.push_noisy(&format!("{outcome} {SUBDUED}{label}{first}{more}{RESET}"));
+        // The result of a call that started a subagent in the foreground is the subagent's
+        // report, which the full view holds, under the line of how the subagent ended, which its
+        // task told before the result, or else the result tells
+        if let Some(call) = &call
+            && call.agent.is_some()
+        {
+            let failed = if result.is_error {
+                TaskStatus::Failed
+            } else {
+                TaskStatus::Completed
+            };
+            let end = TaskEnd {
+                status: task
+                    .and_then(|task| task.end)
+                    .map_or(failed, |end| end.status),
+                summary: text.to_string(),
+            };
+            self.push_task_end(call, &end);
+            return;
+        }
+        self.push_noisy(&line);
         for line in text.lines().skip(1) {
             self.write_full_view_line(&format!("  {line}"));
         }
@@ -1015,8 +1145,16 @@ fn summarize(tool: &str, input: &Map<String, Value>) -> Summary {
     if DESCRIBED_TOOLS.contains(&tool)
         && let Some(description) = text("description")
     {
+        // A subagent of a type other than the default one is named by it, since it runs with
+        // a prompt and tools of its own
+        let text = match text("subagent_type") {
+            Some(kind) if tool == "Agent" && kind != DEFAULT_AGENT => {
+                format!("{kind} · {description}")
+            }
+            _ => description.to_string(),
+        };
         return Summary {
-            text: description.to_string(),
+            text,
             is_input: false,
         };
     }
@@ -1139,6 +1277,7 @@ mod tests {
             name: "Bash".to_string(),
             input,
             agent_call: None,
+            agent: None,
         });
         assert_eq!(output.take_lines()[0], reply_mark());
     }
@@ -1274,6 +1413,7 @@ mod tests {
                     .expect("an object")
                     .clone(),
                 agent_call: None,
+                agent: None,
             });
         });
         assert_eq!(
@@ -1301,7 +1441,7 @@ mod tests {
                 format!("✓ {SUBDUED}#00 Read: one (+1 lines){RESET}"),
                 "  two".to_string(),
                 format!(
-                    "{STRONG}○{RESET} {SUBDUED}#01{RESET}{STRONG} Read{RESET} {}",
+                    "{STRONG}○{RESET} {SUBDUED}#01{RESET}{STRONG} Read:{RESET} {}",
                     code_span("b.txt")
                 ),
                 format!("  {SUBDUED}file_path:{RESET}"),
@@ -1321,7 +1461,7 @@ mod tests {
             screen = output.take_lines();
         });
         let call = format!(
-            "{STRONG}○{RESET} {SUBDUED}#00{RESET}{STRONG} Read{RESET} {}",
+            "{STRONG}○{RESET} {SUBDUED}#00{RESET}{STRONG} Read:{RESET} {}",
             code_span(&path)
         );
         assert_eq!(
@@ -1347,6 +1487,7 @@ mod tests {
             name: "Bash".to_string(),
             input,
             agent_call: None,
+            agent: None,
         });
         assert!(output.take_lines()[1].contains(&description));
     }
@@ -1376,6 +1517,7 @@ mod tests {
             name: "Read".to_string(),
             input,
             agent_call: None,
+            agent: None,
         }
     }
 
@@ -1384,7 +1526,7 @@ mod tests {
             tool_use_id: id.to_string(),
             text: Some(text.to_string()),
             is_error: false,
-            is_subagent: false,
+            agent: None,
         }
     }
 
@@ -1398,7 +1540,7 @@ mod tests {
         assert_eq!(
             lines[2],
             format!(
-                "{STRONG}○{RESET} {SUBDUED}#01{RESET}{STRONG} Read{RESET} {}",
+                "{STRONG}○{RESET} {SUBDUED}#01{RESET}{STRONG} Read:{RESET} {}",
                 code_span("b.txt")
             )
         );
@@ -1418,7 +1560,8 @@ mod tests {
                         task_id,
                         tool_use_id,
                         is_backgrounded,
-                    } => output.note_task_started(task_id, tool_use_id, is_backgrounded),
+                        is_agent,
+                    } => output.note_task_started(task_id, tool_use_id, is_backgrounded, is_agent),
                     Event::TaskBackgrounded { task_id } => output.note_task_backgrounded(&task_id),
                     Event::TaskEnded {
                         task_id,
@@ -1433,7 +1576,7 @@ mod tests {
     }
 
     fn running_in_background(tag: &str) -> String {
-        format!("◌ {SUBDUED}#{tag} Bash: running in background{RESET}")
+        format!("◌ {SUBDUED}{tag} Bash: running in background{RESET}")
     }
 
     #[test]
@@ -1445,7 +1588,7 @@ mod tests {
             assert_eq!(
                 lines[2..],
                 [
-                    running_in_background("00"),
+                    running_in_background("#00"),
                     format!("{outcome} {SUBDUED}#00 Bash: {word}{RESET}"),
                 ]
             );
@@ -1456,7 +1599,7 @@ mod tests {
     fn a_call_moved_to_the_background_shows_as_one_that_went_there() {
         let mut output = output_after_message();
         let lines = show_lines(&mut output, &contract::moved_call());
-        assert_eq!(lines[2], running_in_background("00"));
+        assert_eq!(lines[2], running_in_background("#00"));
         assert_eq!(lines[3], format!("✓ {SUBDUED}#00 Bash: completed{RESET}"));
     }
 
@@ -1470,7 +1613,7 @@ mod tests {
         assert_eq!(
             lines[2..],
             [
-                running_in_background("00"),
+                running_in_background("#00"),
                 format!("✓ {SUBDUED}#00 Bash: completed{RESET}"),
             ]
         );
@@ -1486,6 +1629,7 @@ mod tests {
         let task = |id: &str| Task {
             id: id.to_string(),
             description: String::new(),
+            kind: "local_bash".to_string(),
         };
         // A list that does not hold the task yet keeps it
         output.note_background_tasks(vec![task("other")]);
@@ -1504,11 +1648,134 @@ mod tests {
         assert_eq!(
             lines[3],
             format!(
-                "{STRONG}○{RESET} {SUBDUED}#01{RESET}{STRONG} TaskStop{RESET} {SUBDUED}#00{RESET}"
+                "{STRONG}○{RESET} {SUBDUED}#01{RESET}{STRONG} TaskStop:{RESET} {SUBDUED}#00{RESET}"
             )
         );
         assert_eq!(lines[4], format!("✗ {SUBDUED}#00 Bash: stopped{RESET}"));
         assert!(lines[5].starts_with(&format!("✓ {SUBDUED}#01 TaskStop: ")));
+    }
+
+    #[test]
+    fn a_subagent_shows_as_its_call_and_the_line_of_its_end() {
+        for is_backgrounded in [false, true] {
+            let mut output = output_after_message();
+            let lines = show_lines(&mut output, &contract::subagent(is_backgrounded));
+            // After the reply mark, and the call, and its result, for a subagent in the
+            // background
+            assert!(lines[1].contains(&format!("{SUBDUED}#00{RESET}{STRONG} Agent:{RESET}")));
+            assert_eq!(
+                lines.last(),
+                Some(&format!("✓ {SUBDUED}#00 Agent: completed · 1 call{RESET}"))
+            );
+            assert_eq!(lines.len(), if is_backgrounded { 4 } else { 3 });
+        }
+    }
+
+    #[test]
+    fn a_subagent_s_calls_and_results_show_in_the_full_view() {
+        let lines = full_view_after(|output| {
+            show_lines(output, &contract::subagent(false));
+        });
+        let call = format!("{STRONG}○{RESET} {SUBDUED}#00#00{RESET}{STRONG} SubagentHandback:");
+        assert!(
+            lines.iter().any(|line| line.starts_with(&call)),
+            "{lines:?}"
+        );
+        let result = format!("✓ {SUBDUED}#00#00 SubagentHandback: ");
+        assert!(
+            lines.iter().any(|line| line.starts_with(&result)),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_resumed_subagent_keeps_the_tag_of_the_call_that_first_started_it() {
+        let mut output = output_after_message();
+        let lines = show_lines(&mut output, &contract::resumed_subagent());
+        let send = format!(
+            "{STRONG}○{RESET} {SUBDUED}#01{RESET}{STRONG} SendMessage:{RESET} {SUBDUED}#00{RESET}"
+        );
+        assert!(lines.contains(&send), "{lines:?}");
+        assert_eq!(
+            lines.last(),
+            Some(&format!(
+                "✓ {SUBDUED}#01 SendMessage: completed · 1 call{RESET}"
+            ))
+        );
+    }
+
+    /// The lines of a subagent whose run broke on an API error, in the background when
+    /// `is_backgrounded`, as the types of `task_notification` allow for a subagent's task.
+    fn failed_subagent(is_backgrounded: bool) -> Vec<String> {
+        let input =
+            json!({"description": "Fail", "prompt": "Fail", "run_in_background": is_backgrounded});
+        let call = json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "c", "name": "Agent", "input": input}]}, "parent_tool_use_id": null});
+        let started = json!({"type": "system", "subtype": "task_started", "task_id": "a", "tool_use_id": "c", "description": "Fail", "is_backgrounded": is_backgrounded, "task_type": "local_agent"});
+        let error = "Agent terminated early due to an API error";
+        let ended = json!({"type": "system", "subtype": "task_notification", "task_id": "a", "tool_use_id": "c", "status": "failed", "summary": error});
+        let result = |text: &str, is_error: bool| json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "c", "content": text, "is_error": is_error}]}, "parent_tool_use_id": null});
+        let lines = if is_backgrounded {
+            vec![
+                call,
+                started,
+                result("Async agent launched successfully.", false),
+                ended,
+            ]
+        } else {
+            vec![call, started, ended, result(error, true)]
+        };
+        lines.iter().map(Value::to_string).collect()
+    }
+
+    #[test]
+    fn a_message_to_another_than_a_known_subagent_names_whom_it_goes_to() {
+        let input = json!({"to": "reviewer", "summary": "Review", "message": "Review the diff"});
+        let summary = summarize("SendMessage", input.as_object().expect("an object"));
+        assert_eq!(summary.text, "reviewer");
+    }
+
+    #[test]
+    fn a_subagent_that_failed_says_so_on_the_line_of_its_end() {
+        for is_backgrounded in [false, true] {
+            let mut output = output_after_message();
+            let lines = show_lines(&mut output, &failed_subagent(is_backgrounded));
+            assert_eq!(
+                lines.last(),
+                Some(&format!("✗ {SUBDUED}#00 Agent: failed · 0 calls{RESET}"))
+            );
+        }
+    }
+
+    #[test]
+    fn an_agent_call_names_the_subagent_it_started_until_its_result() {
+        let mut output = output_after_message();
+        let lines = contract::subagent(false);
+        // The call and the subagent's start
+        show_lines(&mut output, &lines[..2]);
+        let Status::Running { call, .. } = output.status() else {
+            panic!("Claude runs the Agent call");
+        };
+        assert_eq!(output.name_call("Agent", &call), "Agent #00");
+        show_lines(&mut output, &lines[2..]);
+        assert_eq!(output.name_call("Agent", &call), "Agent");
+    }
+
+    #[test]
+    fn a_subagent_runs_from_its_task_start_to_its_end() {
+        for is_backgrounded in [false, true] {
+            let mut output = output_after_message();
+            let lines = contract::subagent(is_backgrounded);
+            let end = lines
+                .iter()
+                .position(|line| line.contains("task_notification"))
+                .expect("the subagent's end");
+            show_lines(&mut output, &lines[..end]);
+            assert_eq!(output.running_agents(), 1);
+            assert_eq!(output.subagents.foreground(), usize::from(!is_backgrounded));
+            show_lines(&mut output, &lines[end..]);
+            assert_eq!(output.running_agents(), 0);
+            assert_eq!(output.subagents.foreground(), 0);
+        }
     }
 
     #[test]
@@ -1536,6 +1803,7 @@ mod tests {
             name: name.to_string(),
             input,
             agent_call: None,
+            agent: None,
         }
     }
 
@@ -1550,10 +1818,21 @@ mod tests {
         assert_eq!(
             lines.last().expect("the call's line"),
             &format!(
-                "{STRONG}○{RESET} {SUBDUED}#00{RESET}{STRONG} Bash{RESET} {} {SUBDUED}(+2 lines){RESET}",
+                "{STRONG}○{RESET} {SUBDUED}#00{RESET}{STRONG} Bash:{RESET} {} {SUBDUED}(+2 lines){RESET}",
                 code_span("cd a")
             )
         );
+    }
+
+    #[test]
+    fn a_subagent_of_a_type_of_its_own_is_named_by_it() {
+        let call = |kind: &str| {
+            let input =
+                json!({"description": "Review the diff", "prompt": "", "subagent_type": kind});
+            summarize("Agent", input.as_object().expect("an object")).text
+        };
+        assert_eq!(call("code-reviewer"), "code-reviewer · Review the diff");
+        assert_eq!(call(DEFAULT_AGENT), "Review the diff");
     }
 
     #[test]
@@ -1566,7 +1845,7 @@ mod tests {
         let lines = output.take_lines();
         assert_eq!(
             lines.last().expect("the call's line"),
-            &format!("{STRONG}○{RESET} {SUBDUED}#00{RESET}{STRONG} Bash{RESET} Run the tests")
+            &format!("{STRONG}○{RESET} {SUBDUED}#00{RESET}{STRONG} Bash:{RESET} Run the tests")
         );
     }
 
@@ -1590,7 +1869,7 @@ mod tests {
         assert_eq!(
             lines.last().expect("the call's line"),
             &format!(
-                "{STRONG}○{RESET} {SUBDUED}#00{RESET}{STRONG} TodoWrite{RESET} {}",
+                "{STRONG}○{RESET} {SUBDUED}#00{RESET}{STRONG} TodoWrite:{RESET} {}",
                 code_span(r#"{"todos":[]}"#)
             )
         );
@@ -1605,7 +1884,7 @@ mod tests {
         assert_eq!(
             lines.last().expect("the call's line"),
             &format!(
-                "{STRONG}○{RESET} {SUBDUED}#00{RESET}{STRONG} Edit{RESET} {} {FAILED_OR_REMOVED}-2{RESET} {DONE_OR_ADDED}+1{RESET}",
+                "{STRONG}○{RESET} {SUBDUED}#00{RESET}{STRONG} Edit:{RESET} {} {FAILED_OR_REMOVED}-2{RESET} {DONE_OR_ADDED}+1{RESET}",
                 code_span("a.rs")
             )
         );

@@ -66,6 +66,12 @@ Such a check is free, works offline, and gives the same result on every run.
 It uses a fake rather than canned answers, since a fake behaves like the real API wherever a check meets it, as [Software Engineering at Google](https://abseil.io/resources/swe-book/html/ch13.html#faking-id00043) recommends.
 The fake's answers follow the API's docs, and Claude Code is what reads them, so a check fails once Claude Code stops accepting them.
 
+A check against the fake sees Claude Code with the defaults of its flags, which may differ from what your sessions do.
+Claude Code fetches flags from Anthropic's servers with your login, and they turn its features on and off, like whether a subagent may run in the foreground.
+A check against the fake runs it with a config directory of its own and a key the fake makes up, so the fetch fails, and every flag keeps its default.
+So a change to a flag on Anthropic's side, which needs no new version of Claude Code, can change what your sessions do while every check against the fake still passes.
+The other checks run with your login, so they see the flags your sessions get.
+
 What claudio skips, it relies on in no way, so it needs neither.
 The flag stays as a last net, since Claude Code sends kinds its types never declare, like `session_title_changed`, and catches what neither the types nor the checks foresaw.
 A message that lacks what claudio reads, or holds a value its type has no room for, gets a line in red.
@@ -122,6 +128,7 @@ Ctrl+C stops Claude's turn at once, since a message tells Claude to go on.
 Any other key, or a paste, cancels the wait, however long it lasted, and a loss that changes in between waits for one press more.
 
 `B` on the label row counts the tasks Claude runs in the background, like a shell, up to 9 and then `+`.
+`A` after it counts the subagents that run, in the foreground or in the background, the same way.
 Ctrl+D waits for them to end, and names them on the label row meanwhile, and Ctrl+C there stops them.
 
 Ctrl+L starts a new session, as Claude Code's `/clear` does, and keeps your text in the box, ready to be the new session's first message.
@@ -219,7 +226,7 @@ A call of an MCP tool starts with the server it comes from, as `mcp_server: clau
 Each field takes the same rows on every call of its tool, and a short value leaves them empty, so a field stays in its place from one call to the next, and each value starts in the column its mark sets.
 A longer value ends in `… N more lines · Ctrl+O shows it whole`, a value of one row loses its end to `…`, or its middle if it is a file's path or a URL, and the fields that do not fit end in `… N more fields · Ctrl+O shows them`.
 A call that Claude Code deems dangerous opens on `n`, as Claude Code's own prompt does, and its option to allow reads `allow (dangerous)`, in orange, and waits for a second Enter, which the label row asks for.
-The conversation shows each decision with the call's tag, like `allowed #01 Bash Run the tests`, then your words, when you gave them.
+The conversation shows each decision with the call's tag, like `allowed #01 Bash: Run the tests`, then your words, when you gave them.
 
 ## Design
 
@@ -245,6 +252,18 @@ The test is whether it would matter to someone reading the scrollback later.
 Color never carries meaning alone: whatever a color says, a character says too, so the scrollback reads the same without color, as once copied.
 A tool call's line, for one, shows Claude's description of the call for a tool that has one, like Bash, and otherwise the call's input as code, in backticks, as Markdown marks literal text.
 Ctrl+O shows the whole input, like Bash's command.
+
+Each tool call's line starts with its tag, like `#0a`, which its result line repeats.
+
+A subagent shows as the call of Claude's that starts it, named by that call's tag, and a line as it ends, which counts its calls, like `✓ #0a Agent: completed · 12 calls`, or `✗` with `failed` or `stopped`.
+The call names the subagent's type too when it is not the default `general-purpose`, like `○ #0a Agent: code-reviewer · Review the diff`, since such a subagent runs with a prompt and tools of its own.
+Whether a subagent runs in the foreground is Claude Code's choice: the checks saw claudio's Claude Code keep one there when Claude asks for it, while Claude Code's interactive mode sends every subagent to the background.
+Its calls and their results show only in the full view, tagged like `#0a#03`, since what it did shows in what it reports back to Claude, as in Claude Code, so a search there for `#0a` finds all it did.
+Its text stays out, as Claude Code leaves it out unless asked with `--forward-subagent-text`.
+A subagent that Claude resumes, with SendMessage, keeps its tag: the call names it, like `○ #0f SendMessage: #0a`, and the line of the resumed run's end is that call's, like `✓ #0f SendMessage: completed · 3 calls`.
+A message to a subagent by the name its Agent call gave it shows the name as written, like `○ #0f SendMessage: reviewer`, rather than the subagent's tag: Claude Code renames a subagent whose name another running one holds, like `reviewer-2`, and frees a name only 30 seconds after its holder ends, as its code in 2.1.322 does, so a tag found by the name could be another subagent's.
+While Claude waits for a call, the label row names its tool and its tag, like `running Bash #03`, and for a subagent in the foreground, counts the others that run in the foreground after it, like `running Agent #0a +2`, and `+N` for 10 or more.
+Only the subagents that Claude starts show, since Claude Code does not tell the calls of a subagent that another one starts.
 
 A command that runs in the background, as Claude asks or as a message you send while it runs moves it there, keeps its call's tag to the end.
 Its result line says `◌ #00 Bash: running in background`, and once it ends, a line says how, like `✓ #00 Bash: completed`, or `✗` with `failed` or `stopped`.

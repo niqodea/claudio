@@ -47,7 +47,7 @@ Each rule names its source, or says it is claudio's own.
 
 ## Label row
 
-- Put each indicator in its group, with `│` between groups: the budgets, which tell how much room is left, as `T`, `S` and `W`, then the activity, which tells what happens now, as `Y`, `B` and what Claude does, `idle` included. Items close together read as one group, and space or a line sets groups apart. [NN/g](https://www.nngroup.com/articles/gestalt-proximity/)
+- Put each indicator in its group, with `│` between groups: the budgets, which tell how much room is left, as `T`, `S` and `W`, then the activity, which tells what happens now, as `Y`, `B`, `A` and what Claude does, `idle` included. Items close together read as one group, and space or a line sets groups apart. [NN/g](https://www.nngroup.com/articles/gestalt-proximity/)
 - Always show what Claude does, `idle` too, since the user decides their next step by it. [NN/g](https://www.nngroup.com/articles/visibility-system-status/)
 - Within a group, put first what needs the user, and among the budgets, the narrowest first, since attention leans left. [NN/g](https://www.nngroup.com/articles/horizontal-attention-leans-left/)
 - Keep what holds for the whole session on the left, and what holds for the moment, like where the keys go, the box's vi mode or the command line, and a half-typed vi command, at the right end, with the mode's letter at the edge, so it stays in place while the command's keys grow leftward from it. [VS Code](https://code.visualstudio.com/api/ux-guidelines/status-bar)

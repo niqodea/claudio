@@ -269,6 +269,9 @@ A message to a subagent by the name its Agent call gave it shows the name as wri
 While Claude waits for a call, the label row names its tool and its tag, like `running Bash #03`, and for a subagent in the foreground, counts the others that run in the foreground after it, like `running Agent #0a +2`, and `+N` for 10 or more.
 Only the subagents that Claude starts show, since Claude Code does not tell the calls of a subagent that another one starts.
 
+A message you send while Claude waits for a call moves the call's task to the background, a command's or a subagent's alike, where it goes on, and Claude reads your message at once.
+A subagent's own calls stay as they are, so its work goes on as it was.
+
 A command that runs in the background, as Claude asks or as a message you send while it runs moves it there, keeps its call's tag to the end.
 Its result line says `◌ #00 Bash: running in background`, and once it ends, a line says how, like `✓ #00 Bash: completed`, or `✗` with `failed` or `stopped`.
 A call that names the task, like TaskStop's, names it by that tag too.

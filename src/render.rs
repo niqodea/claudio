@@ -271,6 +271,20 @@ impl Output {
         &self.background_tasks
     }
 
+    /// The calls of Claude's own whose tasks run in the foreground, which Claude waits on, by
+    /// their tool uses' ids. A subagent's calls belong to the subagent's run.
+    pub fn foreground_calls(&self) -> Vec<String> {
+        (self.call_tasks.iter())
+            .filter(|(call, task)| {
+                !task.is_backgrounded
+                    && task.end.is_none()
+                    && (self.pending_calls.get(*call))
+                        .is_some_and(|call| matches!(call.tag, Tag::Claude(_)))
+            })
+            .map(|(call, _)| call.clone())
+            .collect()
+    }
+
     /// The subagents that run, in the foreground or in the background.
     pub fn running_agents(&self) -> usize {
         self.subagents.running()
@@ -1653,6 +1667,17 @@ mod tests {
         );
         assert_eq!(lines[4], format!("✗ {SUBDUED}#00 Bash: stopped{RESET}"));
         assert!(lines[5].starts_with(&format!("✓ {SUBDUED}#01 TaskStop: ")));
+    }
+
+    #[test]
+    fn only_claude_s_own_calls_in_the_foreground_wait_for_a_move() {
+        let mut output = output_after_message();
+        let lines = contract::moved_subagent();
+        // The subagent's call and start, then its own command's call and start
+        show_lines(&mut output, &lines[..4]);
+        assert_eq!(output.foreground_calls(), ["toolu_agent"]);
+        show_lines(&mut output, &lines[4..]);
+        assert_eq!(output.foreground_calls(), Vec::<String>::new());
     }
 
     #[test]

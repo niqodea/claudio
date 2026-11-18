@@ -286,15 +286,26 @@ impl<'a> Conversation<'a> {
         self.send(&Command::Answer(ask, answer))
     }
 
-    /// Shows the message and sends it. While Claude works, Claude Code makes way for it, as for
-    /// a message sent with its own send-now key. Send now cancels a question that waits, and
-    /// claudio keeps a cancelled question, so callers refuse every waiting question first.
+    /// Shows the message and sends it. While Claude works, every task Claude waits on moves to
+    /// the background, where it goes on, and Claude Code then makes way for the message, as for
+    /// one sent with its own send-now key. Claude Code alone moves only some kinds of task, and
+    /// stops the turn with the others, subagents among them. Send now cancels a question that
+    /// waits, and claudio keeps a cancelled question, so callers refuse every waiting question
+    /// first.
     fn send_message(&mut self, text: &str) -> Result<(), String> {
         let is_working = lock(&self.session.shared).output.status() != Status::Idle;
         lock(&self.session.shared).output.show_message(text);
         let id = Uuid::new_v4().to_string();
         self.send(&Command::Message { id: &id, text })?;
         if is_working {
+            let calls = lock(&self.session.shared).output.foreground_calls();
+            for call in &calls {
+                let request_id = self.next_request_id();
+                self.send(&Command::Background {
+                    request_id,
+                    tool_use_id: call,
+                })?;
+            }
             lock(&self.session.shared)
                 .output
                 .note_interrupt(Interruption::Message);

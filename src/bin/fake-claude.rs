@@ -44,6 +44,7 @@ fn main() {
         has_started: false,
         sends_states: env::var_os("CLAUDE_CODE_SDK_READS_SESSION_STATE").is_some(),
         on_interrupt: Vec::new(),
+        on_background: Vec::new(),
         asks_waiting: 0,
     };
     for line in io::stdin().lock().lines().map_while(Result::ok) {
@@ -63,14 +64,17 @@ struct Fake {
     sends_states: bool,
     /// The lines of a turn that waits for an interrupt, which ends it.
     on_interrupt: Vec<String>,
+    /// The lines of a turn that waits for a move of its call to the background, which ends it.
+    on_background: Vec<String>,
     /// How many requests of the turn that asks wait for their answers.
     asks_waiting: usize,
 }
 
 impl Fake {
-    fn answer(&mut self, message: &Value) {
-        let request = &message["request"];
-        match request["subtype"].as_str() {
+    /// Answers a control request, and returns whether the request ended the turn that waited
+    /// for it.
+    fn answer_request(&mut self, message: &Value) -> bool {
+        match message["request"]["subtype"].as_str() {
             Some("initialize") => send(&contract::initialize_response(&account())),
             Some("get_context_usage") => respond(message, &context_usage()),
             Some("get_usage") => respond(message, &plan_usage()),
@@ -78,9 +82,22 @@ impl Fake {
                 for line in std::mem::take(&mut self.on_interrupt) {
                     send(&line);
                 }
-                return self.end_turn();
+                self.end_turn();
+                return true;
+            }
+            Some("background_tasks") if !self.on_background.is_empty() => {
+                let lines = std::mem::take(&mut self.on_background);
+                self.send_task(&lines, 3);
+                return true;
             }
             _ => {}
+        }
+        false
+    }
+
+    fn answer(&mut self, message: &Value) {
+        if self.answer_request(message) {
+            return;
         }
         // The last answer to a turn's requests ends the turn
         let answered = message["response"]["request_id"].as_str();
@@ -140,6 +157,9 @@ impl Fake {
             LONG_LINE_MESSAGE => return self.send_long_line(),
             contract::MOVED_CALL_MESSAGE => {
                 return self.wait_for_interrupt(&contract::moved_call());
+            }
+            contract::MOVED_SUBAGENT_MESSAGE => {
+                return self.wait_for_background(&contract::moved_subagent());
             }
             contract::STOPPED_CALL_MESSAGE => {
                 return self.wait_for_interrupt(&contract::stopped_call());
@@ -219,6 +239,16 @@ impl Fake {
         let (call, rest) = lines.split_first().expect("a call");
         send(call);
         self.on_interrupt = rest.to_vec();
+    }
+
+    /// Sends the subagent's call and start, and its command's, which start `lines`, and keeps
+    /// the rest for the move to the background that ends the turn.
+    fn wait_for_background(&mut self, lines: &[String]) {
+        let (start, rest) = lines.split_at(4);
+        for line in start {
+            send(line);
+        }
+        self.on_background = rest.to_vec();
     }
 
     fn end_turn(&self) {

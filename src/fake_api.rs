@@ -9,8 +9,8 @@
 //!   the prompt, and one that asks `<prompt> in a background subagent` gets one that runs it in
 //!   the background
 //! - a subagent's turn, which offers `SubagentHandback`, whose last user message says `Reply ok`,
-//!   alone or in a message sent to it, gets a call of `SubagentHandback` with the report `ok`,
-//!   which ends the subagent
+//!   alone or in a message sent to it, or holds a tool's result, gets a call of
+//!   `SubagentHandback` with the report `ok`, which ends the subagent
 //! - a turn whose last user message asks `Resume <agent id> with SendMessage` gets a call of
 //!   `SendMessage` to the subagent, whose message says `Reply ok`
 //! - a turn whose last user message asks `Stop <task id> with TaskStop` gets a call of `TaskStop`
@@ -187,11 +187,11 @@ fn reply(request: &Value, classifier_delay: Duration) -> Result<(Value, &'static
     let says_ok = says("Reply ok");
     // A message sent to a subagent comes inside a block that names its sender
     let is_sent_ok = texts.iter().any(|text| text.contains("Reply ok"));
-    if hands_back && is_sent_ok {
+    let has_result = blocks.iter().any(|block| block["type"] == "tool_result");
+    if hands_back && (is_sent_ok || has_result) {
         let call = json!({"type": "tool_use", "id": id, "name": "SubagentHandback", "input": {"message": "ok"}});
         return Ok((call, "tool_use"));
     }
-    let has_result = blocks.iter().any(|block| block["type"] == "tool_result");
     let is_notification = texts
         .iter()
         .any(|text| text.contains("<task-notification>") || text.contains("<agent-message "));

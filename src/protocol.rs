@@ -336,6 +336,19 @@ pub enum Command<'a> {
     Interrupt {
         request_id: String,
     },
+    /// Moves the task of the call `tool_use_id` to the background, and leaves the tasks of other
+    /// calls as they are, a subagent's own calls among them. Claude Code answers with success
+    /// for a call with no task that runs in the foreground too, and refuses the request in a
+    /// session whose background tasks are turned off, a refusal that ends claudio's session with
+    /// Claude Code's reason.
+    ///
+    /// Ref: `SDKControlBackgroundTasksRequest` in `sdk.d.ts`
+    /// Undocumented: [`crate::contract::a_call_moved_by_its_id_makes_way_for_send_now`], for the
+    /// move ending before a send now sent right after it
+    Background {
+        request_id: String,
+        tool_use_id: &'a str,
+    },
     /// Has Claude Code make way for the message with this id, which it already holds, as the
     /// send-now key of Claude Code's terminal does: it moves what the running turn waits on to
     /// the background where it can, and stops the turn otherwise. It does nothing when no turn
@@ -421,6 +434,14 @@ impl Command<'_> {
                 "type": "control_request",
                 "request_id": request_id,
                 "request": {"subtype": "interrupt"},
+            }),
+            Command::Background {
+                request_id,
+                tool_use_id,
+            } => json!({
+                "type": "control_request",
+                "request_id": request_id,
+                "request": {"subtype": "background_tasks", "tool_use_id": tool_use_id},
             }),
             Command::SendNow {
                 request_id,
@@ -817,7 +838,8 @@ fn read_response(request_id: &str, response: Option<Value>) -> Result<Vec<Event>
                 .unwrap_or_else(|error| vec![Event::Incompatible(error)]))
         }
         USAGE_REQUEST_ID => read_plan_usage(response),
-        // The other requests sent are interrupts, whose success needs no word
+        // The other requests sent are interrupts and moves to the background, whose success
+        // needs no word
         _ => Ok(vec![]),
     }
 }

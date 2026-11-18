@@ -42,7 +42,7 @@ pub struct Check {
     pub run: fn(&Path) -> Result<(), String>,
 }
 
-pub const CHECKS: [Check; 14] = [
+pub const CHECKS: [Check; 15] = [
     Check {
         name: "session state comes with its variable",
         is_paid: false,
@@ -77,6 +77,11 @@ pub const CHECKS: [Check; 14] = [
         name: "a call moved to the background is told",
         is_paid: false,
         run: a_call_moved_to_the_background_is_told,
+    },
+    Check {
+        name: "a call moved by its id makes way for send now",
+        is_paid: false,
+        run: a_call_moved_by_its_id_makes_way_for_send_now,
     },
     Check {
         name: "a subagent is told from start to end",
@@ -397,6 +402,129 @@ pub(crate) fn a_call_moved_to_the_background_is_told(program: &Path) -> Result<(
         Ok(lines)
     })?;
     compare(TASK_KINDS, &lines, &moved_call())
+}
+
+/// Seen with Claude Code 2.1.322: a move to the background by a call's id, sent right before a
+/// message with send now, ends before Claude Code reads the send now, which then finds nothing
+/// that runs in the foreground, and spares the subagent the call started. Claude Code alone
+/// stops the turn for a subagent that runs in the foreground, and the subagent with it. The
+/// move leaves the subagent's own command in the foreground, where the subagent waits for it.
+pub(crate) fn a_call_moved_by_its_id_makes_way_for_send_now(program: &Path) -> Result<(), String> {
+    let lines = on_fake(program, Duration::ZERO, |run| {
+        run.send_message(MOVED_SUBAGENT_MESSAGE)?;
+        let mut lines = run.read_until(FREE_TIMEOUT, |line| {
+            line["subtype"] == "task_started" && line["task_type"] == "local_bash"
+        })?;
+        let agent_call = lines
+            .iter()
+            .find(|line| line["subtype"] == "task_started")
+            .map_or("", |line| line["tool_use_id"].as_str().unwrap_or(""));
+        run.send(&protocol::Command::Background {
+            request_id: "claudio-check-background".to_string(),
+            tool_use_id: agent_call,
+        })?;
+        run.send(&protocol::Command::Message {
+            id: "claudio-check-move",
+            text: REPLY_OK_MESSAGE,
+        })?;
+        run.send(&protocol::Command::SendNow {
+            request_id: "claudio-check-send-now".to_string(),
+            message_id: "claudio-check-move",
+        })?;
+        lines.extend(run.read_until(FREE_TIMEOUT, is_no_background_task)?);
+        Ok(lines)
+    })?;
+    compare(TASK_KINDS, &lines, &moved_subagent())
+}
+
+/// The message of the check of a subagent moved by its call's id, whose subagent runs a command
+/// for a while.
+pub const MOVED_SUBAGENT_MESSAGE: &str = "Run sleep 4 with Bash in a subagent";
+
+/// What Claude Code writes, as 2.1.322 did, for a subagent that runs a command in the
+/// foreground, moved to the background by its call's id, without the turns' other lines.
+#[must_use]
+pub fn moved_subagent() -> Vec<String> {
+    let (call, command, handback) = ("toolu_agent", "toolu_command", "toolu_handback");
+    let description = "Run sleep 4 with Bash";
+    let input = json!({
+        "description": description,
+        "prompt": description,
+        "subagent_type": "general-purpose",
+        "run_in_background": false,
+    });
+    let mut command_use = tool_use(
+        command,
+        "Bash",
+        &json!({"command": "sleep 4", "description": "Run sleep 4"}),
+    );
+    let mut command_result = tool_result(command, "");
+    let mut handback_use = tool_use(handback, "SubagentHandback", &json!({"message": "ok"}));
+    let mut handback_result = tool_result(
+        handback,
+        r#"{"success":true,"message":"Report delivered to your caller."}"#,
+    );
+    for line in [
+        &mut command_use,
+        &mut command_result,
+        &mut handback_use,
+        &mut handback_result,
+    ] {
+        line["parent_tool_use_id"] = json!(call);
+        line["agent_id"] = json!(AGENT_TASK_ID);
+    }
+    let agent_tasks = |tasks: Vec<Value>| json!({"type": "system", "subtype": "background_tasks_changed", "tasks": tasks});
+    let lines = [
+        tool_use(call, "Agent", &input),
+        json!({
+            "type": "system",
+            "subtype": "task_started",
+            "task_id": AGENT_TASK_ID,
+            "tool_use_id": call,
+            "description": description,
+            "subagent_type": "general-purpose",
+            "is_backgrounded": false,
+            "spawn_depth": 1,
+            "task_type": "local_agent",
+        }),
+        command_use,
+        task_started(command, "Run sleep 4", false),
+        agent_tasks(vec![json!({
+            "task_id": AGENT_TASK_ID,
+            "task_type": "local_agent",
+            "subagent_type": "general-purpose",
+            "description": description,
+        })]),
+        json!({
+            "type": "system",
+            "subtype": "task_updated",
+            "task_id": AGENT_TASK_ID,
+            "patch": {"is_backgrounded": true},
+        }),
+        tool_result(
+            call,
+            &format!("Async agent launched successfully.\nagentId: {AGENT_TASK_ID}"),
+        ),
+        task_notification(
+            command,
+            "completed",
+            "Background command \"Run sleep 4\" completed (exit code 0)",
+        ),
+        command_result,
+        handback_use,
+        handback_result,
+        json!({
+            "type": "system",
+            "subtype": "task_notification",
+            "task_id": AGENT_TASK_ID,
+            "tool_use_id": call,
+            "status": "completed",
+            "summary": "This agent's report was delivered to you as a message from \"a259478d0d71f063d\" (its SubagentHandback call). Read it there; it is not repeated here.",
+            "output_file": format!("/tmp/claude-1000/tasks/{AGENT_TASK_ID}.output"),
+        }),
+        agent_tasks(Vec::new()),
+    ];
+    lines.iter().map(Value::to_string).collect()
 }
 
 /// Seen with Claude Code 2.1.322: a subagent's task starts with its `Agent` call, as

@@ -42,7 +42,7 @@ pub struct Check {
     pub run: fn(&Path) -> Result<(), String>,
 }
 
-pub const CHECKS: [Check; 15] = [
+pub const CHECKS: [Check; 16] = [
     Check {
         name: "session state comes with its variable",
         is_paid: false,
@@ -57,6 +57,11 @@ pub const CHECKS: [Check; 15] = [
         name: "the paying key is named by its source",
         is_paid: false,
         run: the_paying_key_is_named_by_its_source,
+    },
+    Check {
+        name: "the start lists the commands",
+        is_paid: false,
+        run: the_start_lists_the_commands,
     },
     Check {
         name: "a clear resets the session",
@@ -203,6 +208,26 @@ pub(crate) fn the_paying_key_is_named_by_its_source(program: &Path) -> Result<()
     Ok(())
 }
 
+/// Seen with Claude Code 2.1.322: the answer to `initialize` lists the commands the session
+/// runs, by name, as the init that comes with the first message does, before any message. The
+/// SDK's `supportedCommands` reads them there.
+/// Ref: <https://code.claude.com/docs/en/agent-sdk/slash-commands>, on the commands a session
+/// runs
+pub(crate) fn the_start_lists_the_commands(program: &Path) -> Result<(), String> {
+    let mut run = Run::start(program, &[], &[], &[])?;
+    run.send(&protocol::Command::Initialize)?;
+    run.close_input();
+    let lines = run.read_to_end(FREE_TIMEOUT)?;
+    let lists = events(&texts(&lines)).into_iter().any(|event| {
+        matches!(event, Event::Commands(commands) if commands.iter().any(|name| name == "compact"))
+    });
+    if lists {
+        Ok(())
+    } else {
+        Err("the answer to initialize lists no compact among its commands".to_string())
+    }
+}
+
 #[must_use]
 pub fn subscription_account() -> Value {
     json!({"subscriptionType": "Claude Team", "apiProvider": "firstParty"})
@@ -218,13 +243,19 @@ pub fn auth_token_account() -> Value {
     json!({"tokenSource": "ANTHROPIC_AUTH_TOKEN", "apiProvider": "firstParty"})
 }
 
-/// The answer to `initialize` for `account`.
+/// Some of the commands Claude Code 2.1.322 runs in a session of its own, which the fake lists.
+const COMMANDS: [&str; 5] = ["clear", "compact", "context", "model", "usage"];
+
+/// The answer to `initialize` for `account`, with the commands the session runs.
 #[must_use]
 pub fn initialize_response(account: &Value) -> String {
+    let commands: Vec<Value> = (COMMANDS.iter())
+        .map(|name| json!({"name": name, "description": "", "argumentHint": ""}))
+        .collect();
     let line = json!({
         "type": "control_response",
         "response": {"subtype": "success", "request_id": protocol::INITIALIZE_REQUEST_ID, "response": {
-            "commands": [],
+            "commands": commands,
             "account": account,
         }},
     });
@@ -266,7 +297,7 @@ pub fn clear(cleared: &str, new: &str) -> [String; 3] {
 }
 
 /// The init of the session `session`, which Claude Code sends as the session starts, with the
-/// interrupts it takes.
+/// interrupts it takes and the commands it runs.
 #[must_use]
 pub fn init(session: &str) -> String {
     let line = json!({
@@ -275,6 +306,7 @@ pub fn init(session: &str) -> String {
         "session_id": session,
         "claude_code_version": claude_code::VERSION,
         "capabilities": ["interrupt_send_now_v1"],
+        "slash_commands": COMMANDS,
     });
     line.to_string()
 }

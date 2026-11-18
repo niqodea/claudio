@@ -143,6 +143,7 @@ Text you send that starts with `/` reaches Claude as written, so a `/clear` you 
 
 `:` in normal mode opens the command line on the box's last row, as vim's at the screen's bottom, to write one of Claude Code's commands, while your text waits in the rows above it. The row starts with `command:`, a word rather than vim's lone `:`, so it says what it holds even when the box is empty, as Emacs's `M-x` does, and a longer command takes more of the box's rows.
 You write the command without its `/`, like `compact` or `model sonnet`.
+Tab completes the command's name with the next of the session's commands that start with what you typed, and Shift+Tab with the one before, as on vim's command line, and after the last, Tab brings back what you typed. The commands are those Claude Code lists for the session, its own and your skills, which it tells as the session starts, then again with each session's first message, where a plugin's skills take their plugin's name in front, like `anthropic-skills:pdf`.
 The line edits as the box does in insert mode, and having no normal mode, closes on Esc, as on the session keys. Enter runs it.
 The conversation marks the command as yours, with a line like `›› /model sonnet`, and Claude Code's answer as its reply, as written, like `Set model to Sonnet 5.5 for this session only`.
 claudio handles no command apart from the others, so what one sends shows by its kind, as [What claudio relies on](#what-claudio-relies-on) tells.

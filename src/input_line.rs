@@ -156,6 +156,8 @@ pub struct InputLine {
     /// `/`, while the message waits in the box, none while the command line is closed. It is a
     /// field in insert mode, as the box can be, with no normal mode to leave to, so Esc closes it.
     command_line: Option<Editor>,
+    /// The completion Tab goes through on the command line, none once another key changes it.
+    completion: Option<Completion>,
     /// What the user picks on the question the question view shows.
     pick: Pick,
     /// Whether the last key's answer answered nothing, so the question view held it back, which
@@ -235,6 +237,7 @@ impl InputLine {
             stream,
             editor: Editor::new(""),
             command_line: None,
+            completion: None,
             pick: Draft::new().pick,
             is_empty_warned: false,
             gate: Gate::default(),
@@ -459,8 +462,12 @@ impl InputLine {
         action: Action,
     ) -> Result<Option<Outcome<(), E>>, String> {
         let phase = lock(&self.shared).phase.clone();
+        if !matches!(action, Action::Complete { .. }) {
+            self.completion = None;
+        }
         match action {
             Action::CommandLine => self.command_line = Some(Editor::new("")),
+            Action::Complete { is_backward } => self.complete(is_backward),
             Action::Session(SessionKey::Questions) => return Ok(Some(Outcome::Questions(()))),
             Action::Session(SessionKey::ShowFullView) => self.show_full_view()?,
             Action::Session(SessionKey::ShowStatus) => self.show_status()?,
@@ -490,6 +497,36 @@ impl InputLine {
             | Action::Ignore => {}
         }
         Ok(None)
+    }
+
+    /// Completes the command's name on the command line with the next command it starts, or
+    /// with the one before for `is_backward`, in their order, and after the last, with what the
+    /// user typed, as vim's command line does. A line with a space has its name whole already,
+    /// and one no command starts stays as it is.
+    fn complete(&mut self, is_backward: bool) {
+        let Some(line) = &mut self.command_line else {
+            return;
+        };
+        let completion = (self.completion.take()).unwrap_or_else(|| Completion {
+            typed: line.text(),
+            shown: None,
+        });
+        if completion.typed.contains(char::is_whitespace) {
+            return;
+        }
+        let commands = lock(&self.shared).commands.clone();
+        let matches: Vec<&String> = (commands.iter())
+            .filter(|command| command.starts_with(&completion.typed))
+            .collect();
+        if matches.is_empty() {
+            return;
+        }
+        let shown = next_match(completion.shown, matches.len(), is_backward);
+        line.replace(shown.map_or(completion.typed.as_str(), |index| matches[index]));
+        self.completion = Some(Completion {
+            shown,
+            ..completion
+        });
     }
 
     /// What the keys depend on in the input line.
@@ -631,6 +668,7 @@ impl InputLine {
     /// question open to answers.
     fn paste(&mut self, text: &str) {
         self.gate.reset();
+        self.completion = None;
         // The command line holds one line
         if let Some(line) = &mut self.command_line {
             line.paste(&text.replace(|c: char| c.is_control(), " "));
@@ -1430,6 +1468,24 @@ fn request_names(view: &View) -> String {
     )
 }
 
+/// Where Tab is among the commands that what the user typed on the command line starts.
+struct Completion {
+    typed: String,
+    /// The index of the command the line shows among those `typed` starts, none for `typed`.
+    shown: Option<usize>,
+}
+
+/// The match after `shown` among `count`, or the one before it for `is_backward`, with none,
+/// the text the user typed, between the last and the first, so the user can get back to it.
+fn next_match(shown: Option<usize>, count: usize, is_backward: bool) -> Option<usize> {
+    match (shown, is_backward) {
+        (None, false) => Some(0),
+        (None, true) => count.checked_sub(1),
+        (Some(index), false) => Some(index + 1).filter(|&next| next < count),
+        (Some(index), true) => index.checked_sub(1),
+    }
+}
+
 /// A row of the box, on the bar: a row of the text, or past the text's end, a dim `~`, as vim
 /// marks the rows past a buffer's end, so an empty line of the text shows apart from no line.
 fn box_line(text: Option<&str>, columns: NonZeroUsize) -> ScreenRow {
@@ -2180,6 +2236,18 @@ mod tests {
         assert_eq!(rows.own, 14);
         assert_eq!((rows.options, rows.label), (10, 9));
         assert_eq!(rows.stack_top, 0);
+    }
+
+    #[test]
+    fn tab_goes_through_the_matches_and_back_to_what_was_typed() {
+        let forward: Vec<_> = std::iter::successors(Some(next_match(None, 2, false)), |&shown| {
+            Some(next_match(shown, 2, false))
+        })
+        .take(4)
+        .collect();
+        assert_eq!(forward, [Some(0), Some(1), None, Some(0)]);
+        assert_eq!(next_match(None, 2, true), Some(1));
+        assert_eq!(next_match(Some(0), 2, true), None);
     }
 
     #[test]

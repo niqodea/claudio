@@ -107,6 +107,9 @@ pub enum Event {
     SessionId(String),
     /// The version of Claude Code.
     Version(String),
+    /// The names of the commands the session runs, without their `/`, Claude Code's own and the
+    /// user's skills, as each session tells them as it starts.
+    Commands(Vec<String>),
     /// The context was cleared, which ends the session with this id, the one `--resume` takes
     /// to go back to it. A new session follows, whose id arrives next.
     Reset {
@@ -728,9 +731,16 @@ fn read_system(system: System, line: &str) -> Class {
         System::Init {
             session_id,
             claude_code_version,
+            slash_commands,
         } => Shown(vec![
             Event::SessionId(session_id),
             Event::Version(claude_code_version),
+            // The docs' examples name them with their `/` and without
+            Event::Commands(
+                (slash_commands.iter())
+                    .map(|name| name.trim_start_matches('/').to_string())
+                    .collect(),
+            ),
         ]),
         System::SessionStateChanged { state } => Shown(vec![Event::State(state)]),
         System::BackgroundTasksChanged { tasks } => Shown(vec![Event::BackgroundTasks(tasks)]),
@@ -800,7 +810,7 @@ fn read_system(system: System, line: &str) -> Class {
         System::ThinkingTokens => Skipped("claudio leaves Claude's thinking out"),
         System::SessionTitleChanged => Skipped("claudio shows the session's title nowhere"),
         System::CommandsChanged => {
-            Skipped("the user types a command whole, so claudio needs no list of them")
+            Skipped("the init that starts each session lists the commands to complete")
         }
         System::TaskUpdated { .. } => {
             Skipped("a task's other changes, like its end, come in messages of their own")
@@ -831,7 +841,7 @@ fn read_limits(info: RateLimitInfo) -> Event {
 /// The events in the response to one of the requests sent before the first message.
 fn read_response(request_id: &str, response: Option<Value>) -> Result<Vec<Event>, String> {
     match request_id {
-        INITIALIZE_REQUEST_ID => read_account(response),
+        INITIALIZE_REQUEST_ID => read_initialize(response),
         SETTINGS_REQUEST_ID => read_settings(response),
         CONTEXT_REQUEST_ID => {
             Ok(read_context_usage(response)
@@ -844,17 +854,26 @@ fn read_response(request_id: &str, response: Option<Value>) -> Result<Vec<Event>
     }
 }
 
-/// The key that pays for the session, none when the subscription does.
+/// What the session's start tells: the key that pays for it, none when the subscription does,
+/// and the commands it runs, which the init that comes with the first message tells again.
 ///
-/// Undocumented: [`crate::contract::the_paying_key_is_named_by_its_source`]
-fn read_account(response: Option<Value>) -> Result<Vec<Event>, String> {
+/// Undocumented: [`crate::contract::the_paying_key_is_named_by_its_source`],
+/// [`crate::contract::the_start_lists_the_commands`]
+fn read_initialize(response: Option<Value>) -> Result<Vec<Event>, String> {
     let initialize: Initialize = serde_json::from_value(response.unwrap_or_default())
         .map_err(|error| format!("Unreadable account from Claude Code: {error}"))?;
     let account = initialize.account;
     let key = account.api_key_source.or(account
         .token_source
         .filter(|source| source == "ANTHROPIC_AUTH_TOKEN"));
-    Ok(key.map(Event::PayingKey).into_iter().collect())
+    let commands = (initialize.commands.into_iter())
+        .map(|command| command.name)
+        .collect();
+    Ok(key
+        .map(Event::PayingKey)
+        .into_iter()
+        .chain([Event::Commands(commands)])
+        .collect())
 }
 
 /// The settings files Claude Code skipped, none when it read them all.
@@ -1071,10 +1090,15 @@ impl From<Window> for Limit {
 #[derive(Deserialize)]
 #[serde(tag = "subtype", rename_all = "snake_case")]
 enum System {
-    /// Carries the id of the session Claude Code runs, and Claude Code's version.
+    /// Carries the id of the session Claude Code runs, Claude Code's version, and the commands
+    /// the session runs, those that need no interactive terminal, built in or the user's own.
+    /// Ref: <https://code.claude.com/docs/en/agent-sdk/slash-commands>, on the commands the init
+    /// lists
     Init {
         session_id: String,
         claude_code_version: String,
+        #[serde(default)]
+        slash_commands: Vec<String>,
     },
     /// Sent as a turn starts and ends.
     ///
@@ -1399,6 +1423,14 @@ enum Reply {
 #[derive(Deserialize)]
 struct Initialize {
     account: Account,
+    #[serde(default)]
+    commands: Vec<CommandName>,
+}
+
+/// A command the session runs, by the name it takes after `/`.
+#[derive(Deserialize)]
+struct CommandName {
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -1644,9 +1676,9 @@ mod tests {
     fn paying_key(account: &Value) -> Option<String> {
         let events = read_events(&contract::initialize_response(account)).expect("a readable line");
         match events.as_slice() {
-            [] => None,
-            [Event::PayingKey(key)] => Some(key.clone()),
-            _ => panic!("a paying key at most"),
+            [Event::Commands(_)] => None,
+            [Event::PayingKey(key), Event::Commands(_)] => Some(key.clone()),
+            _ => panic!("a paying key at most, then the commands"),
         }
     }
 
@@ -1678,11 +1710,13 @@ mod tests {
             "session_id": "a1",
             "claude_code_version": "2.1.322",
             "tools": [],
+            "slash_commands": ["compact", "/model"],
         });
         let events = read_events(&line.to_string()).expect("a readable line");
         assert!(matches!(
             events.as_slice(),
-            [Event::SessionId(id), Event::Version(version)] if id == "a1" && version == "2.1.322"
+            [Event::SessionId(id), Event::Version(version), Event::Commands(commands)]
+                if id == "a1" && version == "2.1.322" && commands == &["compact", "model"]
         ));
     }
 

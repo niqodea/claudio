@@ -68,6 +68,28 @@ struct Shared {
     model: Option<String>,
     /// The version of Claude Code, once it tells it.
     claude_code_version: Option<String>,
+    /// The names of the commands the session runs, in order, which the command line completes.
+    commands: Vec<String>,
+}
+
+impl Shared {
+    /// Notes Claude Code's version, and says when it is not the one checked to work. Each
+    /// session tells it, which a clear starts anew, so only the first counts.
+    fn note_version(&mut self, version: String) {
+        if self.claude_code_version.is_some() {
+            return;
+        }
+        if version != claude_code::VERSION {
+            self.output.show_unchecked_version(&version);
+        }
+        self.claude_code_version = Some(version);
+    }
+
+    /// Notes the commands the session runs, in order, for the command line to complete.
+    fn note_commands(&mut self, mut commands: Vec<String>) {
+        commands.sort();
+        self.commands = commands;
+    }
 }
 
 /// Runs claudio, with the arguments it was started with, and ends with the exit code it ends
@@ -143,6 +165,7 @@ fn run() -> Result<ExitCode, String> {
         session_id: None,
         model: None,
         claude_code_version: None,
+        commands: Vec::new(),
     }));
     let break_signal = Arc::new(AtomicBool::new(false));
     let (input_sender, inputs) = mpsc::channel();
@@ -322,14 +345,8 @@ fn read_claude(from_claude: ChildStdout, shared: &Mutex<Shared>, forward: &dyn F
                 Event::SettingsErrors(errors) => shared.output.show_settings_errors(&errors),
                 Event::PayingKey(key) => shared.output.show_paying_key(&key),
                 Event::SessionId(id) => shared.session_id = Some(id),
-                // Each session tells it, which a clear starts anew
-                Event::Version(version) if shared.claude_code_version.is_none() => {
-                    if version != claude_code::VERSION {
-                        shared.output.show_unchecked_version(&version);
-                    }
-                    shared.claude_code_version = Some(version);
-                }
-                Event::Version(_) => {}
+                Event::Version(version) => shared.note_version(version),
+                Event::Commands(commands) => shared.note_commands(commands),
                 Event::Reset { previous_session } => {
                     shared.output.show_reset(&previous_session);
                     shared.context.reset();

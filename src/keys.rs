@@ -443,6 +443,7 @@ impl Reading for Writing {
                 | SessionKey::Up,
             )
             | Action::CommandLine
+            | Action::Complete { .. }
             | Action::Edit
             | Action::Ignore => None,
         }
@@ -476,6 +477,7 @@ impl Reading for Answering {
             | Action::Send
             | Action::Run
             | Action::CommandLine
+            | Action::Complete { .. }
             | Action::Edit
             | Action::Ignore => None,
         }
@@ -506,6 +508,7 @@ impl Reading for Ending {
             | Action::Send
             | Action::Run
             | Action::CommandLine
+            | Action::Complete { .. }
             | Action::Edit
             | Action::Ignore => None,
         }
@@ -629,6 +632,11 @@ pub enum Action {
     CommandLine,
     /// Runs the command on the command line.
     Run,
+    /// Completes the command's name on the command line, with the next of the commands it
+    /// starts, or with the one before for `is_backward`, as Tab and Shift+Tab do on vim's.
+    Complete {
+        is_backward: bool,
+    },
     /// Edits the text with the input box's vi keys, or in the question view, acts on the options
     /// or the input box.
     Edit,
@@ -637,7 +645,8 @@ pub enum Action {
 
 /// What `key` does in `phase`, on `input`. Enter and the session keys do their job even while a
 /// vi command is half typed, since they are not vi keys. `:` on a message opens the command
-/// line from the idle box, as from vim's normal mode, and Enter runs it. Ctrl+D ends only an
+/// line from the idle box, as from vim's normal mode, Enter runs it, and Tab and Shift+Tab
+/// complete the command's name. Ctrl+D ends only an
 /// empty input, as in a shell, so a draft is never lost to it.
 /// Ref: <https://www.gnu.org/software/bash/manual/html_node/Commands-For-Text.html>, on Ctrl+D
 /// as the end of input only on an empty line
@@ -652,6 +661,13 @@ pub fn action(phase: &Phase, key: &KeyEvent, input: Input) -> Action {
         (_, Some(session_key)) => Action::Session(session_key),
         (Phase::Writing(_), None) if key.code == KeyCode::Enter && input.is_commanding => {
             Action::Run
+        }
+        (Phase::Writing(_), None)
+            if input.is_commanding && matches!(key.code, KeyCode::Tab | KeyCode::BackTab) =>
+        {
+            Action::Complete {
+                is_backward: key.code == KeyCode::BackTab,
+            }
         }
         (_, None) if key.code == KeyCode::Enter => Action::Send,
         (Phase::Writing(_), None)
@@ -736,7 +752,8 @@ mod tests {
     }
 
     #[test]
-    fn colon_opens_the_command_line_from_the_idle_box_of_a_message_and_enter_runs_it() {
+    fn colon_opens_the_command_line_from_the_idle_box_of_a_message_enter_runs_it_and_tab_completes()
+    {
         let idle = Input {
             is_idle: true,
             ..input(false)
@@ -753,6 +770,13 @@ mod tests {
         assert_eq!(action(&writing(0), &colon, commanding), Action::Edit);
         let enter = plain(KeyCode::Enter);
         assert_eq!(action(&writing(0), &enter, commanding), Action::Run);
+        let tab = plain(KeyCode::Tab);
+        let back_tab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        let complete = |is_backward| Action::Complete { is_backward };
+        assert_eq!(action(&writing(0), &tab, commanding), complete(false));
+        assert_eq!(action(&writing(0), &back_tab, commanding), complete(true));
+        // Tab on the box, with the command line closed, is the box's
+        assert_eq!(action(&writing(0), &tab, idle), Action::Edit);
     }
 
     #[test]

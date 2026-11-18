@@ -47,7 +47,7 @@ use std::time::Instant;
 use config::Config;
 use context::Context;
 use input_line::{InputLine, final_line};
-use keys::Phase;
+use keys::{Phase, Writing};
 use limits::Limits;
 use protocol::{Event, read_events, repeats_a_message};
 use render::Output;
@@ -130,7 +130,7 @@ fn run() -> Result<ExitCode, String> {
         .tempfile()
         .map_err(|error| format!("cannot create the file of the full view: {error}"))?;
     let shared = Arc::new(Mutex::new(Shared {
-        phase: Phase::Writing { waiting: 0 },
+        phase: Phase::Writing(Writing { waiting: 0 }),
         output: Output::new(
             full_view
                 .reopen()

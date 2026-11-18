@@ -36,7 +36,9 @@ use crate::cut::{
     self, ScreenRow, Whole, colors_at, cut, cut_before_hidden, cut_path, visible_width,
 };
 use crate::keys::{
-    self, Action, BLOCK_ROWS, Field, Mark, PREVIEWED_QUESTION_ROWS, Phase, SessionKey, Tone, View,
+    self, Action, Answering, BLOCK_ROWS, Confirmed, Effect, Ending, Field, Gate, Mark, OnEnding,
+    OnMessage, OnQuestion, PREVIEWED_QUESTION_ROWS, Phase, Reading, SessionKey, Tone, View,
+    Writing,
 };
 use crate::limits::{Level, limit_level};
 use crate::picker::{self, Cursor, Draft, Form, Move, Pick, question_name, request_name};
@@ -75,39 +77,61 @@ macro_rules! put {
 
 /// How reading the input line ended, with `D`, the draft: the text on the line, or the pick of
 /// the question the question view shows.
-pub enum Outcome<D> {
-    /// The user sends the text on the line, or picks an answer.
-    Send(D),
-    /// The user stops Claude's turn, with the draft.
-    Stop(D),
+pub enum Outcome<D, E> {
+    /// The key's effect on the session, which the gate let through, with the draft.
+    Act(D, Confirmed<E>),
     /// The user opens the questions that wait, or goes back from them to the message, with the
     /// draft of what the user leaves.
     Questions(D),
     /// The user moves to another question, with the draft of the question left.
     Go(D, Move),
-    /// The user ends the session.
-    End,
-    /// The user clears the context, with the draft, which stays.
-    Clear(D),
-    /// The user runs one of Claude Code's commands, written without its `/`, with the draft,
-    /// which stays.
-    Run(D, String),
     /// Claude Code asked something, which the main thread acts on first, with the draft.
     Break(D),
 }
 
-impl Outcome<()> {
+impl<E> Outcome<(), E> {
     /// The same outcome, with `draft`.
-    fn with<D>(self, draft: D) -> Outcome<D> {
+    fn with<D>(self, draft: D) -> Outcome<D, E> {
         match self {
-            Outcome::Send(()) => Outcome::Send(draft),
-            Outcome::Stop(()) => Outcome::Stop(draft),
+            Outcome::Act((), confirmed) => Outcome::Act(draft, confirmed),
             Outcome::Questions(()) => Outcome::Questions(draft),
             Outcome::Go((), to) => Outcome::Go(draft, to),
-            Outcome::End => Outcome::End,
-            Outcome::Clear(()) => Outcome::Clear(draft),
-            Outcome::Run((), command) => Outcome::Run(draft, command),
             Outcome::Break(()) => Outcome::Break(draft),
+        }
+    }
+}
+
+/// How a reading's keys act: on the input line, and on the session through the gate, with the
+/// effects the reading decides.
+trait Keys: Reading {
+    /// Acts on `key`, of `action`, in `line`, with an outcome for one that ends the reading.
+    fn key(
+        &self,
+        line: &mut InputLine,
+        key: KeyEvent,
+        action: Action,
+    ) -> Result<Option<Outcome<(), Self::Effect>>, String> {
+        line.pass_reading(self, key, action)
+    }
+}
+
+impl Keys for Writing {}
+
+impl Keys for Ending {}
+
+impl Keys for Answering {
+    /// Enter and the keys that edit and move act through the pick, and the other keys as on a
+    /// message.
+    fn key(
+        &self,
+        line: &mut InputLine,
+        key: KeyEvent,
+        action: Action,
+    ) -> Result<Option<Outcome<(), OnQuestion>>, String> {
+        let before = line.pick.clone();
+        match line.press_pick(&self.view, &key, action) {
+            Some(effect) => Ok(line.pass_pick(&self.view, &key, effect, before)),
+            None => line.pass_reading(self, key, action),
         }
     }
 }
@@ -136,8 +160,9 @@ pub struct InputLine {
     /// Whether the last key's answer answered nothing, so the question view held it back, which
     /// the label row says.
     is_empty_warned: bool,
-    /// The key pressed once that waits for its second press in a row, which the label row says.
-    confirming: Option<Confirming>,
+    /// The confirmation every key passes, which holds the key pressed once that waits for its
+    /// second press in a row, which the label row says.
+    gate: Gate,
     layout: Layout,
     /// The first row of the text the box shows.
     scroll: u16,
@@ -211,7 +236,7 @@ impl InputLine {
             command_line: None,
             pick: Draft::new().pick,
             is_empty_warned: false,
-            confirming: None,
+            gate: Gate::default(),
             layout,
             scroll: 0,
             pending: String::new(),
@@ -227,8 +252,28 @@ impl InputLine {
         })
     }
 
-    /// Reads the input line, starting from `draft`, while the conversation goes on above it.
-    pub fn read(&mut self, phase: Phase, draft: &str) -> Result<Outcome<String>, String> {
+    /// Reads a message, starting from `draft`, while `waiting` questions of Claude's wait and the
+    /// conversation goes on above it.
+    pub fn read(
+        &mut self,
+        waiting: usize,
+        draft: &str,
+    ) -> Result<Outcome<String, OnMessage>, String> {
+        self.read_text(&Writing { waiting }, draft)
+    }
+
+    /// Reads the keys of the session's end, whose box stays empty, while Claude finishes its
+    /// work.
+    pub fn read_ending(&mut self) -> Result<Outcome<String, OnEnding>, String> {
+        self.read_text(&Ending, "")
+    }
+
+    /// Reads the box, starting from `draft`, for `reading`.
+    fn read_text<R: Keys>(
+        &mut self,
+        reading: &R,
+        draft: &str,
+    ) -> Result<Outcome<String, R::Effect>, String> {
         // A command typed for another line has nothing left to act on
         self.editor.cancel();
         // The box held an answer in the question view, whose mode and cursor are the answer's,
@@ -236,14 +281,18 @@ impl InputLine {
         if self.in_view || self.text() != draft {
             self.editor.replace(draft);
         }
-        let outcome = self.run(phase)?;
+        let outcome = self.run(reading)?;
         self.command_line = None;
         Ok(outcome.with(self.text()))
     }
 
     /// Reads what the user picks and writes on the question that `view` shows, starting from
     /// `draft`.
-    pub fn read_question(&mut self, view: View, draft: Draft) -> Result<Outcome<Draft>, String> {
+    pub fn read_question(
+        &mut self,
+        view: View,
+        draft: Draft,
+    ) -> Result<Outcome<Draft, OnQuestion>, String> {
         self.editor.cancel();
         self.editor.replace(&draft.text);
         // The box waits in normal mode while the cursor is on the list
@@ -251,19 +300,22 @@ impl InputLine {
             self.editor.press(&escape());
         }
         self.pick = draft.pick;
-        let outcome = self.run(Phase::Answering(Box::new(view)))?;
+        let outcome = self.run(&Answering {
+            view: Box::new(view),
+        })?;
         Ok(outcome.with(Draft {
             pick: self.pick.clone(),
             text: self.text(),
         }))
     }
 
-    /// Reads keys in `phase` until one ends the reading.
-    fn run(&mut self, phase: Phase) -> Result<Outcome<()>, String> {
+    /// Reads keys for `reading` until one ends the reading.
+    fn run<R: Keys>(&mut self, reading: &R) -> Result<Outcome<(), R::Effect>, String> {
+        let phase = reading.phase();
         let answers = matches!(phase, Phase::Answering(_));
         lock(&self.shared).phase = phase;
         // What a waiting key loses can change between readings, as with a question that arrives
-        self.confirming = None;
+        self.gate.reset();
         if answers != self.in_view {
             self.switch_screen()?;
         }
@@ -283,7 +335,8 @@ impl InputLine {
             }
             match event::read().map_err(|error| cannot_read_terminal(&error))? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if let Some(outcome) = self.key(key)? {
+                    let action = self.begin_key(&key);
+                    if let Some(outcome) = reading.key(self, key, action)? {
                         return Ok(outcome);
                     }
                 }
@@ -343,72 +396,97 @@ impl InputLine {
         Ok(())
     }
 
-    /// Acts on a key, with an outcome for one that ends the reading.
-    fn key(&mut self, key: KeyEvent) -> Result<Option<Outcome<()>>, String> {
+    /// What `key` does, in the phase the label row shows. Any key other than an edit cancels
+    /// the half-typed vi command, and the warning of an empty answer.
+    fn begin_key(&mut self, key: &KeyEvent) -> Action {
         let phase = lock(&self.shared).phase.clone();
         self.is_empty_warned = false;
-        let confirming = self.confirming.take();
-        let action = keys::action(&phase, &key, self.input());
-        // Any key other than an edit cancels the half-typed vi command
+        let action = keys::action(&phase, key, self.input());
         if action != Action::Edit {
             self.editor.cancel();
         }
-        let loss = keys::loss(&phase, action, self.stakes());
-        if !self.goes_ahead(&key, confirming.as_ref(), loss, Some(action)) {
+        action
+    }
+
+    /// Passes `key`, of `action`, through the gate with the effect that `reading` decides for it.
+    fn pass_reading<R: Reading>(
+        &mut self,
+        reading: &R,
+        key: KeyEvent,
+        action: Action,
+    ) -> Result<Option<Outcome<(), R::Effect>>, String> {
+        let text = self.sent_text();
+        let effect = reading.effect(action, self.stakes(&text));
+        self.pass(key, action, effect)
+    }
+
+    /// Passes `key`, of `action`, through the gate with its `effect` on the session, which goes
+    /// to the session once the gate lets it through. A key with none acts on the input line, and
+    /// ends the wait of the key before.
+    fn pass<E: Effect>(
+        &mut self,
+        key: KeyEvent,
+        action: Action,
+        effect: Option<E>,
+    ) -> Result<Option<Outcome<(), E>>, String> {
+        let Some(effect) = effect else {
+            self.gate.reset();
+            self.close_command_line(action);
+            return self.act_on_line(key, action);
+        };
+        // The label row names what the second press loses
+        let Some(confirmed) = self.gate.pass(&key, Some(action), effect) else {
             return Ok(None);
-        }
-        // A session key acts on the session, and closes the command line
-        if matches!(action, Action::Session(_)) {
+        };
+        self.close_command_line(action);
+        Ok(Some(Outcome::Act((), confirmed)))
+    }
+
+    /// Closes the command line for a session key, which acts on the session, and for the
+    /// command it runs.
+    fn close_command_line(&mut self, action: Action) {
+        if matches!(action, Action::Session(_) | Action::Run) {
             self.command_line = None;
         }
+    }
+
+    /// Acts on the input line for `key`, of `action`, which has no effect on the session, with
+    /// an outcome for one that ends the reading.
+    fn act_on_line<E>(
+        &mut self,
+        key: KeyEvent,
+        action: Action,
+    ) -> Result<Option<Outcome<(), E>>, String> {
+        let phase = lock(&self.shared).phase.clone();
         match action {
-            Action::Session(SessionKey::Stop) => return Ok(Some(Outcome::Stop(()))),
-            Action::Session(SessionKey::End) => return Ok(Some(Outcome::End)),
-            Action::Session(SessionKey::Clear) => return Ok(Some(Outcome::Clear(()))),
             Action::CommandLine => self.command_line = Some(Editor::new("")),
-            Action::Run => {
-                let command = self.command_line.take().map(|line| line.text());
-                let command = command.as_deref().unwrap_or_default().trim();
-                return Ok((!command.is_empty()).then(|| Outcome::Run((), command.to_string())));
-            }
             Action::Session(SessionKey::Questions) => return Ok(Some(Outcome::Questions(()))),
-            Action::Session(direction @ (SessionKey::Down | SessionKey::Up)) => {
-                if let Phase::Answering(view) = &phase
-                    && !view.is_submitted
-                {
-                    let choices = view.choices.len();
-                    let effect = if direction == SessionKey::Down {
-                        self.pick.move_down(choices, view.form)
-                    } else {
-                        self.pick.move_up(choices)
-                    };
-                    return Ok(self.carry_out(effect, &key));
-                }
-            }
             Action::Session(SessionKey::ShowFullView) => self.show_full_view()?,
             Action::Session(SessionKey::ShowStatus) => self.show_status()?,
             // The question view's text is the user's own answer, which the box holds only while
             // the cursor is on it
             Action::Session(SessionKey::Edit) => match &phase {
-                Phase::Answering(view)
+                Phase::Answering(Answering { view })
                     if view.is_submitted || self.pick.cursor != Cursor::Writing => {}
                 _ => self.edit_in_editor()?,
             },
-            // The question view answers to Enter and the other keys on its own
-            Action::Send | Action::Edit => {
-                if let Phase::Answering(view) = &phase {
-                    return Ok(self.answer_key(view, &key, confirming.as_ref()));
-                }
-                if action == Action::Send {
-                    return Ok(Some(Outcome::Send(())));
-                }
-                match &mut self.command_line {
-                    Some(_) if key.code == KeyCode::Esc => self.command_line = None,
-                    Some(line) => line.press(&key),
-                    None => self.editor.press(&key),
-                }
-            }
-            Action::Ignore => {}
+            Action::Edit => match &mut self.command_line {
+                Some(_) if key.code == KeyCode::Esc => self.command_line = None,
+                Some(line) => line.press(&key),
+                None => self.editor.press(&key),
+            },
+            // A key with nothing to act on, like Ctrl+C with nothing to stop or Enter on an empty
+            // box, does nothing
+            Action::Session(
+                SessionKey::Stop
+                | SessionKey::End
+                | SessionKey::Clear
+                | SessionKey::Down
+                | SessionKey::Up,
+            )
+            | Action::Send
+            | Action::Run
+            | Action::Ignore => {}
         }
         Ok(None)
     }
@@ -422,98 +500,66 @@ impl InputLine {
         }
     }
 
-    /// Whether `key` goes ahead: at once when it loses nothing, and else on its second press in
-    /// a row, which `confirming` holds the first of, with the same loss. A loss that changed
-    /// between the presses waits for a press more, so the user always saw what a key loses
-    /// before it goes ahead. Meanwhile the label row names the loss.
-    fn goes_ahead(
-        &mut self,
-        key: &KeyEvent,
-        confirming: Option<&Confirming>,
-        loss: Option<String>,
-        action: Option<Action>,
-    ) -> bool {
-        let Some(loss) = loss else {
-            return true;
-        };
-        let is_second = confirming.is_some_and(|first| {
-            first.key.code == key.code && first.key.modifiers == key.modifiers && first.loss == loss
-        });
-        if !is_second {
-            self.confirming = Some(Confirming {
-                key: *key,
-                loss,
-                action,
-            });
-        }
-        is_second
+    /// What Enter sends or runs: the command line's text while it is open, and else the box's.
+    fn sent_text(&self) -> String {
+        (self.command_line.as_ref()).map_or_else(|| self.text(), Editor::text)
     }
 
-    /// What the session holds that a press can lose.
-    fn stakes(&self) -> keys::Stakes {
+    /// What the session holds that a press can lose, with `text` that Enter sends.
+    fn stakes<'a>(&self, text: &'a str) -> keys::Stakes<'a> {
         let shared = lock(&self.shared);
-        let text = self
-            .command_line
-            .as_ref()
-            .map_or_else(|| self.text(), Editor::text);
         keys::Stakes {
-            has_text: !text.trim().is_empty(),
+            text,
             held: shared.context.held(Instant::now()),
             is_working: shared.output.status() != Status::Idle,
         }
     }
 
     /// Ends the wait of a key whose loss went away, so the label row never asks for a press
-    /// that loses nothing. A loss that changed instead waits for the press, which names it.
+    /// that loses nothing.
     fn drop_lost_confirmation(&mut self) {
-        let Some(action) = self.confirming.as_ref().and_then(|first| first.action) else {
-            return;
-        };
         let phase = lock(&self.shared).phase.clone();
-        if keys::loss(&phase, action, self.stakes()).is_none() {
-            self.confirming = None;
-        }
+        let text = self.sent_text();
+        let stakes = self.stakes(&text);
+        self.gate.drop_lost(&phase, stakes);
     }
 
-    /// Acts on a key of the question view's that is not a session key, Enter among them. An
-    /// answer that leaves out the user's own text waits for the same key again, after
-    /// `confirming`, the key before.
-    fn answer_key(
+    /// Presses `key` of `action` on the pick of the question that `view` shows, for Enter, an
+    /// edit and a move among the options, and returns what else it does, or none for a key the
+    /// pick does not take.
+    fn press_pick(
         &mut self,
         view: &View,
         key: &KeyEvent,
-        confirming: Option<&Confirming>,
-    ) -> Option<Outcome<()>> {
-        if view.is_submitted {
-            return self.carry_out(Pick::press_submitted(key), key);
-        }
-        let text = self.text();
-        let before = self.pick.clone();
-        let effect = self.pick.press(key, &view.choices, view.form, self.input());
-        if effect == picker::Effect::Submit && view.form != Form::Review {
-            let chosen = self.pick.chosen(view.form, &text);
-            let is_empty = chosen.is_empty();
-            let risk = (chosen.options.iter()).find_map(|index| {
-                view.choices
-                    .get(*index)
-                    .and_then(|choice| choice.risk.clone())
-            });
-            let loss = risk.or_else(|| {
-                (self.pick.leaves_out(view.form, &text))
-                    .then(|| "leaves out your own answer".to_string())
-            });
-            if is_empty || !self.goes_ahead(key, confirming, loss, None) {
-                self.pick = before;
-                self.is_empty_warned = is_empty;
-                return None;
+        action: Action,
+    ) -> Option<picker::Effect> {
+        let choices = view.choices.len();
+        match action {
+            Action::Send | Action::Edit if view.is_submitted => Some(Pick::press_submitted(key)),
+            Action::Send | Action::Edit => {
+                Some((self.pick).press(key, &view.choices, view.form, self.input()))
             }
+            Action::Session(SessionKey::Down) if !view.is_submitted => {
+                Some(self.pick.move_down(choices, view.form))
+            }
+            Action::Session(SessionKey::Up) if !view.is_submitted => {
+                Some(self.pick.move_up(choices))
+            }
+            _ => None,
         }
-        self.carry_out(effect, key)
     }
 
-    /// Carries out what `key` does in the question view besides changing the pick.
-    fn carry_out(&mut self, effect: picker::Effect, key: &KeyEvent) -> Option<Outcome<()>> {
-        match effect {
+    /// Carries out the pick's `effect` of `key`, besides changing the pick: Enter's submit passes
+    /// the gate, and every other effect ends the wait of the key before.
+    fn pass_pick(
+        &mut self,
+        view: &View,
+        key: &KeyEvent,
+        effect: picker::Effect,
+        before: Pick,
+    ) -> Option<Outcome<(), OnQuestion>> {
+        let outcome = match effect {
+            picker::Effect::Submit => return self.pass_submit(view, key, before),
             picker::Effect::Stay => None,
             picker::Effect::Type => {
                 self.editor.press(key);
@@ -529,10 +575,50 @@ impl InputLine {
                 }
                 None
             }
-            picker::Effect::Submit => Some(Outcome::Send(())),
             picker::Effect::Back => Some(Outcome::Questions(())),
             picker::Effect::Go(to) => Some(Outcome::Go((), to)),
+        };
+        self.gate.reset();
+        outcome
+    }
+
+    /// Passes the submit of `key` through the gate. A submit that answers nothing, or that the
+    /// gate holds back, leaves the pick as it was `before`.
+    fn pass_submit(
+        &mut self,
+        view: &View,
+        key: &KeyEvent,
+        before: Pick,
+    ) -> Option<Outcome<(), OnQuestion>> {
+        let submit = if view.is_submitted || view.form == Form::Review {
+            OnQuestion::Submit {
+                risk: None,
+                leaves_out_own: false,
+            }
+        } else {
+            let text = self.text();
+            let chosen = self.pick.chosen(view.form, &text);
+            if chosen.is_empty() {
+                self.gate.reset();
+                self.pick = before;
+                self.is_empty_warned = true;
+                return None;
+            }
+            let risk = (chosen.options.iter()).find_map(|index| {
+                view.choices
+                    .get(*index)
+                    .and_then(|choice| choice.risk.clone())
+            });
+            OnQuestion::Submit {
+                risk,
+                leaves_out_own: self.pick.leaves_out(view.form, &text),
+            }
+        };
+        let confirmed = self.gate.pass(key, None, submit);
+        if confirmed.is_none() {
+            self.pick = before;
         }
+        confirmed.map(|confirmed| Outcome::Act((), confirmed))
     }
 
     /// Puts the box in insert mode, at the end of its text, as vi's `A` on the last line.
@@ -543,14 +629,14 @@ impl InputLine {
     /// Pastes `text` into the box, which the question view takes the cursor into first, on a
     /// question open to answers.
     fn paste(&mut self, text: &str) {
-        self.confirming = None;
+        self.gate.reset();
         // The command line holds one line
         if let Some(line) = &mut self.command_line {
             line.paste(&text.replace(|c: char| c.is_control(), " "));
             return;
         }
         let view = match &lock(&self.shared).phase {
-            Phase::Answering(view) => Some(view.clone()),
+            Phase::Answering(Answering { view }) => Some(view.clone()),
             _ => None,
         };
         if let Some(view) = &view
@@ -681,7 +767,7 @@ impl InputLine {
     /// the view runs less whatever `PAGER` says.
     fn show_full_view(&mut self) -> Result<(), String> {
         let start = match &lock(&self.shared).phase {
-            Phase::Answering(view) => format!("+{}g", view.full_view_line),
+            Phase::Answering(Answering { view }) => format!("+{}g", view.full_view_line),
             _ => "+G".to_string(),
         };
         let status = self.run_program(
@@ -735,7 +821,7 @@ impl InputLine {
     fn draw(&mut self) -> Result<(), String> {
         self.label = self.make_label();
         let view = match &lock(&self.shared).phase {
-            Phase::Answering(view) if self.in_view => Some(view.clone()),
+            Phase::Answering(Answering { view }) if self.in_view => Some(view.clone()),
             _ => None,
         };
         match view {
@@ -1015,9 +1101,7 @@ impl InputLine {
     /// What the label row says while a key waits for its second press, in the color of a
     /// warning.
     fn confirmation(&self) -> Option<String> {
-        self.confirming
-            .as_ref()
-            .map(|first| format!("{ATTENTION}{} again {}", keys::name(&first.key), first.loss))
+        self.gate.label().map(|label| format!("{ATTENTION}{label}"))
     }
 
     /// The label row: for a message, `››` with the budgets, then the activity, as AGENTS.md's
@@ -1029,7 +1113,7 @@ impl InputLine {
     fn make_label(&self) -> String {
         let shared = lock(&self.shared);
         match &shared.phase {
-            Phase::Writing { waiting } => {
+            Phase::Writing(Writing { waiting }) => {
                 let now = Instant::now();
                 let level = shared.context.level();
                 let is_cold = shared.context.is_cold(now);
@@ -1063,7 +1147,7 @@ impl InputLine {
                     .unwrap_or_else(|| "idle".to_string());
                 format!("{indicators} {SUBDUED_ON_BAR}│ {state}")
             }
-            Phase::Answering(view) => {
+            Phase::Answering(Answering { view }) => {
                 let hint = if let Some(confirmation) = self.confirmation() {
                     confirmation
                 } else if self.is_empty_warned {
@@ -1088,7 +1172,7 @@ impl InputLine {
                     header(&view.label)
                 )
             }
-            Phase::Ending => {
+            Phase::Ending(Ending) => {
                 let output = &shared.output;
                 let tasks = output.background_tasks();
                 let descriptions: Vec<&str> =
@@ -1111,15 +1195,6 @@ impl InputLine {
             }
         }
     }
-}
-
-/// A key pressed once that waits for its second press in a row, with what it loses.
-struct Confirming {
-    key: KeyEvent,
-    loss: String,
-    /// The key's action, whose loss the session's state can take away meanwhile, as when Claude
-    /// Code tells the cache is new. None for an answer's key, whose loss only keys change.
-    action: Option<Action>,
 }
 
 impl Drop for InputLine {

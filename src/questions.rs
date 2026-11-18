@@ -524,10 +524,6 @@ impl Questions {
         self.requests.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.requests.is_empty()
-    }
-
     /// Opens the question view on the request it showed last, or on the last request when that
     /// one is gone, and returns whether any request waits.
     pub fn open(&mut self) -> bool {
@@ -892,7 +888,7 @@ mod tests {
             input["answers"],
             json!({"Which database?": "SQLite", "Which checks?": "Lint, Types"})
         );
-        assert!(questions.is_empty());
+        assert_eq!(questions.count(), 0);
     }
 
     #[test]
@@ -986,7 +982,7 @@ mod tests {
             panic!("the answer, with no review");
         };
         assert_eq!(answers.len(), 1);
-        assert!(questions.is_empty());
+        assert_eq!(questions.count(), 0);
     }
 
     fn permission(id: &str, is_guarded: bool) -> Ask {

@@ -8,31 +8,67 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::context::Held;
 use crate::picker::{Choice, Form};
 
-/// What the user does on the input line.
+/// What the user does on the input line: one of the readings of keys, each with the effects
+/// its keys can have on the session.
 #[derive(Clone)]
 pub enum Phase {
-    /// Writes a message to Claude, while `waiting` questions of Claude's wait. A question waits
-    /// for Ctrl+Y rather than taking the input box as it arrives, since a key typed just then
-    /// would answer it. Claude Code's own interface instead puts a question in place of the
-    /// input box, where typing only answers it, and refusing it ends the turn before the user
-    /// writes again. So Enter on a message refuses the waiting questions, which makes it a press
-    /// that `loss` names.
-    ///
-    /// Claude Code 2.1.321 also accepts a plain message while a question waits, though its
-    /// interface never sends one: the message queues behind the question, and Claude reads it
-    /// right after the answer, in the same turn. A message sent with send now cancels the
-    /// question instead.
-    Writing { waiting: usize },
-    /// Answers the question the question view shows.
-    Answering(Box<View>),
-    /// Has nothing more to say, while Claude finishes its work, which only Ctrl+C stops.
-    Ending,
+    Writing(Writing),
+    Answering(Answering),
+    Ending(Ending),
+}
+
+/// Writes a message to Claude, while `waiting` questions of Claude's wait. A question waits for
+/// Ctrl+Y rather than taking the input box as it arrives, since a key typed just then would
+/// answer it. Claude Code's own interface instead puts a question in place of the input box,
+/// where typing only answers it, and refusing it ends the turn before the user writes again. So
+/// Enter on a message refuses the waiting questions, which makes it a press that names its loss.
+///
+/// Claude Code 2.1.321 also accepts a plain message while a question waits, though its interface
+/// never sends one: the message queues behind the question, and Claude reads it right after the
+/// answer, in the same turn. A message sent with send now cancels the question instead.
+#[derive(Clone)]
+pub struct Writing {
+    pub waiting: usize,
+}
+
+/// Answers the question the question view shows.
+#[derive(Clone)]
+pub struct Answering {
+    pub view: Box<View>,
+}
+
+/// Has nothing more to say, while Claude finishes its work, which only Ctrl+C stops.
+#[derive(Clone)]
+pub struct Ending;
+
+/// A phase's reading of keys, which decides what they do to the session. Each phase has its own
+/// kind of effect, so the session gets only the effects of the phase it read keys in.
+pub trait Reading: Clone {
+    type Effect: Effect;
+
+    /// The phase, as the label row shows it.
+    fn phase(&self) -> Phase;
+
+    /// What `action` does to the session, with `stakes` telling what the session holds, or none
+    /// for an action that acts on the input line alone, or that has nothing to act on, like
+    /// Enter on an empty box. Every action has an arm of its own, so a new one has to state
+    /// what it does to the session.
+    fn effect(&self, action: Action, stakes: Stakes) -> Option<Self::Effect>;
 }
 
 impl Phase {
     /// Whether the input line takes text, typed or pasted.
     pub fn takes_text(&self) -> bool {
-        !matches!(self, Phase::Ending)
+        !matches!(self, Phase::Ending(_))
+    }
+
+    /// What `action` loses, with `stakes` telling what the session holds, as its effect says.
+    pub fn loss(&self, action: Action, stakes: Stakes) -> Option<String> {
+        match self {
+            Phase::Writing(reading) => reading.effect(action, stakes)?.loss(),
+            Phase::Answering(reading) => reading.effect(action, stakes)?.loss(),
+            Phase::Ending(reading) => reading.effect(action, stakes)?.loss(),
+        }
     }
 }
 
@@ -213,72 +249,347 @@ pub struct Input {
 
 /// What the session holds that a press can lose.
 #[derive(Clone, Copy)]
-pub struct Stakes {
-    /// Whether what Enter sends or runs has text: the box, or the command line while open.
-    pub has_text: bool,
+pub struct Stakes<'a> {
+    /// What Enter sends or runs: the box's text, or the command line's while open.
+    pub text: &'a str,
     pub held: Held,
     /// Whether Claude works on a turn.
     pub is_working: bool,
 }
 
-/// What `action` loses in `phase` that no key brings back, with `stakes` telling what the
-/// session holds. Such a press waits for the same key again in a row, which the input line carries out
-/// and the label row names the loss for, as Codex and Claude Code do for their exit keys. The
-/// label names the loss, since a confirmation guards only when it says what is about to happen,
-/// and it shows only for a loss, so the second press never becomes a habit. Stopping Claude's
-/// turn takes one press, as in every agent's interface: a message tells Claude to go on, and a
-/// stop delayed costs more than one made by mistake.
-/// Ref: <https://www.saasui.design/blog/saas-destructive-actions-confirmation-ux-patterns>, on
-/// a confirmation's text naming the outcome
-pub fn loss(phase: &Phase, action: Action, stakes: Stakes) -> Option<String> {
-    match (phase, action) {
-        (Phase::Writing { .. } | Phase::Answering(_), Action::Session(SessionKey::End)) => {
-            Some("ends the session".to_string())
+/// What a key does to the session, decided once, from the state the key is judged against. It
+/// holds all that the decision took from the state, and the session carries it out as decided,
+/// without judging the state again, so the loss the label row names and what happens come from
+/// one value. Each phase has its own kind of effect, so the session gets only the effects that
+/// the phase it read keys in can have.
+pub trait Effect {
+    /// What the effect loses that no key brings back. Such a press waits for the same key again
+    /// in a row, which `Gate` carries out and the label row names the loss for, as Codex and
+    /// Claude Code do for their exit keys. The label names the loss, since a confirmation guards
+    /// only when it says what is about to happen, and it shows only for a loss, so the second
+    /// press never becomes a habit. Stopping Claude's turn takes one press, as in every agent's
+    /// interface: a message tells Claude to go on, and a stop delayed costs more than one made
+    /// by mistake.
+    /// Ref: <https://www.saasui.design/blog/saas-destructive-actions-confirmation-ux-patterns>,
+    /// on a confirmation's text naming the outcome
+    fn loss(&self) -> Option<String>;
+}
+
+/// What a key does while the user writes a message.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OnMessage {
+    /// Sends the box's text as a message.
+    Send(Sending),
+    /// Runs the command line's command of Claude Code's, written without its `/`, as `Send`
+    /// sends a message.
+    Run(Sending),
+    /// Stops Claude's turn, with one press when it refuses no question.
+    Stop(TurnStop),
+    /// Clears the context, which holds something, after stopping the turn that runs, if any.
+    Clear(Option<TurnStop>),
+    /// Ends the session's input.
+    End,
+}
+
+/// What a key does while the user answers the question the question view shows.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OnQuestion {
+    /// Submits the question view's pick: answers the question, opens a submitted one again, or
+    /// sends the review's answers. An answer's loss is its choice's `risk`, as the choice names
+    /// it, or else the user's own text it leaves out, when `leaves_out_own`.
+    Submit {
+        risk: Option<String>,
+        leaves_out_own: bool,
+    },
+    /// Refuses the request the question view shows, which `refusal` names, like `the call`.
+    Refuse { refusal: String },
+    /// Ends the session's input.
+    End,
+}
+
+/// What a key does once the user has nothing more to say, while Claude finishes its work.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OnEnding {
+    /// Stops Claude's turn and its background tasks, after which Claude Code exits.
+    StopClaudeCode,
+}
+
+/// What a message or a command sends, never empty, and what the state made it lose.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sending {
+    pub text: String,
+    /// The questions that wait, which Claude Code cancels for what the user sends, so the
+    /// session refuses them first.
+    pub refused: usize,
+    /// Whether the cache may be cold, so that the call pays for the whole context again.
+    pub is_cold: bool,
+}
+
+/// How Claude's turn stops: by refusing the questions it waits on, which ends it, or with an
+/// interrupt.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TurnStop {
+    Refuse(usize),
+    Interrupt,
+}
+
+impl Effect for OnMessage {
+    fn loss(&self) -> Option<String> {
+        match self {
+            // A command may call the API as a message does: some do, like /compact, and Claude
+            // Code hands one it does not know to Claude, so a typo becomes a call
+            OnMessage::Send(sending) => sending.loss("sends"),
+            OnMessage::Run(sending) => sending.loss("runs the command"),
+            OnMessage::Stop(TurnStop::Refuse(count)) => {
+                Some(format!("refuses {}", questions(*count)))
+            }
+            OnMessage::Stop(TurnStop::Interrupt) => None,
+            // The session goes on in a new one, but the clear loses the cache, and what the turn
+            // that runs would have done
+            OnMessage::Clear(stop) => {
+                let stop = match stop {
+                    Some(TurnStop::Refuse(count)) => format!("refuses {} and ", questions(*count)),
+                    Some(TurnStop::Interrupt) => "stops claude and ".to_string(),
+                    None => String::new(),
+                };
+                Some(format!("{stop}clears the context"))
+            }
+            OnMessage::End => Some("ends the session".to_string()),
         }
-        (Phase::Writing { waiting }, Action::Session(SessionKey::Stop)) if *waiting > 0 => {
-            Some(format!("refuses {}", questions(*waiting)))
+    }
+}
+
+impl Effect for OnQuestion {
+    fn loss(&self) -> Option<String> {
+        match self {
+            OnQuestion::Submit {
+                risk,
+                leaves_out_own,
+            } => risk
+                .clone()
+                .or_else(|| leaves_out_own.then(|| "leaves out your own answer".to_string())),
+            // The question view refuses the request it shows, with each of its questions
+            OnQuestion::Refuse { refusal } => Some(format!("refuses {refusal}")),
+            OnQuestion::End => Some("ends the session".to_string()),
         }
-        // The question view refuses the request it shows, with each of its questions
-        (Phase::Answering(view), Action::Session(SessionKey::Stop)) => {
-            Some(format!("refuses {}", view.refusal))
+    }
+}
+
+impl Effect for OnEnding {
+    fn loss(&self) -> Option<String> {
+        match self {
+            // Claude Code stops its background tasks too, and exits
+            OnEnding::StopClaudeCode => Some("stops claude".to_string()),
         }
-        // Claude Code stops its background tasks too, and exits
-        (Phase::Ending, Action::Session(SessionKey::Stop)) => Some("stops claude".to_string()),
-        // Claude Code cancels the questions that wait for a message or a command. A command may
-        // call the API as a message does: some do, like /compact, and Claude Code hands one it
-        // does not know to Claude, so a typo becomes a call
-        (Phase::Writing { waiting }, Action::Send | Action::Run) if stakes.has_text => {
-            let refusal = (*waiting > 0).then(|| format!("refuses {} and ", questions(*waiting)));
-            let cache = (stakes.held == Held::Cold).then_some(" on a possibly cold cache");
-            let verb = if action == Action::Run {
-                "runs the command"
-            } else {
-                "sends"
-            };
-            (refusal.is_some() || cache.is_some()).then(|| {
-                format!(
-                    "{}{verb}{}",
-                    refusal.unwrap_or_default(),
-                    cache.unwrap_or_default()
-                )
-            })
+    }
+}
+
+impl Sending {
+    /// The loss of what `verb` sends, like `refuses 2 questions and sends on a possibly cold
+    /// cache`.
+    fn loss(&self, verb: &str) -> Option<String> {
+        if self.refused == 0 && !self.is_cold {
+            return None;
         }
-        // The session goes on in a new one, but the clear loses the cache, and with questions
-        // waiting or Claude working, what the turn would have done. Refusing a question stops
-        // the turn too
-        (Phase::Writing { waiting }, Action::Session(SessionKey::Clear))
-            if stakes.held != Held::Nothing =>
-        {
-            let turn = if *waiting > 0 {
-                format!("refuses {} and ", questions(*waiting))
-            } else if stakes.is_working {
-                "stops claude and ".to_string()
-            } else {
-                String::new()
-            };
-            Some(format!("{turn}clears the context"))
+        let refusal = if self.refused > 0 {
+            format!("refuses {} and ", questions(self.refused))
+        } else {
+            String::new()
+        };
+        let cache = if self.is_cold {
+            " on a possibly cold cache"
+        } else {
+            ""
+        };
+        Some(format!("{refusal}{verb}{cache}"))
+    }
+}
+
+impl Reading for Writing {
+    type Effect = OnMessage;
+
+    fn phase(&self) -> Phase {
+        Phase::Writing(self.clone())
+    }
+
+    fn effect(&self, action: Action, stakes: Stakes) -> Option<OnMessage> {
+        // A turn that waits on questions stops as they are refused
+        let turn_stop = match (self.waiting, stakes.is_working) {
+            (0, false) => None,
+            (0, true) => Some(TurnStop::Interrupt),
+            (count, _) => Some(TurnStop::Refuse(count)),
+        };
+        let sending = (!stakes.text.trim().is_empty()).then(|| Sending {
+            text: stakes.text.to_string(),
+            refused: self.waiting,
+            is_cold: stakes.held == Held::Cold,
+        });
+        match action {
+            Action::Session(SessionKey::Stop) => turn_stop.map(OnMessage::Stop),
+            Action::Session(SessionKey::End) => Some(OnMessage::End),
+            // A context that holds nothing yet has nothing to clear
+            Action::Session(SessionKey::Clear) => {
+                (stakes.held != Held::Nothing).then_some(OnMessage::Clear(turn_stop))
+            }
+            Action::Send => sending.map(OnMessage::Send),
+            Action::Run => sending.map(OnMessage::Run),
+            Action::Session(
+                SessionKey::Edit
+                | SessionKey::ShowFullView
+                | SessionKey::ShowStatus
+                | SessionKey::Questions
+                | SessionKey::Down
+                | SessionKey::Up,
+            )
+            | Action::CommandLine
+            | Action::Edit
+            | Action::Ignore => None,
         }
-        _ => None,
+    }
+}
+
+impl Reading for Answering {
+    type Effect = OnQuestion;
+
+    fn phase(&self) -> Phase {
+        Phase::Answering(self.clone())
+    }
+
+    /// The answer comes from the pick instead, as `OnQuestion::Submit`, since Enter and the keys
+    /// that edit and move act through it.
+    fn effect(&self, action: Action, _: Stakes) -> Option<OnQuestion> {
+        match action {
+            Action::Session(SessionKey::Stop) => Some(OnQuestion::Refuse {
+                refusal: self.view.refusal.clone(),
+            }),
+            Action::Session(SessionKey::End) => Some(OnQuestion::End),
+            Action::Session(
+                SessionKey::Clear
+                | SessionKey::Edit
+                | SessionKey::ShowFullView
+                | SessionKey::ShowStatus
+                | SessionKey::Questions
+                | SessionKey::Down
+                | SessionKey::Up,
+            )
+            | Action::Send
+            | Action::Run
+            | Action::CommandLine
+            | Action::Edit
+            | Action::Ignore => None,
+        }
+    }
+}
+
+impl Reading for Ending {
+    type Effect = OnEnding;
+
+    fn phase(&self) -> Phase {
+        Phase::Ending(self.clone())
+    }
+
+    /// Only Ctrl+C acts.
+    fn effect(&self, action: Action, _: Stakes) -> Option<OnEnding> {
+        match action {
+            Action::Session(SessionKey::Stop) => Some(OnEnding::StopClaudeCode),
+            Action::Session(
+                SessionKey::End
+                | SessionKey::Clear
+                | SessionKey::Edit
+                | SessionKey::ShowFullView
+                | SessionKey::ShowStatus
+                | SessionKey::Questions
+                | SessionKey::Down
+                | SessionKey::Up,
+            )
+            | Action::Send
+            | Action::Run
+            | Action::CommandLine
+            | Action::Edit
+            | Action::Ignore => None,
+        }
+    }
+}
+
+/// An effect that goes ahead: one that loses nothing, or one whose loss the label row named, let
+/// through by the second press in a row of its key. Only `Gate` makes one, and the session
+/// carries out only these, so no effect skips the confirmation.
+#[derive(Debug)]
+pub struct Confirmed<E>(E);
+
+impl<E> Confirmed<E> {
+    pub fn effect(&self) -> &E {
+        &self.0
+    }
+}
+
+/// The confirmation of the keys that act on the session: a key whose effect loses something
+/// waits for its second press in a row, which the label row names the loss for meanwhile.
+#[derive(Default)]
+pub struct Gate {
+    armed: Option<Armed>,
+}
+
+/// A press whose effect loses something, which waits for the same key again with the same loss.
+struct Armed {
+    key: KeyEvent,
+    loss: String,
+    /// The key's action, whose loss the session's state can take away meanwhile, as when Claude
+    /// Code tells the cache is new. None for an answer's key, whose loss only keys change.
+    action: Option<Action>,
+}
+
+impl Gate {
+    /// Lets `effect` of the press of `key`, of `action`, go ahead, or none while it waits for
+    /// the key's second press. Every key ends the wait of the one before. An effect goes ahead
+    /// at once when it loses nothing, and else on the second press in a row of its key, with the
+    /// same loss: a loss that changed between the presses waits for a press more, so the user
+    /// always saw what a key loses before it goes ahead.
+    pub fn pass<E: Effect>(
+        &mut self,
+        key: &KeyEvent,
+        action: Option<Action>,
+        effect: E,
+    ) -> Option<Confirmed<E>> {
+        let before = self.armed.take();
+        let Some(loss) = effect.loss() else {
+            return Some(Confirmed(effect));
+        };
+        let is_second = before.is_some_and(|first| {
+            first.key.code == key.code && first.key.modifiers == key.modifiers && first.loss == loss
+        });
+        if is_second {
+            return Some(Confirmed(effect));
+        }
+        self.armed = Some(Armed {
+            key: *key,
+            loss,
+            action,
+        });
+        None
+    }
+
+    /// Ends the wait, as a key with no effect on the session does, and a paste or a new reading.
+    pub fn reset(&mut self) {
+        self.armed = None;
+    }
+
+    /// Ends the wait of a key whose loss went away in `phase`, with `stakes`, so the label row
+    /// never asks for a press that loses nothing. A loss that changed instead waits for the
+    /// press, which names it.
+    pub fn drop_lost(&mut self, phase: &Phase, stakes: Stakes) {
+        let Some(action) = self.armed.as_ref().and_then(|armed| armed.action) else {
+            return;
+        };
+        if phase.loss(action, stakes).is_none() {
+            self.armed = None;
+        }
+    }
+
+    /// The key that waits and what its second press loses, like `Ctrl+L again clears the
+    /// context`.
+    pub fn label(&self) -> Option<String> {
+        (self.armed.as_ref()).map(|armed| format!("{} again {}", name(&armed.key), armed.loss))
     }
 }
 
@@ -331,18 +642,18 @@ pub enum Action {
 /// as the end of input only on an empty line
 pub fn action(phase: &Phase, key: &KeyEvent, input: Input) -> Action {
     match (phase, SessionKey::of(key)) {
-        (Phase::Ending, Some(SessionKey::Stop)) => Action::Session(SessionKey::Stop),
-        (Phase::Ending, _)
+        (Phase::Ending(_), Some(SessionKey::Stop)) => Action::Session(SessionKey::Stop),
+        (Phase::Ending(_), _)
         | (Phase::Answering(_), Some(SessionKey::Clear))
-        | (Phase::Writing { waiting: 0, .. }, Some(SessionKey::Questions))
-        | (Phase::Writing { .. }, Some(SessionKey::Down | SessionKey::Up)) => Action::Ignore,
+        | (Phase::Writing(Writing { waiting: 0 }), Some(SessionKey::Questions))
+        | (Phase::Writing(_), Some(SessionKey::Down | SessionKey::Up)) => Action::Ignore,
         (_, Some(SessionKey::End)) if !input.is_empty => Action::Ignore,
         (_, Some(session_key)) => Action::Session(session_key),
-        (Phase::Writing { .. }, None) if key.code == KeyCode::Enter && input.is_commanding => {
+        (Phase::Writing(_), None) if key.code == KeyCode::Enter && input.is_commanding => {
             Action::Run
         }
         (_, None) if key.code == KeyCode::Enter => Action::Send,
-        (Phase::Writing { .. }, None)
+        (Phase::Writing(_), None)
             if key.code == KeyCode::Char(':') && input.is_idle && !input.is_commanding =>
         {
             Action::CommandLine
@@ -373,26 +684,28 @@ mod tests {
     }
 
     fn writing(waiting: usize) -> Phase {
-        Phase::Writing { waiting }
+        Phase::Writing(Writing { waiting })
     }
 
     fn answering() -> Phase {
-        Phase::Answering(Box::new(View {
-            label: "plan".to_string(),
-            title: "Question".to_string(),
-            refusal: "2 questions".to_string(),
-            request_index: 0,
-            requests: vec![false],
-            fields: vec![],
-            choices: vec![],
-            own_label: String::new(),
-            form: Form::One,
-            full_view_line: 1,
-            index: 0,
-            progress: vec![false, false],
-            is_submitted: false,
-            sends_at_once: false,
-        }))
+        Phase::Answering(Answering {
+            view: Box::new(View {
+                label: "plan".to_string(),
+                title: "Question".to_string(),
+                refusal: "2 questions".to_string(),
+                request_index: 0,
+                requests: vec![false],
+                fields: vec![],
+                choices: vec![],
+                own_label: String::new(),
+                form: Form::One,
+                full_view_line: 1,
+                index: 0,
+                progress: vec![false, false],
+                is_submitted: false,
+                sends_at_once: false,
+            }),
+        })
     }
 
     #[test]
@@ -447,17 +760,17 @@ mod tests {
             held: Held::Cold,
             ..WARM
         };
-        assert_eq!(loss(&writing(0), Action::Run, WARM), None);
+        assert_eq!(writing(0).loss(Action::Run, WARM), None);
         assert_eq!(
-            loss(&writing(2), Action::Run, WARM).as_deref(),
+            writing(2).loss(Action::Run, WARM).as_deref(),
             Some("refuses 2 questions and runs the command")
         );
         assert_eq!(
-            loss(&writing(0), Action::Run, cold).as_deref(),
+            writing(0).loss(Action::Run, cold).as_deref(),
             Some("runs the command on a possibly cold cache")
         );
         assert_eq!(
-            loss(&writing(2), Action::Run, cold).as_deref(),
+            writing(2).loss(Action::Run, cold).as_deref(),
             Some("refuses 2 questions and runs the command on a possibly cold cache")
         );
     }
@@ -492,7 +805,7 @@ mod tests {
     }
 
     const WARM: Stakes = Stakes {
-        has_text: true,
+        text: "hi",
         held: Held::Warm,
         is_working: false,
     };
@@ -504,7 +817,7 @@ mod tests {
 
     fn assert_losses(action: Action, cases: Vec<(Phase, Stakes, Option<&str>)>) {
         for (phase, stakes, expected) in cases {
-            assert_eq!(loss(&phase, action, stakes).as_deref(), expected);
+            assert_eq!(phase.loss(action, stakes).as_deref(), expected);
         }
     }
 
@@ -529,7 +842,7 @@ mod tests {
                 (writing(1), WARM, Some("refuses the question")),
                 (writing(3), WARM, Some("refuses 3 questions")),
                 (answering(), WARM, Some("refuses 2 questions")),
-                (Phase::Ending, WARM, Some("stops claude")),
+                (Phase::Ending(Ending), WARM, Some("stops claude")),
                 (writing(0), working, None),
             ],
         );
@@ -540,10 +853,7 @@ mod tests {
 
     #[test]
     fn a_message_names_the_questions_it_refuses_and_the_cold_cache() {
-        let empty = Stakes {
-            has_text: false,
-            ..COLD
-        };
+        let empty = Stakes { text: " ", ..COLD };
         assert_losses(
             Action::Send,
             vec![
@@ -569,7 +879,7 @@ mod tests {
             ..WARM
         };
         let empty = Stakes {
-            has_text: false,
+            text: "",
             held: Held::Nothing,
             ..WARM
         };
@@ -618,7 +928,7 @@ mod tests {
     #[test]
     fn the_ending_takes_only_ctrl_c_which_stops() {
         assert_eq!(
-            action(&Phase::Ending, &control('c'), input(true)),
+            action(&Phase::Ending(Ending), &control('c'), input(true)),
             Action::Session(SessionKey::Stop)
         );
         for key in [
@@ -630,7 +940,67 @@ mod tests {
             plain(KeyCode::Enter),
             plain(KeyCode::Char('a')),
         ] {
-            assert_eq!(action(&Phase::Ending, &key, input(true)), Action::Ignore);
+            assert_eq!(
+                action(&Phase::Ending(Ending), &key, input(true)),
+                Action::Ignore
+            );
         }
+    }
+
+    /// Presses Ctrl+L at `gate`, in a session that holds `stakes`, and returns whether the clear
+    /// goes ahead.
+    fn press_clear(gate: &mut Gate, stakes: Stakes) -> bool {
+        let clear = Action::Session(SessionKey::Clear);
+        let effect = Writing { waiting: 0 }
+            .effect(clear, stakes)
+            .expect("a context to clear");
+        gate.pass(&control('l'), Some(clear), effect).is_some()
+    }
+
+    #[test]
+    fn a_loss_goes_ahead_on_the_second_press_that_the_label_row_named() {
+        let mut gate = Gate::default();
+        assert!(!press_clear(&mut gate, WARM));
+        assert_eq!(
+            gate.label().as_deref(),
+            Some("Ctrl+L again clears the context")
+        );
+        assert!(press_clear(&mut gate, WARM));
+        assert_eq!(gate.label(), None);
+    }
+
+    #[test]
+    fn a_changed_loss_or_another_key_waits_for_a_press_more() {
+        let working = Stakes {
+            is_working: true,
+            ..WARM
+        };
+        let mut gate = Gate::default();
+        assert!(!press_clear(&mut gate, WARM));
+        // Claude started working, so the second press would stop the turn too
+        assert!(!press_clear(&mut gate, working));
+        assert!(press_clear(&mut gate, working));
+        assert!(!press_clear(&mut gate, WARM));
+        // A key with no effect on the session ends the wait
+        gate.reset();
+        assert!(!press_clear(&mut gate, WARM));
+    }
+
+    #[test]
+    fn a_key_with_nothing_to_act_on_has_no_effect() {
+        let stop = Action::Session(SessionKey::Stop);
+        let clear = Action::Session(SessionKey::Clear);
+        let blank = Stakes { text: " ", ..WARM };
+        let fresh = Stakes {
+            held: Held::Nothing,
+            ..WARM
+        };
+        assert_eq!(Writing { waiting: 0 }.effect(stop, WARM), None);
+        assert_eq!(Writing { waiting: 0 }.effect(Action::Send, blank), None);
+        assert_eq!(Writing { waiting: 0 }.effect(clear, fresh), None);
+        assert_eq!(
+            Writing { waiting: 2 }.effect(stop, WARM),
+            Some(OnMessage::Stop(TurnStop::Refuse(2)))
+        );
     }
 }

@@ -6,13 +6,11 @@ use std::process::{Child, ChildStdin};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use uuid::Uuid;
 
-use crate::context::Held;
 use crate::input_line::{InputLine, Outcome};
-use crate::keys::Phase;
+use crate::keys::{OnEnding, OnMessage, OnQuestion, TurnStop};
 use crate::picker::Draft;
 use crate::protocol::{Answer, Ask, AskKind, Command};
 use crate::questions::{Questions, Sent};
@@ -107,84 +105,69 @@ impl<'a> Conversation<'a> {
             }
             if is_open {
                 let view = questions.view();
-                match self.session.input.read_question(view, questions.draft())? {
-                    Outcome::End => return self.end_input(&mut questions),
-                    outcome => is_open = self.act_on_question(outcome, &mut questions)?,
+                let outcome = self.session.input.read_question(view, questions.draft())?;
+                match self.act_on_question(outcome, &mut questions)? {
+                    Some(still_open) => is_open = still_open,
+                    None => return self.end_input(&mut questions),
                 }
             } else {
-                let phase = Phase::Writing {
-                    waiting: questions.count(),
-                };
-                match self.session.input.read(phase, &draft)? {
-                    Outcome::End => return self.end_input(&mut questions),
-                    outcome => {
-                        (draft, is_open) = self.act_on_message(outcome, &mut questions)?;
-                    }
+                let outcome = self.session.input.read(questions.count(), &draft)?;
+                match self.act_on_message(outcome, &mut questions)? {
+                    Some(next) => (draft, is_open) = next,
+                    None => return self.end_input(&mut questions),
                 }
             }
         }
     }
 
     /// Acts on how the user left the message's line, and returns the message's draft and
-    /// whether the question view opened.
+    /// whether the question view opened, or none once the user ends the session's input. An
+    /// effect goes as the key decided it, with no new look at the session's state.
     fn act_on_message(
         &mut self,
-        outcome: Outcome<String>,
+        outcome: Outcome<String, OnMessage>,
         questions: &mut Questions,
-    ) -> Result<(String, bool), String> {
-        Ok(match outcome {
-            Outcome::Send(text) => {
-                if text.trim().is_empty() {
-                    (String::new(), false)
-                } else {
-                    self.refuse_questions(questions)?;
-                    self.send_message(&text)?;
-                    (String::new(), false)
-                }
-            }
-            Outcome::Questions(text) => (text, questions.open()),
-            // Claude's turn waits on its questions, so stopping it refuses them
-            Outcome::Stop(text) => {
-                if !questions.is_empty() {
-                    self.refuse_questions(questions)?;
-                } else if lock(&self.session.shared).output.status() != Status::Idle {
-                    self.interrupt(Interruption::Stop)?;
-                }
-                (text, false)
-            }
-            Outcome::Clear(text) => {
-                self.clear(questions)?;
-                (text, false)
+    ) -> Result<Option<(String, bool)>, String> {
+        let (text, confirmed) = match outcome {
+            Outcome::Act(text, confirmed) => (text, confirmed),
+            Outcome::Questions(text) => return Ok(Some((text, questions.open()))),
+            // Claude Code asked something, which the next round of the loop shows
+            Outcome::Break(text) | Outcome::Go(text, _) => return Ok(Some((text, false))),
+        };
+        match confirmed.effect() {
+            OnMessage::Send(sending) => {
+                self.refuse_questions(questions)?;
+                self.send_message(&sending.text)?;
+                return Ok(Some((String::new(), false)));
             }
             // Claude Code runs a command once the turn that runs ends, and cancels the questions
             // that wait for it, as for a message
-            Outcome::Run(text, command) => {
+            OnMessage::Run(sending) => {
+                let command = sending.text.trim();
                 self.refuse_questions(questions)?;
-                lock(&self.session.shared).output.show_command(&command);
-                self.send(&Command::Run { command: &command })?;
-                (text, false)
+                lock(&self.session.shared).output.show_command(command);
+                self.send(&Command::Run { command })?;
             }
-            // Claude Code asked something, which the next round of the loop shows
-            Outcome::Break(text) | Outcome::Go(text, _) => (text, false),
-            Outcome::End => unreachable!("the session ends before"),
-        })
+            OnMessage::Stop(stop) => self.stop_turn(*stop, questions)?,
+            // The conversation marks the clear once Claude Code tells it
+            OnMessage::Clear(stop) => {
+                if let Some(stop) = stop {
+                    self.stop_turn(*stop, questions)?;
+                }
+                self.send(&Command::Run { command: "clear" })?;
+            }
+            OnMessage::End => return Ok(None),
+        }
+        Ok(Some((text, false)))
     }
 
-    /// Clears the context, once Claude's turn ended: the turn that waits on questions ends as
-    /// they are refused, and another one is stopped. A context that holds nothing yet has
-    /// nothing to clear. The conversation marks the clear once Claude Code tells it.
-    fn clear(&mut self, questions: &mut Questions) -> Result<(), String> {
-        if lock(&self.session.shared).context.held(Instant::now()) == Held::Nothing {
-            return Ok(());
+    /// Stops Claude's turn as `stop` says: the turn that waits on questions ends as they are
+    /// refused, and another one with an interrupt.
+    fn stop_turn(&mut self, stop: TurnStop, questions: &mut Questions) -> Result<(), String> {
+        match stop {
+            TurnStop::Refuse(_) => self.refuse_questions(questions),
+            TurnStop::Interrupt => self.interrupt(Interruption::Stop),
         }
-        if questions.is_empty() {
-            if lock(&self.session.shared).output.status() != Status::Idle {
-                self.interrupt(Interruption::Stop)?;
-            }
-        } else {
-            self.refuse_questions(questions)?;
-        }
-        self.send(&Command::Run { command: "clear" })
     }
 
     /// Refuses every question that waits. Claude Code cancels them for a message or a command
@@ -197,14 +180,32 @@ impl<'a> Conversation<'a> {
     }
 
     /// Acts on how the user left the question shown in the question view, and returns whether
-    /// the question view still shows, false to go back to the message.
+    /// the question view still shows, false to go back to the message, or none once the user ends
+    /// the session's input.
     fn act_on_question(
         &mut self,
-        outcome: Outcome<Draft>,
+        outcome: Outcome<Draft, OnQuestion>,
         questions: &mut Questions,
-    ) -> Result<bool, String> {
-        Ok(match outcome {
-            Outcome::Send(draft) => match questions.send(draft) {
+    ) -> Result<Option<bool>, String> {
+        let (draft, confirmed) = match outcome {
+            Outcome::Act(draft, confirmed) => (draft, confirmed),
+            Outcome::Questions(draft) => {
+                questions.keep_draft(draft);
+                return Ok(Some(false));
+            }
+            Outcome::Go(draft, to) => {
+                questions.keep_draft(draft);
+                questions.go(to);
+                return Ok(Some(true));
+            }
+            // Claude Code asked something more, which the next round of the loop adds
+            Outcome::Break(draft) => {
+                questions.keep_draft(draft);
+                return Ok(Some(true));
+            }
+        };
+        Ok(Some(match confirmed.effect() {
+            OnQuestion::Submit { .. } => match questions.send(draft) {
                 Sent::Show => true,
                 Sent::Answered {
                     answers,
@@ -220,30 +221,14 @@ impl<'a> Conversation<'a> {
                     questions.open()
                 }
             },
-            Outcome::Questions(draft) => {
-                questions.keep_draft(draft);
-                false
-            }
-            Outcome::Go(draft, to) => {
-                questions.keep_draft(draft);
-                questions.go(to);
-                true
-            }
-            // Claude Code asked something more, which the next round of the loop adds
-            Outcome::Break(draft) => {
-                questions.keep_draft(draft);
-                true
-            }
             // Claude Code takes or refuses a call's questions together
-            Outcome::Stop(_) => {
+            OnQuestion::Refuse { .. } => {
                 let ask = questions.remove_shown();
                 self.reply(&ask, Answer::Deny)?;
                 questions.open()
             }
-            Outcome::End => unreachable!("the session ends before"),
-            Outcome::Clear(_) => unreachable!("the question view takes no Ctrl+L"),
-            Outcome::Run(..) => unreachable!("the question view takes no command"),
-        })
+            OnQuestion::End => return Ok(None),
+        }))
     }
 
     /// Refuses what Claude asks, and closes Claude Code's input, as the end of input does a
@@ -381,17 +366,13 @@ impl Ending<'_> {
                 Some(Input::Ask(_) | Input::Unsupported { .. } | Input::Incompatible(_)) | None => {
                 }
             }
-            match self.session.input.read(Phase::Ending, "")? {
-                Outcome::Stop(_) => self.interrupt()?,
+            match self.session.input.read_ending()? {
+                Outcome::Act(_, confirmed) => match confirmed.effect() {
+                    OnEnding::StopClaudeCode => self.interrupt()?,
+                },
                 // Claude Code fails what it asks once its input closed, and the ending takes no
                 // other key
-                Outcome::Break(_)
-                | Outcome::Send(_)
-                | Outcome::Questions(_)
-                | Outcome::Go(..)
-                | Outcome::End
-                | Outcome::Clear(_)
-                | Outcome::Run(..) => {}
+                Outcome::Break(_) | Outcome::Questions(_) | Outcome::Go(..) => {}
             }
         }
     }

@@ -188,10 +188,22 @@ impl Fake {
         self.state("idle");
     }
 
-    /// Sends the requests of a turn that asks, which ends once all are answered.
+    /// Sends the requests of a turn that asks, which ends once all are answered, each after its
+    /// call, as Claude Code 2.1.322 shows a call before it asks about it.
     fn send_asks(&mut self, asks: Vec<Value>) {
         self.asks_waiting = asks.len();
         for (number, request) in asks.into_iter().enumerate() {
+            let call = json!({
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "id": request["tool_use_id"],
+                    "name": request["tool_name"],
+                    "input": request["input"],
+                }]},
+                "parent_tool_use_id": null,
+            });
+            send(&call.to_string());
             let control = json!({
                 "type": "control_request",
                 "request_id": format!("{ASK_REQUEST_ID}-{number}"),

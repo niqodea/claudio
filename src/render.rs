@@ -144,6 +144,9 @@ struct BackgroundCall {
 struct PendingCall {
     name: String,
     tag: Tag,
+    /// The full view's line, from 1, that the call's own line is on, where a request to allow
+    /// the call opens the full view.
+    line: usize,
     /// The subagent that the call started, by its id, for an `Agent` call whose subagent's task
     /// started.
     agent: Option<String>,
@@ -639,14 +642,6 @@ impl Output {
             self.next_call = call.wrapping_add(1);
             Tag::Claude(call)
         };
-        self.pending_calls.insert(
-            tool_use.id.clone(),
-            PendingCall {
-                name: tool_use.name.clone(),
-                tag,
-                agent: None,
-            },
-        );
         let mark = format!("{STRONG}○{RESET} {SUBDUED}{tag}{RESET}{STRONG}");
         // One line per call keeps the tool calls out of the way of the conversation. A call that
         // names a task, like TaskStop's, names it by the tag of the call that started it, and
@@ -694,6 +689,16 @@ impl Output {
             self.begin(Section::Tools);
             self.push_detail(&line);
         }
+        // The call's line ends the full view now
+        self.pending_calls.insert(
+            tool_use.id.clone(),
+            PendingCall {
+                name: tool_use.name.clone(),
+                tag,
+                line: self.full_view_lines,
+                agent: None,
+            },
+        );
         for (field, value) in &tool_use.input {
             if let Value::String(text) = value {
                 self.write_full_view_line(&format!("  {SUBDUED}{field}:{RESET}"));
@@ -798,10 +803,14 @@ impl Output {
     pub fn show_ask(&mut self, ask: &Ask) -> Vec<usize> {
         self.begin(Section::Tools);
         match &ask.kind {
-            // The call's line shows what it asks to run, and the full view shows its input whole,
-            // to which the reason for asking adds
+            // The call's line shows what it asks to run, and the full view shows its input whole
+            // under it, so the request opens there, whatever came after the call, like the other
+            // calls of the same reply. The reason for asking adds to the full view's end, right
+            // under the call when nothing came between. Claude Code shows a call before it asks
+            // to allow it, so only a call it never showed opens at the end
             AskKind::Permission(permission) => {
-                let line = self.full_view_lines.max(1);
+                let line = (self.pending_calls.get(&ask.tool_use_id))
+                    .map_or(self.full_view_lines.max(1), |call| call.line);
                 if let Some(reason) = &permission.reason {
                     self.write_full_view_line(&format!("  {SUBDUED}reason:{RESET}"));
                     for reason_line in reason.lines() {
@@ -1414,6 +1423,38 @@ mod tests {
                 format!("{STRONG}Checks{RESET} Which checks?"),
             ]
         );
+    }
+
+    #[test]
+    fn a_request_to_allow_a_call_opens_on_the_calls_line() {
+        let file = tempfile::NamedTempFile::new().expect("the temporary directory takes a file");
+        let mut output = Output::new(
+            file.reopen().expect("the file opens again"),
+            Config::default().max_noisy_line_columns,
+        );
+        output.show_message("Hi");
+        for (id, command) in [("call-a", "touch a"), ("call-b", "touch b")] {
+            output.show_tool_use(&ToolUse {
+                id: id.to_string(),
+                ..tool_use("Bash", json!({"command": command}))
+            });
+        }
+        let request = json!({
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "tool_use_id": "call-a",
+            "input": {"command": "touch a"},
+        });
+        let Ok(crate::protocol::Event::Ask(ask)) =
+            crate::protocol::read_request("request-1".to_string(), request)
+        else {
+            panic!("an ask");
+        };
+        let starts = output.show_ask(&ask);
+        let text = std::fs::read_to_string(file.path()).expect("the full view reads back");
+        let lines: Vec<&str> = text.lines().collect();
+        let line = lines[starts[0] - 1];
+        assert!(line.contains("Bash:") && line.contains("touch a"), "{line}");
     }
 
     #[test]

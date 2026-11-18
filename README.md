@@ -167,7 +167,7 @@ The right end of the label row shows the progress: the request's questions `a`, 
 On a narrow screen, each end of the row keeps its edge and gives up text toward the middle, by the screen's width alone: first the progress hides its groups from the left, whole, like `… q w e ·`, then `… │`, so a name never shows cut, then the label loses its end.
 Each request goes to Claude Code as soon as you answer it, apart from the others.
 A question shows in a block of 8 rows under the title, whatever its length, so the options never move while you answer.
-A longer question ends in `… N more lines · Ctrl+O shows it whole`: Ctrl+O there opens the whole conversation at the question, to read with less's keys, and `q` brings you back to answer.
+A longer question ends in `… N more lines · Ctrl+O shows it whole`: Ctrl+O there opens the whole conversation at the request, a call's at the call, a quarter down the screen under what led to it, to read with less's keys, and `q` brings you back to answer.
 When the options of a question have previews, like code to compare, the question keeps the block's first 3 rows, and the preview of the option under the cursor the last 5, without the code's fences, behind a bar in the margin that starts with the option's key, like `2▎`.
 A longer preview ends in the same row that counts the lines left out.
 

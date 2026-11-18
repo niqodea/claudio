@@ -798,8 +798,10 @@ impl InputLine {
     }
 
     /// Shows the full view in less, from its end, where `F` follows the lines that keep coming
-    /// until Ctrl+C, or from the question the question view shows, which reads in full there
-    /// with less's own keys and then answers on `q`. less keeps the colors, draws on a screen of its own, which leaves the
+    /// until Ctrl+C, or from the request the question view shows, which reads in full there
+    /// with less's own keys and then answers on `q`. The request's line shows a quarter down the
+    /// screen, under what led to it, and the prompt names the view, rather than the path of its
+    /// temporary file, in each of less's three prompts, which `LESS` may pick. less keeps the colors, draws on a screen of its own, which leaves the
     /// conversation's rows as they were, and stays open on a view shorter than a screen,
     /// whatever `LESS` says. It reads the file as the UTF-8 the output writes, whatever the
     /// locale. Each of these takes a flag of less's own, which another pager has no use for, so
@@ -811,7 +813,8 @@ impl InputLine {
         };
         let status = self.run_program(
             process::Command::new("less")
-                .args(["-R", "-+X", "-+F", &start])
+                .args(["-R", "-+X", "-+F", "-j.25", &start])
+                .args(["s", "m", "M"].map(|style| format!("-P{style}full view?e (END).")))
                 .env("LESSCHARSET", "utf-8")
                 .arg(&self.full_view),
         )?;

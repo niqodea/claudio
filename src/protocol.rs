@@ -1466,8 +1466,7 @@ fn strip_escapes(text: &str) -> String {
 /// - `title`: a heading for Claude Code's own dialog. Claude Code 2.1.322 sends it only for a
 ///   tool the person answers on a card of its own, like setting up Claude in Chrome, which only
 ///   Claude's apps offer, and for an ask a hook words itself, so no call claudio meets has one
-///   yet. Read from Claude Code's code on 2026-11-15: should a tool claudio meets start sending
-///   one, show it.
+///   yet. Should a tool claudio meets start sending one, show it.
 /// - `matched_ask_rule`: the user's ask rule that matched too, when another check's reason is
 ///   the one given. The reason given is true, and the case is rare.
 /// - `permission_suggestions` and `suppress_always_allow_rule`: the rules an option "allow, and

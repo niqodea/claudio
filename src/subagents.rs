@@ -8,10 +8,9 @@ use std::collections::HashMap;
 /// A subagent stays after it ends, since Claude can resume it by its id at any time in the
 /// session, and the tag of the call that first started it names it again then. So the list
 /// grows by one small entry for each subagent the session starts, about 100 bytes, and a reset
-/// forgets the ended ones, since the new session cannot resume them. Claude Code bounds its own
-/// list instead: it forgets an ended subagent 30 seconds after its end, and loads it back from
-/// its transcript on disk when Claude resumes it, which claudio cannot read. Read in Claude
-/// Code 2.1.322, as the `evictAfter` of its tasks.
+/// forgets the ended ones, since the new session cannot resume them. Claude Code 2.1.322 bounds
+/// its own list instead: it forgets an ended subagent 30 seconds after its end, and loads it back
+/// from its transcript on disk when Claude resumes it, which claudio cannot read.
 #[derive(Default)]
 pub struct Subagents {
     by_id: HashMap<String, Subagent>,
@@ -93,9 +92,8 @@ impl Subagents {
     }
 
     /// Forgets the subagents that ended, as a new session starts, which cannot resume them. One
-    /// that runs stays, since Claude Code keeps a subagent that runs across a clear, as its
-    /// `hasAgentTaskSurvivingClear` in 2.1.322 tells. Should it stop it instead, the subagent
-    /// ends, and stays until the next reset.
+    /// that runs stays, since Claude Code 2.1.322 keeps a subagent that runs across a clear.
+    /// Should it stop it instead, the subagent ends, and stays until the next reset.
     pub fn forget_ended(&mut self) {
         (self.by_id).retain(|_, subagent| subagent.is_backgrounded.is_some());
     }

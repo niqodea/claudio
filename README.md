@@ -40,6 +40,10 @@ To always use the subscription, add this to `~/.claude/settings.json`, which emp
 { "env": { "ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "" } }
 ```
 
+claudio runs Claude Code as Anthropic publishes it, and you sign in to it with your own account, through Claude Code's own sign-in.
+claudio never reads or stores your login.
+Anthropic allows that use of a subscription: its [terms for Claude Code](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) let "an end user" sign in "to the unmodified Claude Code binary with their own Claude subscription".
+
 Claude Code's [headless docs](https://code.claude.com/docs/en/headless#start-faster-with-bare-mode) say `--bare` will become the default for `-p` in a future release.
 Bare mode ignores the subscription login, as well as CLAUDE.md files, hooks, plugins and auto-memory, so from that release claudio needs whatever turns it back off.
 
@@ -261,7 +265,7 @@ Whether a subagent runs in the foreground is Claude Code's choice: the checks sa
 Its calls and their results show only in the full view, tagged like `#0a#03`, since what it did shows in what it reports back to Claude, as in Claude Code, so a search there for `#0a` finds all it did.
 Its text stays out, as Claude Code leaves it out unless asked with `--forward-subagent-text`.
 A subagent that Claude resumes, with SendMessage, keeps its tag: the call names it, like `○ #0f SendMessage: #0a`, and the line of the resumed run's end is that call's, like `✓ #0f SendMessage: completed · 3 calls`.
-A message to a subagent by the name its Agent call gave it shows the name as written, like `○ #0f SendMessage: reviewer`, rather than the subagent's tag: Claude Code renames a subagent whose name another running one holds, like `reviewer-2`, and frees a name only 30 seconds after its holder ends, as its code in 2.1.322 does, so a tag found by the name could be another subagent's.
+A message to a subagent by the name its Agent call gave it shows the name as written, like `○ #0f SendMessage: reviewer`, rather than the subagent's tag: Claude Code renames a subagent whose name another running one holds, like `reviewer-2`, and frees a name only 30 seconds after its holder ends, as 2.1.322 does, so a tag found by the name could be another subagent's.
 While Claude waits for a call, the label row names its tool and its tag, like `running Bash #03`, and for a subagent in the foreground, counts the others that run in the foreground after it, like `running Agent #0a +2`, and `+N` for 10 or more.
 Only the subagents that Claude starts show, since Claude Code does not tell the calls of a subagent that another one starts.
 

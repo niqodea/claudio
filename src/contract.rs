@@ -124,9 +124,9 @@ const FREE_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a paid check waits for Claude Code, which calls the API.
 const PAID_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// Read in Claude Code 2.1.316 and seen with it: with `CLAUDE_CODE_SDK_READS_SESSION_STATE`
-/// set, Claude Code sends `session_state_changed` as a turn starts and ends, and without it,
-/// never. The SDK's types type the message, but name no variable.
+/// With `CLAUDE_CODE_SDK_READS_SESSION_STATE` set, as the Agent SDK sets it for the Claude Code
+/// it starts, Claude Code sends `session_state_changed` as a turn starts and ends, and without
+/// it, never. The SDK's types type the message, but name no variable.
 pub(crate) fn session_state_comes_with_its_variable(program: &Path) -> Result<(), String> {
     let with = Run::start(program, &[], &[], &[])?.clear_once()?;
     compare(&["state"], &with, &session_states_of_a_turn())?;
@@ -274,10 +274,10 @@ pub fn init(session: &str) -> String {
     line.to_string()
 }
 
-/// Read in the schema of Claude Code 2.1.322, which marks it internal, and seen with it: in auto
-/// mode, once the classifier has not answered for 4 seconds whether a tool call needs the
-/// user's approval, Claude Code sends `permission_check_status` with `checking`, then with `done`
-/// as the classifier answers, both between the call and its result.
+/// Seen with Claude Code 2.1.322: in auto mode, once the classifier has not answered for 4
+/// seconds whether a tool call needs the user's approval, Claude Code sends
+/// `permission_check_status` with `checking`, then with `done` as the classifier answers, both
+/// between the call and its result.
 ///
 /// The check runs Claude Code against [`crate::fake_api`], whose classifier answers after 5
 /// seconds. The call runs `sh -c true`, since Claude Code allows a read-only command without the
@@ -861,9 +861,9 @@ pub fn stopped_call() -> Vec<String> {
     lines.iter().map(Value::to_string).collect()
 }
 
-/// Read in the schema of Claude Code 2.1.316, which marks it internal: only `unifiedWindows`
-/// holds every limit of the plan, where the documented fields describe only the limit that
-/// applies now. The check needs a login to the subscription, whose plan has the limits.
+/// Seen with Claude Code 2.1.316: only `unifiedWindows` holds every limit of the plan, where the
+/// documented fields describe only the limit that applies now. The check needs a login to the
+/// subscription, whose plan has the limits.
 pub(crate) fn a_rate_limit_event_has_every_window(program: &Path) -> Result<(), String> {
     let mut run = Run::start(program, &["--model", MODEL], &[], &[])?;
     run.send_message("Reply with the single word ok.")?;

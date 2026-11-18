@@ -5,6 +5,10 @@
 //! claudio only runs its copy, and `claudio install-claude-code` installs it, as
 //! `playwright install` installs the browser builds a Playwright release runs.
 //! Ref: <https://playwright.dev/docs/browsers>, on Playwright's own copies of browsers
+//!
+//! claudio runs the binary as Anthropic publishes it, checked against its sha256, and leaves
+//! the user's login to Claude Code's own sign-in, since Anthropic allows a subscription's use
+//! on that condition, as the README's Claude Code section tells.
 
 use std::env;
 use std::fs;

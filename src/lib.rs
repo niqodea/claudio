@@ -19,6 +19,7 @@ mod cut;
 mod fake_api;
 mod input_line;
 mod keys;
+mod label;
 mod limits;
 mod markdown;
 mod picker;

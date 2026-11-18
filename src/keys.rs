@@ -155,7 +155,8 @@ pub struct View {
     /// call's tool, or `Plan`.
     pub label: String,
     /// The request's kind, `Question`, `Plan` or `Permission`, which the title above the block
-    /// shows, and nothing else: the label row names the request, and the block shows the rest.
+    /// shows, with the request's place when more than one waits: the label row names the
+    /// request, and the block shows the rest.
     pub title: String,
     /// What Ctrl+C refuses: the request shown, like `the call` or `2 questions`.
     pub refusal: String,

@@ -40,6 +40,7 @@ use crate::keys::{
     OnMessage, OnQuestion, PREVIEWED_QUESTION_ROWS, Phase, Reading, SessionKey, Tone, View,
     Writing,
 };
+use crate::label::{KeyState, MainLabel, Progress, QuestionLabel};
 use crate::limits::{Level, limit_level};
 use crate::picker::{self, Cursor, Draft, Form, Move, Pick, question_name, request_name};
 use crate::render::{Output, Status, marks, start_bar_row, user_line};
@@ -990,26 +991,29 @@ impl InputLine {
         }
     }
 
-    /// The label row: the label, and at its right end where the keys go, as `key_state` gives it,
-    /// on the bar, in one row, which gives up text as `ScreenRow::spread` does: the label loses its end first, and the key state, which tells
-    /// what the user is typing, goes last.
+    /// The label row: the label, and at its end where the keys go, on the bar, in one row, laid
+    /// out by `MainLabel`, so a half-typed command moves nothing.
     fn label_row(&self) -> ScreenRow {
-        let right = format!("{SUBDUED_ON_BAR}{}", self.key_state());
         let columns = self.columns();
-        on_bar(&ScreenRow::spread(&self.label, &[right], columns), columns)
+        let row = MainLabel::new(columns).row(&self.label, &self.key_state());
+        on_bar(&row, columns)
     }
 
-    /// The question view's label row: the label, and at its right end the progress through the
-    /// batch and where the keys go. Unlike the conversation's, it takes one
-    /// row, with the options right under it, so it gives up text as `ScreenRow::spread` does.
+    /// The question view's label row: the label, and at its end the progress through the batch
+    /// and the requests and where the keys go, while the cursor is in the box, laid out by
+    /// `QuestionLabel`, so no part moves when another changes.
     fn question_label_row(&self, view: &View) -> ScreenRow {
-        let key_state = if self.pick.cursor == Cursor::Writing {
-            self.key_state()
-        } else {
-            String::new()
+        let progress = Progress {
+            questions: names(
+                &view.progress,
+                view.index,
+                question_name,
+                picker::QUESTION_KEYS.len(),
+            ),
+            requests: request_names(view),
+            key_state: (self.pick.cursor == Cursor::Writing).then(|| self.key_state()),
         };
-        let right = right_end(view, &key_state);
-        ScreenRow::spread(&self.label, &right, self.columns())
+        QuestionLabel::new(self.columns(), QUESTION_LABEL_COLUMNS).row(&self.label, &progress)
     }
 
     /// Where the keys go, for the label row's right end: the keys of a half-typed vi command,
@@ -1017,21 +1021,19 @@ impl InputLine {
     /// command line, which takes the keys from the box while it is open: `N` for normal, `I` for
     /// insert, `V` for both visual modes and `C` for the command line, as vim's status lines show
     /// its command-line mode among the others, but in one letter like the label row's other
-    /// indicators. The letter
-    /// takes the edge, so it stays in place, and the keys grow leftward from it. It tells the mode
+    /// indicators. The letter takes the edge, so it stays in place, and the keys fill their
+    /// columns from their start, so none moves as the next comes. The letter tells the mode
     /// in a character where the cursor's shape alone did not, which some terminals do not show.
-    fn key_state(&self) -> String {
+    fn key_state(&self) -> KeyState {
         let mode = match self.editor.mode() {
             _ if self.command_line.is_some() => 'C',
             Mode::Normal => 'N',
             Mode::Insert => 'I',
             Mode::Visual | Mode::VisualLine => 'V',
         };
-        let pending = self.editor.pending();
-        if pending.is_empty() {
-            mode.to_string()
-        } else {
-            format!("{pending} {mode}")
+        KeyState {
+            pending: self.editor.pending(),
+            mode,
         }
     }
 
@@ -1061,7 +1063,12 @@ impl InputLine {
                 rows: BLOCK_ROWS - PREVIEWED_QUESTION_ROWS,
             });
         }
-        let stack = stack_lines(&view.title, &fields, usize::from(rows.stack), columns);
+        let place = request_place(view);
+        let title = Title {
+            kind: &view.title,
+            place: place.as_deref(),
+        };
+        let stack = stack_lines(&title, &fields, usize::from(rows.stack), columns);
         for (row, line) in (rows.stack_top..).zip(stack) {
             put_line(out, row, &line);
         }
@@ -1412,96 +1419,45 @@ fn limit_indicator(letter: char, level: Option<Level>) -> String {
     format!("{color}{letter}{}", show_level(level.map(Level::to_number)))
 }
 
-/// The versions of the question view's label row's right end, from whole to a lone `…`: the
-/// progress, as the names of the questions of the request shown, then those of the requests
-/// that wait, then the place of the request shown, each only when its level has more than one
-/// item, and last where the keys go, `key_state`, as `InputLine::key_state` gives it. Each
-/// version after the first hides one more group from the left, whole, behind `…`, so a name
-/// never shows cut, and the key state, which tells what the user is typing, goes last.
-/// Ref: <https://github.com/nvim-lualine/lualine.nvim/wiki/Component-snippets>,
-/// whose status line hides whole components on a narrow window
-fn right_end(view: &View, key_state: &str) -> Vec<String> {
-    let questions = names(&view.progress, view.index, question_name);
-    let requests = request_names(view);
-    let place = request_place(view);
-    let key_state = (!key_state.is_empty()).then(|| key_state.to_string());
-    // The questions change with each request, so they go left of the requests, where they move
-    // nothing when they change
-    let groups: Vec<(&str, String)> = [
-        (" │ ", questions),
-        (" │ ", requests),
-        (" ", place),
-        (" ", key_state),
-    ]
-    .into_iter()
-    .filter_map(|(gap, group)| Some((gap, group?)))
-    .collect();
-    if groups.is_empty() {
-        return Vec::new();
-    }
-    let joined = |groups: &[(&str, String)]| {
-        (groups.iter().enumerate())
-            .map(|(index, (gap, group))| {
-                let gap = if index == 0 { "" } else { gap };
-                format!("{SUBDUED_ON_BAR}{gap}{group}")
-            })
-            .collect::<Vec<_>>()
-            .concat()
-    };
-    let hidden = |from: usize| match &groups[from..] {
-        [] => format!("{SUBDUED_ON_BAR}…"),
-        rest => format!("{SUBDUED_ON_BAR}… {}", joined(rest)),
-    };
-    [joined(&groups)]
-        .into_iter()
-        .chain((1..=groups.len()).map(hidden))
-        .collect()
+/// The names of the requests that have a key, as for the questions of a batch, even for a
+/// single request, so the part next to where the keys go is always there. The names are keys,
+/// so a request after the fourth, which `}` reaches, shows none, and the title gives its place.
+fn request_names(view: &View) -> String {
+    let keyed = view.requests.len().min(picker::REQUEST_KEYS.len());
+    let name = |index| request_name(index).expect("a named request");
+    name_row(
+        &view.requests[..keyed],
+        view.request_index,
+        name,
+        picker::REQUEST_KEYS.len(),
+    )
 }
 
-/// The names of the requests that wait, as for the questions of a batch, where those after the
-/// fourth, which have no key, show as how many they are, like `+2`, in reverse video when one of
-/// them shows.
-fn request_names(view: &View) -> Option<String> {
-    let count = view.requests.len();
-    let keyed = count.min(picker::REQUEST_KEYS.len());
-    let mut shown = names(&view.requests[..keyed], view.request_index, |index| {
-        request_name(index).expect("a named request")
-    })?;
-    if count > keyed {
-        let (on, off) = if view.request_index >= keyed {
-            (REVERSE, UNREVERSE)
-        } else {
-            ("", "")
-        };
-        let rest = count - keyed;
-        shown = format!("{shown} {SUBDUED_ON_BAR}{on}+{rest}{off}");
-    }
-    Some(shown)
-}
-
-/// The place of the request shown among those that wait, like `2/3`, when more than one waits,
-/// its number padded to the width of the count, so the place keeps one width from one request
-/// to the next.
+/// The place of the request shown among those that wait, like `2/7`, when more than one waits,
+/// each number counted as `Y` counts, up to 9 and then +, like `2/+` and `+/+`, so the place
+/// always takes 3 columns.
 fn request_place(view: &View) -> Option<String> {
     let count = view.requests.len();
     (count > 1).then(|| {
-        format!(
-            "{:>width$}/{count}",
-            view.request_index + 1,
-            width = count.to_string().len()
-        )
+        let shown = show_count(view.request_index + 1);
+        format!("{shown}/{}", show_count(count))
     })
 }
 
 /// The names of the items of one level of the question view, like the questions of a batch:
 /// each item's name, which is its key, green once `done`, with the one `shown` in reverse video,
 /// which ends without a reset, so the bar stays behind them. Letters keep the marks the same
-/// size, and set them apart from the options' numbers. A level of one item has nothing to move
-/// to, so it shows no names.
-fn names(done: &[bool], shown: usize, name: fn(usize) -> char) -> Option<String> {
-    if done.len() < 2 {
-        return None;
-    }
+/// size, and set them apart from the options' numbers. A dim `·` stands for each name of the
+/// `room` the level has that it lacks, like `a s · ·`, so the level shows how much room it has,
+/// in the columns it always takes. A level of one item has nothing to move to, so it shows no
+/// names, nor dots.
+fn names(done: &[bool], shown: usize, name: fn(usize) -> char, room: usize) -> Option<String> {
+    (done.len() > 1).then(|| name_row(done, shown, name, room))
+}
+
+/// The names of `done`'s items, as `names` shows them, however many they are.
+fn name_row(done: &[bool], shown: usize, name: fn(usize) -> char, room: usize) -> String {
+    let dots = (done.len()..room).map(|_| format!("{SUBDUED_ON_BAR}·"));
     let names = done.iter().enumerate().map(|(index, &is_done)| {
         let color = if is_done {
             DONE_OR_ADDED
@@ -1515,7 +1471,7 @@ fn names(done: &[bool], shown: usize, name: fn(usize) -> char) -> Option<String>
         };
         format!("{color}{on}{}{off}", name(index))
     });
-    Some(names.collect::<Vec<_>>().join(" "))
+    names.chain(dots).collect::<Vec<_>>().join(" ")
 }
 
 /// Y and how many questions wait, in the color of a warning while any waits, since only the
@@ -1563,6 +1519,10 @@ const NAME_COLUMNS: usize = NAME_WIDTH + ": ".len();
 /// @anthropic-ai/claude-agent-sdk, which asks Claude for a header of at most 12 characters
 const HEADER_COLUMNS: usize = 12;
 
+/// The columns the question view's label row keeps for its label before the right end gives up
+/// parts: the marks, the header, and the start of the hint after it.
+const QUESTION_LABEL_COLUMNS: usize = 3 + HEADER_COLUMNS + 3 + 12;
+
 /// `label`, a question's header or a call's tool, in `HEADER_COLUMNS` columns: padded when
 /// shorter, and cut at its end when longer, since Claude can write a longer one, so the hint
 /// after it starts in the same column on every request.
@@ -1584,17 +1544,31 @@ fn mark_columns(mark: &Mark) -> usize {
     }
 }
 
-/// A title across a screen `width` wide: `title` between two dashes, then dashes to the edge,
-/// as fzf labels its preview window.
-fn title_line(title: &str, width: NonZeroUsize) -> String {
-    let room = width.get().saturating_sub("──  ".len());
+/// The title above a request: its kind, and its place among the requests that wait, when more
+/// than one waits.
+struct Title<'a> {
+    kind: &'a str,
+    place: Option<&'a str>,
+}
+
+/// A title across a screen `width` wide: the kind between two dashes, then dashes, then the
+/// place between two dashes at the edge, as fzf labels its preview window. A screen too narrow
+/// for both whole keeps the kind alone.
+fn title_line(title: &Title, width: NonZeroUsize) -> String {
+    let frame = visible_width("──  ");
+    let end = (title.place)
+        .map(|place| format!(" {place} ──"))
+        .filter(|end| frame + visible_width(title.kind) + visible_width(end) < width.get())
+        .unwrap_or_default();
+    let room = width.get().saturating_sub(frame + visible_width(&end));
     let room = NonZeroUsize::new(room).unwrap_or(NonZeroUsize::MIN);
-    let title = format!(
+    let kind = format!(
         "── {}{RESET}{SUBDUED} ",
-        cut(&format!("{STRONG}{title}"), room)
+        cut(&format!("{STRONG}{}", title.kind), room)
     );
-    let fill = "─".repeat(width.get().saturating_sub(visible_width(&title)));
-    format!("{SUBDUED}{title}{fill}")
+    let taken = visible_width(&kind) + visible_width(&end);
+    let fill = "─".repeat(width.get().saturating_sub(taken));
+    format!("{SUBDUED}{kind}{fill}{end}")
 }
 
 /// The rows of a field on a screen `columns` wide that its value takes, as `block_lines` shows
@@ -1656,7 +1630,7 @@ fn quoted_lines(key: Option<&str>, field: &Field, columns: NonZeroUsize) -> Vec<
 /// block of `fields` under it, whose last row swallows what does not fit, by `cut::fit`. The
 /// title goes last, as the top of the stack: on one row, the row swallows it too, and says so.
 fn stack_lines(
-    title: &str,
+    title: &Title,
     fields: &[Field],
     rows: usize,
     columns: NonZeroUsize,
@@ -1969,14 +1943,15 @@ mod tests {
 
     #[test]
     fn a_level_names_its_items_only_when_it_has_several() {
-        assert_eq!(names(&[false], 0, question_name), None);
-        let two = names(&[true, false], 1, question_name).expect("names");
+        assert_eq!(names(&[false], 0, question_name, 4), None);
+        let two = names(&[true, false], 1, question_name, 4).expect("names");
+        assert!(two.ends_with(&format!("{SUBDUED_ON_BAR}· {SUBDUED_ON_BAR}·")));
         assert!(two.contains(&format!("{DONE_OR_ADDED}a")));
         assert!(two.contains(&format!("{REVERSE}s")));
     }
 
     #[test]
-    fn requests_after_the_fourth_show_as_their_count_beside_the_questions() {
+    fn the_requests_always_show_their_keys_and_the_title_their_place() {
         let view = |requests: usize, request_index: usize, questions: usize| View {
             label: String::new(),
             title: String::new(),
@@ -1993,53 +1968,15 @@ mod tests {
             is_submitted: false,
             sends_at_once: false,
         };
-        assert_eq!(right_end(&view(1, 0, 1), ""), Vec::<String>::new());
-        let plain = |text: String| {
-            let mut plain = String::new();
-            let mut characters = text.chars();
-            while let Some(character) = characters.next() {
-                if character == '\x1b' {
-                    characters.by_ref().find(char::is_ascii_alphabetic);
-                } else {
-                    plain.push(character);
-                }
-            }
-            plain
-        };
-        let six = &right_end(&view(6, 5, 2), "")[0];
-        assert_eq!(plain(six.clone()), "a s │ q w e r +2 6/6");
-        assert!(six.contains(&format!("{REVERSE}+2")));
-        assert_eq!(plain(right_end(&view(2, 0, 1), "")[0].clone()), "q w 1/2");
-        // The place keeps the width of the count, so the names keep their columns
-        assert_eq!(
-            plain(right_end(&view(10, 2, 1), "")[0].clone()),
-            "q w e r +6  3/10"
-        );
-        // Each shorter version hides one more group from the left, whole
-        let versions: Vec<String> = right_end(&view(6, 5, 2), "")
-            .into_iter()
-            .map(plain)
-            .collect();
-        assert_eq!(
-            versions,
-            ["a s │ q w e r +2 6/6", "… q w e r +2 6/6", "… 6/6", "…"]
-        );
-        let questions: Vec<String> = right_end(&view(1, 0, 2), "")
-            .into_iter()
-            .map(plain)
-            .collect();
-        assert_eq!(questions, ["a s", "…"]);
-        // Where the keys go, a half-typed command and the mode, takes the right end, and goes last
-        let typing: Vec<String> = right_end(&view(2, 0, 1), "d2 N")
-            .into_iter()
-            .map(plain)
-            .collect();
-        assert_eq!(typing, ["q w 1/2 d2 N", "… 1/2 d2 N", "… d2 N", "…"]);
-        let alone: Vec<String> = right_end(&view(1, 0, 1), "I")
-            .into_iter()
-            .map(plain)
-            .collect();
-        assert_eq!(alone, ["I", "…"]);
+        assert_eq!(plain(&request_names(&view(1, 0, 1))), "q · · ·");
+        assert_eq!(request_place(&view(1, 0, 1)), None);
+        assert_eq!(plain(&request_names(&view(2, 0, 1))), "q w · ·");
+        let sixth = request_names(&view(6, 5, 2));
+        assert!(!sixth.contains(REVERSE), "{sixth}");
+        assert_eq!(plain(&sixth), "q w e r");
+        assert_eq!(request_place(&view(6, 5, 2)).as_deref(), Some("6/6"));
+        assert_eq!(request_place(&view(12, 1, 1)).as_deref(), Some("2/+"));
+        assert_eq!(request_place(&view(12, 9, 1)).as_deref(), Some("+/+"));
     }
 
     use crate::style::STRONG;
@@ -2242,6 +2179,23 @@ mod tests {
     }
 
     #[test]
+    fn the_title_ends_in_the_place_at_the_edge_when_it_fits_whole() {
+        let line = |place: &str, count: usize| {
+            let title = Title {
+                kind: "Plan",
+                place: Some(place),
+            };
+            plain(&title_line(
+                &title,
+                NonZeroUsize::new(count).expect("a column"),
+            ))
+        };
+        assert_eq!(line("2/7", 30), "── Plan ─────────────── 2/7 ──");
+        assert_eq!(line("2/7", 16), "── Plan ─ 2/7 ──");
+        assert_eq!(line("2/7", 15), "── Plan ───────");
+    }
+
+    #[test]
     fn the_title_goes_last_and_a_stack_of_one_row_says_it_swallowed_the_request() {
         let field = |mark: Mark, value: &str| Field {
             mark,
@@ -2256,7 +2210,11 @@ mod tests {
         ];
         let columns = NonZeroUsize::new(40).expect("40 is not zero");
         let text = |rows| {
-            (stack_lines("Questions", &fields, rows, columns).iter())
+            let title = Title {
+                kind: "Questions",
+                place: None,
+            };
+            (stack_lines(&title, &fields, rows, columns).iter())
                 .map(|line| plain(line.as_str()))
                 .collect::<Vec<_>>()
         };

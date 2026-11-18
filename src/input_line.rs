@@ -967,11 +967,8 @@ impl InputLine {
             .max((cursor_y + 1).saturating_sub(rows));
         let lines = (0..rows)
             .map(|y| {
-                let text = wrapped
-                    .rows
-                    .get(usize::from(self.scroll + y))
-                    .map_or("", |row| row.text.as_str());
-                ScreenRow::cut(&format!("{}{text}{RESET}", start_bar_row()), columns)
+                let row = wrapped.rows.get(usize::from(self.scroll + y));
+                box_line(row.map(|row| row.text.as_str()), columns)
             })
             .collect();
         (
@@ -1431,6 +1428,13 @@ fn request_names(view: &View) -> String {
         name,
         picker::REQUEST_KEYS.len(),
     )
+}
+
+/// A row of the box, on the bar: a row of the text, or past the text's end, a dim `~`, as vim
+/// marks the rows past a buffer's end, so an empty line of the text shows apart from no line.
+fn box_line(text: Option<&str>, columns: NonZeroUsize) -> ScreenRow {
+    let text = text.map_or_else(|| format!("{SUBDUED_ON_BAR}~"), str::to_string);
+    ScreenRow::cut(&format!("{}{text}{RESET}", start_bar_row()), columns)
 }
 
 /// The place of the request shown among those that wait, like `2/7`, when more than one waits,
@@ -2176,6 +2180,17 @@ mod tests {
         assert_eq!(rows.own, 14);
         assert_eq!((rows.options, rows.label), (10, 9));
         assert_eq!(rows.stack_top, 0);
+    }
+
+    #[test]
+    fn a_row_past_the_texts_end_shows_a_tilde_and_an_empty_line_shows_nothing() {
+        let columns = NonZeroUsize::new(10).expect("a column");
+        assert_eq!(plain(box_line(None, columns).as_str()).trim_end(), "~");
+        assert_eq!(plain(box_line(Some(""), columns).as_str()).trim_end(), "");
+        assert_eq!(
+            plain(box_line(Some("hi"), columns).as_str()).trim_end(),
+            "hi"
+        );
     }
 
     #[test]

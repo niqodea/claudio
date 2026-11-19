@@ -39,8 +39,8 @@ pub struct Questions {
 /// A request of Claude's, with each of its questions.
 struct Request {
     ask: Ask,
-    /// The subagent that asked, by the description of the call that started it, none for Claude
-    /// itself. Only a permission can come from a subagent, since Claude Code gives no subagent
+    /// The subagent that asked, as `Work::name_subagent` names it, none for Claude itself. Only a
+    /// permission can come from a subagent, since Claude Code gives no subagent
     /// `AskUserQuestion` or `ExitPlanMode`, so only a permission shows it.
     /// Seen with Claude Code 2.1.322: a subagent asked to call either reported neither among its
     /// tools.

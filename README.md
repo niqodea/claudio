@@ -228,7 +228,7 @@ A plan shows in the same 8 rows as a question, as written, and a longer plan end
 A call shows in the same 8 rows as a question: its input in the first 6, and on the last 2, what the request says about itself, always there, in grey when Claude Code says nothing.
 The input shows first the fields that matter most, each after a sign that reads as what it is, then the others, by name.
 After `?` comes why Claude Code asks, as it sends it: its words, or else the kind of check that asks, like `A rule in your settings asks before this call`, or else the path that made it ask, and `no reason given` when it sends none of them.
-After `↳` comes who asked: the subagent, by the description of the call that started it, or `main agent`.
+After `↳` comes who asked: the subagent, by its tag and the description of the call that started it, like `#0a Review the diff`, or `main agent`.
 Only a call can come from a subagent, since Claude Code gives subagents no tool to ask questions or propose a plan.
 The signs come from a shell and a diff: Bash shows `$` before its command, `#` before its description, `t` before its timeout and `&` before where it runs, like `& in background`, an Edit shows `-` and `+` before what it takes out and puts in, in red and green, `@` comes before a file or a URL, and `│` before a Write's content or a WebFetch's prompt.
 A field the call leaves out shows what that means in grey, like `t default` or `& in foreground`.
@@ -272,7 +272,11 @@ Whether a subagent runs in the foreground is Claude Code's choice: the checks sa
 Its calls and their results show only in the full view, tagged like `#0a#03`, since what it did shows in what it reports back to Claude, as in Claude Code, so a search there for `#0a` finds all it did.
 Its text stays out, as Claude Code leaves it out unless asked with `--forward-subagent-text`.
 A subagent that Claude resumes, with SendMessage, keeps its tag: the call names it, like `○ #0f SendMessage: #0a`, and the line of the resumed run's end is that call's, like `✓ #0f SendMessage: completed · 3 calls`.
-A message to a subagent by the name its Agent call gave it shows the name as written, like `○ #0f SendMessage: reviewer`, rather than the subagent's tag: Claude Code renames a subagent whose name another running one holds, like `reviewer-2`, and frees a name only 30 seconds after its holder ends, as 2.1.322 does, so a tag found by the name could be another subagent's.
+claudio knows a subagent by its id alone, which Claude Code puts on all it tells of the subagent, and shows it by its tag everywhere, so a line never names the wrong one.
+A message to a subagent by its id shows its tag, like `○ #0f SendMessage: #0a`, and one by the name its Agent call asked for shows the name as written, like `○ #0f SendMessage: reviewer`.
+Claude Code reports the name it gave in nothing it sends: the Agent call's result holds the subagent's id alone, as `AgentOutput` in the SDK's [`sdk-tools.d.ts`](https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.325/sdk-tools.d.ts) types it, and so does its task's start.
+And the name it gave can differ from the one asked for: 2.1.322 renamed a subagent whose name another running one held, like `reviewer-2`, and freed a name only 30 seconds after its holder ended, so a tag found by the name could be another subagent's.
+Tools that read Claude Code's hooks miss the name too, as [anthropics/claude-code#100198](https://github.com/anthropics/claude-code/issues/100198) reports, and [#89091](https://github.com/anthropics/claude-code/issues/89091) shows a subagent's type, given in place of its id, failing as an address.
 While Claude waits for a call, the label row names its tool and its tag, like `running Bash #03`, and for a subagent in the foreground, counts the others that run in the foreground after it, like `running Agent #0a +2`, and `+N` for 10 or more.
 Only the subagents that Claude starts show, since Claude Code does not tell the calls of a subagent that another one starts.
 

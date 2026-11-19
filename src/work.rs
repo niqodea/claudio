@@ -6,7 +6,33 @@
 //! foreground, where the turn waits for it, or in the background, where the turn goes on
 //! without it. A task starts in either place, and moves only from the foreground to the
 //! background. A subagent's own calls belong to it, and end with it.
+//!
+//! A subagent is known by what Claude Code states of it, and nothing claudio infers, so a line
+//! never names the wrong one:
+//! - its identity is its id, `SubagentId`, which every message of it, its task and its
+//!   requests carry;
+//! - it shows to the user by its tag, from the `Agent` call that first started it, with what it
+//!   does where the line has room, like `#0a Review the diff`, on every line about it;
+//! - what Claude writes to reach it, like `SendMessage`'s `to`, shows as its tag when it is an
+//!   id claudio knows, and as written otherwise.
+//!
+//! So a subagent that Claude messages by name shows by that name, rather than by its tag. Claude
+//! Code addresses a subagent by the `name` its `Agent` call asks for, but reports the name it
+//! gave in none of what it sends: the `Agent` call's result holds the subagent's id alone, and
+//! so does its task's start. The name it gave can differ from the one asked for, since Claude
+//! Code 2.1.322 renamed a subagent whose name a running one held, like `reviewer-2`, and freed a
+//! name only 30 seconds after its holder ended. A name can also reach another session, or a
+//! teammate, as `SendMessage`'s `to` does.
+//! Ref: `AgentInput` and `AgentOutput` in `sdk-tools.d.ts`, and `SDKTaskStartedMessage` in
+//! `sdk.d.ts`, of <https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.325/>
+//! Ref: <https://code.claude.com/docs/en/agent-sdk/subagents>, which identifies a subagent by
+//! the `agentId` of its `Agent` call's result, and by `agent_id` on its messages
+//! Ref: <https://github.com/anthropics/claude-code/issues/100198>, which asks for a subagent's
+//! name in hooks, where Claude Code leaves it out too
+//! Ref: <https://github.com/anthropics/claude-code/issues/89091>, where a subagent's type, given
+//! in place of its id, failed as an address
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
 
@@ -38,6 +64,28 @@ impl Display for Tag {
     }
 }
 
+/// A subagent's id, which Claude Code gives it as it starts: the one thing that tells subagents
+/// apart. Its task has the same id, and it stays the same when Claude resumes the subagent, as
+/// `agent_id` of `SDKAssistantMessage` in `sdk.d.ts` says.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SubagentId(String);
+
+impl SubagentId {
+    pub fn new(id: impl Into<String>) -> Self {
+        SubagentId(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Borrow<str> for SubagentId {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
 /// A call that waits for its result, whose line names the tool and repeats the tag.
 #[derive(Clone)]
 pub struct Call {
@@ -48,7 +96,7 @@ pub struct Call {
     /// the call opens the full view.
     pub line: usize,
     /// The subagent that makes the call, none for Claude's own.
-    owner: Option<String>,
+    owner: Option<SubagentId>,
     /// The task the call started, whose id is the subagent's for a call that started one.
     pub task: Option<String>,
 }
@@ -140,7 +188,7 @@ pub struct Work {
     /// bounds its own list instead: it forgets an ended subagent 30 seconds after its end, and
     /// loads it back from its transcript on disk when Claude resumes it, which claudio cannot
     /// read.
-    subagents: HashMap<String, Subagent>,
+    subagents: HashMap<SubagentId, Subagent>,
     /// The tasks that run in the background, as Claude Code last listed them. The list is what
     /// claudio counts and stops, while the tasks above are what it tells apart and names: a
     /// task's start, end and moves come as events of their own, which the list follows.
@@ -154,8 +202,8 @@ impl Work {
     /// own run's calls. The full view's line of the call comes once the call's line is written,
     /// which shows the tag: `set_line`.
     pub fn add_call(&mut self, tool_use: &ToolUse) -> Tag {
-        let tag = if let Some(agent) = &tool_use.agent {
-            let subagent = self.subagents.entry(agent.clone()).or_default();
+        let tag = if let Some(owner) = &tool_use.subagent {
+            let subagent = self.subagents.entry(owner.clone()).or_default();
             let call = subagent.next_call;
             subagent.next_call = call.wrapping_add(1);
             subagent.calls += 1;
@@ -170,7 +218,7 @@ impl Work {
             tool: tool_use.name.clone(),
             tag,
             line: 0,
-            owner: tool_use.agent.clone(),
+            owner: tool_use.subagent.clone(),
             task: None,
         };
         self.calls.insert(tool_use.id.clone(), call);
@@ -201,7 +249,9 @@ impl Work {
     ) {
         let call = call.and_then(|call| self.calls.get_mut(call));
         if kind == Kind::Subagent {
-            let subagent = self.subagents.entry(id.clone()).or_default();
+            let subagent = (self.subagents)
+                .entry(SubagentId::new(id.clone()))
+                .or_default();
             let start = call.as_ref().and_then(|call| match call.tag {
                 Tag::Claude(count) => Some(count),
                 Tag::Subagent(..) => None,
@@ -367,10 +417,20 @@ impl Work {
         self.subagents.get(id)
     }
 
-    /// The subagent that makes the call `id`, by what it does, none for Claude itself.
-    pub fn owner_of(&self, id: &str) -> Option<String> {
-        let owner = self.calls.get(id)?.owner.as_ref()?;
-        self.subagents.get(owner)?.description.clone()
+    /// The subagent `id` as a line names it: by its tag and what it does, like `#0a Review the
+    /// diff`, or by its id, as Claude Code gives it, for a subagent whose start claudio did not
+    /// see.
+    pub fn name_subagent(&self, id: &SubagentId) -> String {
+        let subagent = self.subagents.get(id);
+        let tag = (subagent.and_then(|subagent| subagent.start))
+            .map(|start| Tag::Claude(start).to_string());
+        let description = subagent.and_then(|subagent| subagent.description.clone());
+        let parts: Vec<String> = [tag, description].into_iter().flatten().collect();
+        if parts.is_empty() {
+            id.as_str().to_string()
+        } else {
+            parts.join(" ")
+        }
     }
 
     /// Starts the work of a new session, as a clear does. It keeps the count of Claude's calls,
@@ -386,7 +446,8 @@ impl Work {
             .retain(|_, task| task.end.is_none() || matches!(task.origin, Origin::Waiting(_)));
         let tasks = &self.tasks;
         (self.subagents).retain(|id, _| {
-            tasks.contains_key(id) || calls.values().any(|call| call.owner.as_ref() == Some(id))
+            tasks.contains_key(id.as_str())
+                || calls.values().any(|call| call.owner.as_ref() == Some(id))
         });
     }
 }
@@ -402,8 +463,7 @@ mod tests {
             id: id.to_string(),
             name: name.to_string(),
             input: Map::new(),
-            agent_call: agent.map(String::from),
-            agent: agent.map(String::from),
+            subagent: agent.map(SubagentId::new),
         }
     }
 
@@ -445,6 +505,22 @@ mod tests {
         work.start_session();
         assert!(work.subagent("running").is_none());
         assert_eq!(work.add_call(&tool_use("c2", "Bash", None)), Tag::Claude(2));
+    }
+
+    #[test]
+    fn a_subagent_shows_by_its_tag_and_what_it_does_and_else_by_its_id() {
+        let mut work = Work::default();
+        work.add_call(&tool_use("c0", "Agent", None));
+        let id = SubagentId::new("a");
+        work.start_task(
+            "a".to_string(),
+            Some("c0"),
+            Kind::Subagent,
+            Place::Background,
+            "Review",
+        );
+        assert_eq!(work.name_subagent(&id), "#00 Review");
+        assert_eq!(work.name_subagent(&SubagentId::new("b")), "b");
     }
 
     #[test]

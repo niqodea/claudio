@@ -86,7 +86,7 @@ impl<'a> Conversation<'a> {
                 Some(Input::Ask(ask)) => {
                     let mut guard = lock(&self.session.shared);
                     let shared = &mut *guard;
-                    let agent = shared.work.owner_of(&ask.tool_use_id);
+                    let agent = (ask.subagent.as_ref()).map(|id| shared.work.name_subagent(id));
                     let full_view_lines = shared.output.show_ask(&shared.work, &ask);
                     drop(guard);
                     questions.add(*ask, agent, full_view_lines);

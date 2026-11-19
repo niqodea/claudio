@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::{Map, Value, json};
 
-use crate::work::{Kind, Place};
+use crate::work::{Kind, Place, SubagentId};
 
 /// The ids of the requests sent before the first message
 pub const INITIALIZE_REQUEST_ID: &str = "initialize";
@@ -234,17 +234,14 @@ pub struct ToolUse {
     pub id: String,
     pub name: String,
     pub input: Map<String, Value>,
-    /// The `Agent` call that started the subagent that makes the call, none when Claude itself
-    /// makes it.
-    pub agent_call: Option<String>,
     /// The subagent that makes the call, none when Claude itself makes it.
-    pub agent: Option<String>,
+    pub subagent: Option<SubagentId>,
 }
 
 impl ToolUse {
     /// Whether a subagent of Claude makes the call, rather than Claude itself.
     pub fn is_subagent(&self) -> bool {
-        self.agent_call.is_some()
+        self.subagent.is_some()
     }
 }
 
@@ -254,13 +251,13 @@ pub struct ToolResult {
     pub text: Option<String>,
     pub is_error: bool,
     /// The subagent whose call the result answers, none for Claude's own call.
-    pub agent: Option<String>,
+    pub subagent: Option<SubagentId>,
 }
 
 impl ToolResult {
     /// Whether the result answers a call of a subagent of Claude, rather than Claude's own.
     pub fn is_subagent(&self) -> bool {
-        self.agent.is_some()
+        self.subagent.is_some()
     }
 }
 
@@ -270,6 +267,8 @@ pub struct Ask {
     pub tool_name: String,
     pub input: Map<String, Value>,
     pub kind: AskKind,
+    /// The subagent that asks, none for Claude itself.
+    pub subagent: Option<SubagentId>,
 }
 
 pub enum AskKind {
@@ -544,6 +543,8 @@ pub fn read_events(line: &str) -> Result<Vec<Event>, String> {
     let message: Message = serde_json::from_str(line)
         .map_err(|error| format!("Unreadable message from Claude Code: {error}: {line}"))?;
     let class = match message {
+        // A piece of streamed text carries no subagent's id, as `SDKPartialAssistantMessage` in
+        // `sdk.d.ts` types it, so the `Agent` call it belongs to tells a subagent's apart
         Message::StreamEvent {
             event,
             parent_tool_use_id,
@@ -558,30 +559,26 @@ pub fn read_events(line: &str) -> Result<Vec<Event>, String> {
         // Claude Code sends each block whole once it has streamed it
         Message::Assistant {
             message,
-            parent_tool_use_id,
+            parent_tool_use_id: _,
             agent_id,
             error: _,
-        } => {
-            let agent = subagent(agent_id, parent_tool_use_id.as_ref());
-            Shown(read_assistant(
-                message,
-                parent_tool_use_id.as_ref(),
-                agent.as_ref(),
-                line,
-            ))
-        }
+        } => Shown(read_assistant(
+            message,
+            agent_id.map(SubagentId::new).as_ref(),
+            line,
+        )),
         Message::User {
             is_replay: true, ..
         } => Skipped("it repeats what Claude Code's history holds, like a command's output"),
         Message::User {
             message,
-            parent_tool_use_id,
             agent_id,
             is_replay: false,
-        } => {
-            let agent = subagent(agent_id, parent_tool_use_id.as_ref());
-            Shown(read_user(message, agent.as_ref(), line))
-        }
+        } => Shown(read_user(
+            message,
+            agent_id.map(SubagentId::new).as_ref(),
+            line,
+        )),
         Message::ControlRequest {
             request_id,
             request,
@@ -654,23 +651,11 @@ fn read_stream_event(event: StreamEvent, is_subagent: bool, line: &str) -> Class
     }
 }
 
-/// The subagent that sent a message, by its `agent_id`, or by the `Agent` call that started it,
-/// `agent_call`, for a message without one, none for Claude's own message. The types promise
-/// `agent_id` on every message of a subagent, so the call is only a fallback, under which a
-/// subagent whose messages carried the id only now and then would count as two.
-fn subagent(agent_id: Option<String>, agent_call: Option<&String>) -> Option<String> {
-    agent_id.or_else(|| agent_call.cloned())
-}
-
-/// The events of a reply's blocks, from `line`, those of the subagent `agent`, which the
-/// `Agent` call `agent_call` started, when they are some.
-fn read_assistant(
-    message: Body,
-    agent_call: Option<&String>,
-    agent: Option<&String>,
-    line: &str,
-) -> Vec<Event> {
-    let is_subagent = agent_call.is_some();
+/// The events of a reply's blocks, from `line`, those of `subagent` when it is some, which the
+/// message's `agent_id` names: as `SDKAssistantMessage` in `sdk.d.ts` says, the id of the
+/// subagent that produced it, the same as its task's, and absent on Claude's own messages.
+fn read_assistant(message: Body, subagent: Option<&SubagentId>, line: &str) -> Vec<Event> {
+    let is_subagent = subagent.is_some();
     (message.content.into_blocks().into_iter().enumerate())
         .flat_map(|(index, block)| {
             let class = match block {
@@ -682,8 +667,7 @@ fn read_assistant(
                     id,
                     name,
                     input,
-                    agent_call: agent_call.cloned(),
-                    agent: agent.cloned(),
+                    subagent: subagent.cloned(),
                 })]),
                 Block::Thinking => Skipped("claudio leaves Claude's thinking out"),
                 Block::ToolResult { .. } => Skipped("a tool's result comes in a user message"),
@@ -694,9 +678,9 @@ fn read_assistant(
         .collect()
 }
 
-/// The events of the tool results a user message carries, those of the subagent `agent` when it
-/// is some, from `line`.
-fn read_user(message: Body, agent: Option<&String>, line: &str) -> Vec<Event> {
+/// The events of the tool results a user message carries, those of `subagent` when it is some,
+/// from `line`.
+fn read_user(message: Body, subagent: Option<&SubagentId>, line: &str) -> Vec<Event> {
     (message.content.into_blocks().into_iter().enumerate())
         .flat_map(|(index, block)| match block {
             Block::ToolResult {
@@ -710,7 +694,7 @@ fn read_user(message: Body, agent: Option<&String>, line: &str) -> Vec<Event> {
                     tool_use_id,
                     text,
                     is_error,
-                    agent: agent.cloned(),
+                    subagent: subagent.cloned(),
                 })]);
                 let unknown_block = unknown_block.map(|inner| {
                     let pointer = format!("/message/content/{index}/content/{inner}/type");
@@ -1016,6 +1000,7 @@ pub(crate) fn read_request(request_id: String, request: Value) -> Result<Event, 
         tool_name: request.tool_name,
         input: request.input,
         kind,
+        subagent: request.agent_id.map(SubagentId::new),
     })))
 }
 
@@ -1037,7 +1022,6 @@ enum Message {
     },
     User {
         message: Body,
-        parent_tool_use_id: Option<String>,
         agent_id: Option<String>,
         /// Whether the message repeats what Claude Code's history holds, like a command's
         /// output after `/compact`.
@@ -1567,7 +1551,6 @@ fn strip_escapes(text: &str) -> String {
 ///   approve this one. claudio approves nothing by itself.
 /// - `requires_user_interaction`: whether a one-tap answer, as from a phone's notification, is
 ///   not enough, and the person must open the session. claudio always shows the whole call.
-/// - `agent_id`: the subagent that asked, which claudio does not read here yet.
 #[derive(Deserialize)]
 struct CanUseTool {
     tool_name: String,
@@ -1584,6 +1567,8 @@ struct CanUseTool {
     /// approve
     #[serde(default)]
     default_to_no: bool,
+    /// The subagent that asks, absent for Claude itself.
+    agent_id: Option<String>,
 }
 
 /// The MCP server a tool comes from, as `McpServerProvenance` in `sdk.d.ts` types it.
@@ -1965,6 +1950,22 @@ mod tests {
         };
         assert_eq!(permission.reason.as_deref(), Some("rm removes files"));
         assert!(permission.is_guarded);
+        assert!(ask.subagent.is_none());
+    }
+
+    #[test]
+    fn a_subagent_s_request_names_the_subagent_by_its_id() {
+        let request = serde_json::json!({
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "input": {"command": "ls"},
+            "tool_use_id": "1",
+            "agent_id": "a259478d0d71f063d",
+        });
+        let Ok(Event::Ask(ask)) = read_request("request-1".to_string(), request) else {
+            panic!("an ask");
+        };
+        assert_eq!(ask.subagent, Some(SubagentId::new("a259478d0d71f063d")));
     }
 
     #[test]

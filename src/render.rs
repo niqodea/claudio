@@ -462,7 +462,7 @@ impl Output {
         }
         // A subagent's calls show only in the full view, since what it did shows in what it
         // reports back to Claude, and its end line counts them
-        if tool_use.agent.is_some() {
+        if tool_use.is_subagent() {
             self.write_full_view_line(&line);
         } else if is_input {
             self.begin(Section::Tools);
@@ -1138,8 +1138,7 @@ mod tests {
             id: "1".to_string(),
             name: "Bash".to_string(),
             input,
-            agent_call: None,
-            agent: None,
+            subagent: None,
         });
         assert_eq!(output.take_lines()[0], reply_mark());
     }
@@ -1298,8 +1297,7 @@ mod tests {
                     .as_object()
                     .expect("an object")
                     .clone(),
-                agent_call: None,
-                agent: None,
+                subagent: None,
             });
         });
         assert_eq!(
@@ -1368,8 +1366,7 @@ mod tests {
             id: "1".to_string(),
             name: "Bash".to_string(),
             input,
-            agent_call: None,
-            agent: None,
+            subagent: None,
         });
         assert!(output.take_lines()[1].text().contains(&description));
     }
@@ -1401,8 +1398,7 @@ mod tests {
             id: id.to_string(),
             name: "Read".to_string(),
             input,
-            agent_call: None,
-            agent: None,
+            subagent: None,
         }
     }
 
@@ -1411,7 +1407,7 @@ mod tests {
             tool_use_id: id.to_string(),
             text: Some(text.to_string()),
             is_error: false,
-            agent: None,
+            subagent: None,
         }
     }
 
@@ -1692,8 +1688,7 @@ mod tests {
             id: "toolu_1".to_string(),
             name: name.to_string(),
             input,
-            agent_call: None,
-            agent: None,
+            subagent: None,
         }
     }
 

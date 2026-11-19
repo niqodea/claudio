@@ -146,7 +146,7 @@ impl Shared {
             Event::Version(version) => self.note_version(version),
             Event::Commands(commands) => self.note_commands(commands),
             Event::Reset { previous_session } => {
-                self.work.forget_ended_subagents();
+                self.work.start_session();
                 self.output.show_reset(&previous_session);
                 self.context.reset();
             }

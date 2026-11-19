@@ -373,12 +373,21 @@ impl Work {
         self.subagents.get(owner)?.description.clone()
     }
 
-    /// Forgets the subagents that ended, as a new session starts, which cannot resume them. One
-    /// that runs stays, for a clear that came while it ran, which keeps it running, as Claude
-    /// Code 2.1.322 does, and whose end still shows under its tag.
-    pub fn forget_ended_subagents(&mut self) {
+    /// Starts the work of a new session, as a clear does. It keeps the count of Claude's calls,
+    /// so a tag names one call in the full view, which holds every session, and what still runs,
+    /// with what names it as it ends: the calls that wait for their results, the tasks that run
+    /// or whose calls wait, and the subagents of those tasks and calls. Everything else goes, like
+    /// the subagents that ended, which the new session cannot resume. claudio clears once
+    /// nothing runs, so only the count stays then, and the rest stays for a clear that came
+    /// while work ran, which Claude Code 2.1.322 lets run on.
+    pub fn start_session(&mut self) {
+        let calls = &self.calls;
+        (self.tasks)
+            .retain(|_, task| task.end.is_none() || matches!(task.origin, Origin::Waiting(_)));
         let tasks = &self.tasks;
-        (self.subagents).retain(|id, _| tasks.get(id).is_some_and(|task| task.end.is_none()));
+        (self.subagents).retain(|id, _| {
+            tasks.contains_key(id) || calls.values().any(|call| call.owner.as_ref() == Some(id))
+        });
     }
 }
 
@@ -406,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reset_forgets_only_the_subagents_that_ended() {
+    fn a_new_session_keeps_the_count_and_what_still_runs() {
         let mut work = Work::default();
         work.add_call(&tool_use("c0", "Agent", None));
         work.start_task(
@@ -416,6 +425,8 @@ mod tests {
             Place::Foreground,
             "",
         );
+        work.end_task("ended", end());
+        work.take_result("c0");
         work.add_call(&tool_use("c1", "Agent", None));
         work.start_task(
             "running".to_string(),
@@ -425,11 +436,15 @@ mod tests {
             "",
         );
         work.take_result("c1");
-        work.end_task("ended", end());
-        work.take_result("c0");
-        work.forget_ended_subagents();
+        work.start_session();
         assert!(work.subagent("ended").is_none());
-        assert_eq!(work.running_subagents(None), 1);
+        assert!(work.subagent("running").is_some());
+        assert_eq!(work.task_tag("running"), Some(Tag::Claude(1)));
+        // Nothing runs once the subagent ends, and the count goes on
+        work.end_task("running", end());
+        work.start_session();
+        assert!(work.subagent("running").is_none());
+        assert_eq!(work.add_call(&tool_use("c2", "Bash", None)), Tag::Claude(2));
     }
 
     #[test]

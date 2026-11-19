@@ -363,7 +363,11 @@ pub enum Command<'a> {
         request_id: String,
         message_id: &'a str,
     },
-    /// Starts the session. Claude Code answers with the account that pays for it.
+    /// Starts the session. Claude Code answers with the account that pays for it. It declares
+    /// that the user stops each background task on its own, `perTaskStopAffordance`, so an
+    /// interrupt stops the turn alone, and the background tasks go on until they end or are
+    /// stopped, as `SDKControlInitializeRequest` in `sdk.d.ts` types it:
+    /// <https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.325/sdk.d.ts>.
     Initialize,
     GetSettings,
     /// Asks for the context's usage, which tells the last call of a resumed session. The
@@ -457,7 +461,7 @@ impl Command<'_> {
             Command::Initialize => json!({
                 "type": "control_request",
                 "request_id": INITIALIZE_REQUEST_ID,
-                "request": {"subtype": "initialize"},
+                "request": {"subtype": "initialize", "perTaskStopAffordance": true},
             }),
             Command::GetSettings => json!({
                 "type": "control_request",

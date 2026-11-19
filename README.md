@@ -133,6 +133,7 @@ Any other key, or a paste, cancels the wait, however long it lasted, and a loss 
 
 `B` on the label row counts the tasks Claude runs in the background, like a shell, up to 9 and then `+`.
 `A` after it counts the subagents that run, in the foreground or in the background, the same way.
+Ctrl+C stops Claude's turn and leaves what runs in the background running.
 Ctrl+D waits for them to end, and names them on the label row meanwhile, and Ctrl+C there stops them.
 
 Ctrl+L starts a new session, as Claude Code's `/clear` does, and keeps your text in the box, ready to be the new session's first message.

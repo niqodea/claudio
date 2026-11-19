@@ -42,7 +42,7 @@ pub struct Check {
     pub run: fn(&Path) -> Result<(), String>,
 }
 
-pub const CHECKS: [Check; 17] = [
+pub const CHECKS: [Check; 18] = [
     Check {
         name: "session state comes with its variable",
         is_paid: false,
@@ -102,6 +102,11 @@ pub const CHECKS: [Check; 17] = [
         name: "a stopped call gets its result",
         is_paid: false,
         run: a_stopped_call_gets_its_result,
+    },
+    Check {
+        name: "a clear follows the turn on the last task's end",
+        is_paid: false,
+        run: a_clear_follows_the_turn_on_the_last_tasks_end,
     },
     Check {
         name: "a stop of a task that ended succeeds",
@@ -788,6 +793,31 @@ pub(crate) fn a_stopped_call_gets_its_result(program: &Path) -> Result<(), Strin
         Ok(lines)
     })?;
     compare(&["tool use", "tool result"], &lines, &stopped_call())
+}
+
+/// Seen with Claude Code 2.1.322: as a task ends in the background, Claude Code tells its end
+/// and starts a turn on it before it lists no task left, so a `/clear` sent once it lists none
+/// runs after that turn, and the task's end stays in the session that started it. A subagent's
+/// end was seen to come the same way.
+pub(crate) fn a_clear_follows_the_turn_on_the_last_tasks_end(program: &Path) -> Result<(), String> {
+    let lines = on_fake(program, Duration::ZERO, |run| {
+        run.send_message(BACKGROUND_TASK_MESSAGE)?;
+        run.read_until(FREE_TIMEOUT, is_no_background_task)?;
+        run.send(&protocol::Command::Run { command: "clear" })?;
+        run.read_until(FREE_TIMEOUT, |line| line["type"] == "conversation_reset")
+    })?;
+    compare(&["turn end", "reset"], &lines, &clear_after_task())
+}
+
+/// What Claude Code writes, as 2.1.322 did, for a `/clear` sent once the last task that ran in
+/// the background ended: the end of the turn on the task's end, then the clear.
+#[must_use]
+pub fn clear_after_task() -> Vec<String> {
+    let turn_end = json!({"type": "result", "subtype": "success"}).to_string();
+    [turn_end]
+        .into_iter()
+        .chain(clear("first", "second"))
+        .collect()
 }
 
 /// Seen with Claude Code 2.1.322: `stop_task` succeeds for a task that ended already, as for one

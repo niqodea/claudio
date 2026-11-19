@@ -552,6 +552,7 @@ impl InputLine {
             held: shared.context.held(Instant::now()),
             is_working: shared.output.status() != Status::Idle,
             background,
+            is_clear_waiting: shared.is_clear_waiting,
         }
     }
 
@@ -1205,12 +1206,17 @@ impl InputLine {
                 let work = describe_work(&shared.output).unwrap_or_else(|| "idle".to_string());
                 let state =
                     (self.confirmation()).unwrap_or_else(|| Span::new(work, SUBDUED_ON_BAR));
-                Line::from(marks())
+                let mut label = Line::from(marks())
                     .with_line(budgets)
                     .with(Span::new(" │ ", SUBDUED_ON_BAR))
                     .with_line(activity)
                     .with(Span::new(" │ ", SUBDUED_ON_BAR))
-                    .with(state)
+                    .with(state);
+                if shared.is_clear_waiting {
+                    label.push(Span::new(" │ ", SUBDUED_ON_BAR));
+                    label.push(clear_wait(output.background_tasks().len()));
+                }
+                label
             }
             Phase::Answering(Answering { view }) => {
                 let hint = if let Some(confirmation) = self.confirmation() {
@@ -1569,6 +1575,19 @@ fn background_indicator(tasks: usize) -> Span {
 /// for B.
 fn agents_indicator(agents: usize) -> Span {
     Span::new(format!("A{}", show_count(agents)), SUBDUED_ON_BAR)
+}
+
+/// What the label row says while a clear waits for `tasks` tasks in the background to end, in
+/// the color of a warning, since it waits for the user too, and the key that ends the wait.
+fn clear_wait(tasks: usize) -> Span {
+    let (tasks, them) = match tasks {
+        1 => ("1 background task".to_string(), "it"),
+        count => (format!("{count} background tasks"), "them"),
+    };
+    Span::new(
+        format!("clear waits for {tasks}, Ctrl+K stops {them}"),
+        ATTENTION,
+    )
 }
 
 /// A count up to 9, and + for more, which keeps one character for the count, so the label's

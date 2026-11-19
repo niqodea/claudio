@@ -263,6 +263,8 @@ pub struct Stakes<'a> {
     pub is_working: bool,
     /// The ids of the tasks that run in the background.
     pub background: &'a [String],
+    /// Whether a clear waits for the tasks in the background to end.
+    pub is_clear_waiting: bool,
 }
 
 /// What a key does to the session, decided once, from the state the key is judged against. It
@@ -449,11 +451,13 @@ impl Reading for Writing {
             (0, true) => Some(TurnStop::Interrupt),
             (count, _) => Some(TurnStop::Refuse(count)),
         };
-        let sending = (!stakes.text.trim().is_empty()).then(|| Sending {
-            text: stakes.text.to_string(),
-            refused: self.waiting,
-            is_cold: stakes.held == Held::Cold,
-        });
+        // The box keeps its text for the session the clear starts, as a clear always does
+        let sending =
+            (!stakes.text.trim().is_empty() && !stakes.is_clear_waiting).then(|| Sending {
+                text: stakes.text.to_string(),
+                refused: self.waiting,
+                is_cold: stakes.held == Held::Cold,
+            });
         match action {
             Action::Session(SessionKey::Stop) => turn_stop.map(OnMessage::Stop),
             Action::Session(SessionKey::Kill) if stakes.background.is_empty() => {
@@ -464,10 +468,11 @@ impl Reading for Writing {
                 tasks: stakes.background.to_vec(),
             }),
             Action::Session(SessionKey::End) => Some(OnMessage::End),
-            // A context that holds nothing yet has nothing to clear
-            Action::Session(SessionKey::Clear) => {
-                (stakes.held != Held::Nothing).then_some(OnMessage::Clear(turn_stop))
-            }
+            // A context that holds nothing yet has nothing to clear, and one that a clear waits for
+            // clears then
+            Action::Session(SessionKey::Clear) => (stakes.held != Held::Nothing
+                && !stakes.is_clear_waiting)
+                .then_some(OnMessage::Clear(turn_stop)),
             Action::Send => sending.map(OnMessage::Send),
             Action::Run => sending.map(OnMessage::Run),
             Action::Session(
@@ -876,6 +881,7 @@ mod tests {
         held: Held::Warm,
         is_working: false,
         background: &[],
+        is_clear_waiting: false,
     };
 
     const COLD: Stakes = Stakes {
@@ -1019,6 +1025,30 @@ mod tests {
             action(&Phase::Ending(Ending), &control('k'), input(true)),
             Action::Session(SessionKey::Kill)
         );
+    }
+
+    #[test]
+    fn a_clear_that_waits_keeps_the_text_and_takes_no_other_clear() {
+        let waiting = Stakes {
+            is_clear_waiting: true,
+            ..WARM
+        };
+        for action in [
+            Action::Send,
+            Action::Run,
+            Action::Session(SessionKey::Clear),
+        ] {
+            assert_eq!(Writing { waiting: 0 }.effect(action, waiting), None);
+        }
+        let tasks = ["a".to_string()];
+        let background = Stakes {
+            background: &tasks,
+            ..waiting
+        };
+        assert!(matches!(
+            Writing { waiting: 0 }.effect(Action::Session(SessionKey::Kill), background),
+            Some(OnMessage::Kill { .. })
+        ));
     }
 
     #[test]

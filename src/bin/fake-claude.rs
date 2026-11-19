@@ -251,13 +251,18 @@ impl Fake {
     }
 
     /// Sends the lines of a background task: its first `turn_lines`, up to the call's result, as
-    /// a turn, and the task's end after it, at once.
+    /// a turn, and the task's end after it, at once, which Claude then answers in a turn of its
+    /// own, as [`contract::clear_after_task`] tells.
     fn send_task(&self, lines: &[String], turn_lines: usize) {
         let (turn, end) = lines.split_at(turn_lines);
         self.send_turn(turn);
+        if end.is_empty() {
+            return;
+        }
         for line in end {
             send(line);
         }
+        self.send_turn(&[text_line("ok")]);
     }
 
     /// Sends the call that starts `lines`, and keeps the rest for the interrupt that ends it.

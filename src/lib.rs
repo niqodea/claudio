@@ -71,6 +71,9 @@ struct Shared {
     claude_code_version: Option<String>,
     /// The names of the commands the session runs, in order, which the command line completes.
     commands: Vec<String>,
+    /// Whether a clear waits for the tasks that run in the background to end, so their ends
+    /// reach the session that started them.
+    is_clear_waiting: bool,
 }
 
 impl Shared {
@@ -84,6 +87,14 @@ impl Shared {
             self.output.show_unchecked_version(&version);
         }
         self.claude_code_version = Some(version);
+    }
+
+    /// Notes the tasks that run in the background, and returns whether none is left for a clear
+    /// that waits for them.
+    fn note_background_tasks(&mut self, tasks: Vec<protocol::Task>) -> bool {
+        let is_quiet = tasks.is_empty();
+        self.output.note_background_tasks(tasks);
+        is_quiet && self.is_clear_waiting
     }
 
     /// Notes the commands the session runs, in order, for the command line to complete.
@@ -167,6 +178,7 @@ fn run() -> Result<ExitCode, String> {
         model: None,
         claude_code_version: None,
         commands: Vec::new(),
+        is_clear_waiting: false,
     }));
     let break_signal = Arc::new(AtomicBool::new(false));
     let (input_sender, inputs) = mpsc::channel();
@@ -360,7 +372,11 @@ fn read_claude(from_claude: ChildStdout, shared: &Mutex<Shared>, forward: &dyn F
                     .output
                     .note_permission_check(&tool_use_id, is_checking),
                 Event::Limits { session, week } => shared.limits.note(session, week),
-                Event::BackgroundTasks(tasks) => shared.output.note_background_tasks(tasks),
+                Event::BackgroundTasks(tasks) => {
+                    if shared.note_background_tasks(tasks) {
+                        forward(Input::BackgroundEnded);
+                    }
+                }
                 Event::TaskStarted {
                     task_id,
                     tool_use_id,

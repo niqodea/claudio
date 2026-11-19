@@ -24,6 +24,8 @@ pub enum Input {
         request_id: String,
         subtype: String,
     },
+    /// No task runs in the background any more, while a clear waits for that.
+    BackgroundEnded,
     /// Claude Code ended.
     Closed,
     /// Claude Code works in a way claudio was not made for, as this error says, which ends the
@@ -96,6 +98,13 @@ impl<'a> Conversation<'a> {
                     self.refuse(&request_id, &subtype)?;
                     continue;
                 }
+                Some(Input::BackgroundEnded) => {
+                    let waits = std::mem::take(&mut lock(&self.session.shared).is_clear_waiting);
+                    if waits {
+                        self.send(&Command::Run { command: "clear" })?;
+                    }
+                    continue;
+                }
                 Some(Input::Closed) => {
                     self.session.close_line()?;
                     return Ok(None);
@@ -166,11 +175,27 @@ impl<'a> Conversation<'a> {
                 if let Some(stop) = stop {
                     self.stop_turn(*stop, questions)?;
                 }
-                self.send(&Command::Run { command: "clear" })?;
+                self.clear()?;
             }
             OnMessage::End => return Ok(None),
         }
         Ok(Some((text, false)))
+    }
+
+    /// Clears the context once no task runs in the background, so their ends reach the session
+    /// that started them, and Claude's turns on them run there too, after which Claude Code runs
+    /// the clear. The reader of Claude Code's output notes the tasks under the same lock, so the
+    /// end of the last task wakes the clear that waits for it.
+    ///
+    /// Undocumented: [`crate::contract::a_clear_follows_the_turn_on_the_last_tasks_end`]
+    fn clear(&mut self) -> Result<(), String> {
+        let mut shared = lock(&self.session.shared);
+        if !shared.output.background_tasks().is_empty() {
+            shared.is_clear_waiting = true;
+            return Ok(());
+        }
+        drop(shared);
+        self.send(&Command::Run { command: "clear" })
     }
 
     /// Stops Claude's turn as `stop` says: the turn that waits on questions ends as they are
@@ -375,8 +400,14 @@ impl Ending<'_> {
         loop {
             match self.session.next_input() {
                 Some(Input::Closed) => return self.session.close_line(),
-                Some(Input::Ask(_) | Input::Unsupported { .. } | Input::Incompatible(_)) | None => {
-                }
+                // The ending clears nothing, so a clear that waited has no session left to clear
+                Some(
+                    Input::Ask(_)
+                    | Input::Unsupported { .. }
+                    | Input::Incompatible(_)
+                    | Input::BackgroundEnded,
+                )
+                | None => {}
             }
             match self.session.input.read_ending()? {
                 Outcome::Act(_, confirmed) => match confirmed.effect() {

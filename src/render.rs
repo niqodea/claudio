@@ -23,14 +23,10 @@ use crate::status::grouped;
 use crate::subagents::Subagents;
 
 use crate::style::{
-    ATTENTION, DONE_OR_ADDED, FAILED_OR_REMOVED, MARK, RESET, STRONG, SUBDUED, SUBDUED_ON_BAR,
+    ATTENTION, DONE_OR_ADDED, FAILED_OR_REMOVED, MARK, STRONG, SUBDUED, SUBDUED_ON_BAR, Style,
     YOURS,
 };
-
-// Erases to the end of the row in the background color that is set, which fills the row's
-// rest with the bar without writing spaces into the text. Written after the text too, it fills
-// the rest of the last row the terminal wraps the text onto
-const FILL_ROW: &str = "\x1b[K";
+use crate::text::{Line, Row, Span, Text};
 
 /// The tools whose input carries a `description` of the call in Claude's words, which sums it up
 /// in place of its input, still whole in the full view.
@@ -64,7 +60,7 @@ const SUMMARY_FIELDS: [(&str, &str); 10] = [
 pub struct Output {
     /// Each line followed by a line break once it ended. Only Claude's text leaves its last line
     /// open, and any other line ends it first.
-    text: String,
+    text: Text,
     /// The file of the full view: the lines the screen shows, each followed by what it leaves
     /// out, like a tool's whole input under its call. It holds the conversation in place of the
     /// client, which writes each line to it as it adds the line to the screen's. It holds only
@@ -241,7 +237,7 @@ enum Section {
 impl Output {
     pub fn new(full_view: File, max_noisy_line_columns: NonZeroUsize) -> Self {
         Output {
-            text: String::new(),
+            text: Text::default(),
             full_view,
             full_view_lines: 0,
             position: Position::Start,
@@ -404,23 +400,30 @@ impl Output {
             1 => " · 1 call".to_string(),
             calls => format!(" · {calls} calls"),
         });
-        self.push_detail(&format!(
-            "{outcome} {SUBDUED}{} {}: {word}{calls}{RESET}",
-            call.tag, call.name
-        ));
+        let what = format!("{} {}: {word}{calls}", call.tag, call.name);
+        self.push_detail(Line::from([
+            format!("{outcome} ").into(),
+            Span::new(what, SUBDUED),
+        ]));
         for line in end.summary.lines() {
-            self.write_full_view_line(&format!("  {line}"));
+            self.write_full_view_line(&Line::from(format!("  {line}")));
         }
     }
 
     /// Takes the text that waits to be printed above the input line.
-    pub fn take_text(&mut self) -> String {
+    pub fn take_text(&mut self) -> Text {
         std::mem::take(&mut self.text)
     }
 
     #[cfg(test)]
-    fn take_lines(&mut self) -> Vec<String> {
-        self.take_text().lines().map(str::to_string).collect()
+    fn take_rows(&mut self) -> Vec<Row> {
+        self.take_text().into_rows()
+    }
+
+    /// The lines of the rows that wait, without the style of each row past its end.
+    #[cfg(test)]
+    fn take_lines(&mut self) -> Vec<Line> {
+        self.take_rows().into_iter().map(Row::into_line).collect()
     }
 
     /// Shows the message the user sends, after all that Claude wrote before it, so the
@@ -430,9 +433,9 @@ impl Output {
         self.pending_break = None;
         // Each message starts with marks of its own, as Claude Code keeps each message apart, also
         // those it delivers together in one turn
-        self.emit(&format!("{}{}{FILL_ROW}{RESET}", start_bar_row(), marks()));
+        self.emit(Line::from(marks()).on(YOURS));
         for line in text.split('\n') {
-            self.emit(&format!("{}{line}{FILL_ROW}{RESET}", start_bar_row()));
+            self.emit(Line::from(line).on(YOURS));
         }
         self.position = Position::In(Section::Message);
         self.set_status(Status::Working);
@@ -459,7 +462,7 @@ impl Output {
     fn show_user_line(&mut self, what: &str) {
         self.end_text();
         self.pending_break = None;
-        self.emit(&user_line(what));
+        self.emit(user_line(what));
         self.position = Position::In(Section::Message);
     }
 
@@ -467,10 +470,8 @@ impl Output {
     pub fn show_compacted(&mut self, before: u64, after: Option<u64>) {
         let after = after.map_or_else(String::new, |after| format!(" to {}", grouped(after)));
         self.begin(Section::Notice);
-        self.push_detail(&format!(
-            "{SUBDUED}compacted from {}{after} tokens{RESET}",
-            grouped(before)
-        ));
+        let compacted = format!("compacted from {}{after} tokens", grouped(before));
+        self.push_detail(Line::from(Span::new(compacted, SUBDUED)));
     }
 
     /// Says once for each kind that claudio skips what Claude Code sent, `name` of `part`, which
@@ -481,18 +482,14 @@ impl Output {
             return;
         }
         self.begin(Section::Notice);
-        self.push_detail(&format!(
-            "{ATTENTION}Claude Code's {name} {part}s are not shown: Ctrl+O shows the first{RESET}"
-        ));
-        self.write_full_view_line(&format!("  {line}"));
+        let skipped = format!("Claude Code's {name} {part}s are not shown: Ctrl+O shows the first");
+        self.push_detail(Line::from(Span::new(skipped, ATTENTION)));
+        self.write_full_view_line(&Line::from(format!("  {line}")));
     }
 
     /// Shows the user's answer to what a tool asks, after the question.
     pub fn show_answer(&mut self, question: &str, text: &str) {
-        self.push(&format!(
-            "{}{text}{FILL_ROW}{RESET}",
-            answer_label(question)
-        ));
+        self.push(answer_label(question).with(text).on(YOURS));
     }
 
     /// The subagent that makes the tool use with `tool_use_id`, as the description of the
@@ -512,18 +509,8 @@ impl Output {
             .map_or_else(String::new, |call| format!("{} ", call.tag));
         let summary = summarize(&ask.tool_name, &ask.input);
         let first = summary.text.lines().next().unwrap_or_default();
-        let line = format!(
-            "{}{decision} {tag}{}: {first}",
-            start_bar_row(),
-            ask.tool_name
-        );
-        self.write_break();
-        self.end_claude_line();
-        self.text.push_str(&cut(&line, self.max_noisy_line_columns));
-        self.text.push_str(FILL_ROW);
-        self.text.push_str(RESET);
-        self.text.push('\n');
-        self.write_full_view_line(&format!("{line}{RESET}"));
+        let line = format!("{decision} {tag}{}: {first}", ask.tool_name);
+        self.push_noisy(&Line::from(line), Some(YOURS));
         if let Some(reason) = reason {
             self.show_answer("reason", reason);
         }
@@ -574,7 +561,7 @@ impl Output {
         // The break goes before the text, even before the highlighter settles any of it
         self.write_break();
         let colored = self.highlighter.push(text);
-        self.write(&colored);
+        self.write(colored);
     }
 
     /// Ends a block of Claude's text, whose whole `text` shows here when none of it streamed,
@@ -599,14 +586,14 @@ impl Output {
         self.set_status(Status::Idle);
         if let Some(exit) = exit {
             self.begin(Section::Notice);
-            self.push_detail(&format!("{SUBDUED}{exit}{RESET}"));
+            self.push_detail(Line::from(Span::new(exit, SUBDUED)));
         }
     }
 
     /// Adds the rest of the text Claude wrote, which the highlighter holds.
     fn end_text(&mut self) {
         let colored = self.highlighter.finish();
-        self.write(&colored);
+        self.write(colored);
     }
 
     /// Shows a call, on a line of the conversation for Claude's, and in the full view for a
@@ -642,7 +629,6 @@ impl Output {
             self.next_call = call.wrapping_add(1);
             Tag::Claude(call)
         };
-        let mark = format!("{STRONG}○{RESET} {SUBDUED}{tag}{RESET}{STRONG}");
         // One line per call keeps the tool calls out of the way of the conversation. A call that
         // names a task, like TaskStop's, names it by the tag of the call that started it, and
         // one that names a subagent, like SendMessage's, which resumes it, by the tag of the
@@ -652,42 +638,53 @@ impl Output {
             let subagent = self.subagents.get(read_field(&tool_use.input, "to"))?;
             subagent.start.map(Tag::Claude)
         });
-        let summary = match target {
-            Some(tag) => Summary {
-                text: format!("{SUBDUED}{tag}{RESET}"),
-                is_input: false,
-            },
-            None => summarize(&tool_use.name, &tool_use.input),
-        };
-        let mut summary_lines = summary.text.lines();
-        let first = summary_lines.next().unwrap_or_default();
-        let first = if summary.is_input {
-            code_span(first)
+        let mut line = Line::from([
+            Span::new("○", STRONG),
+            " ".into(),
+            Span::new(tag.to_string(), SUBDUED),
+            Span::new(format!(" {}:", tool_use.name), STRONG),
+            " ".into(),
+        ]);
+        let summary = summarize(&tool_use.name, &tool_use.input);
+        let is_input = target.is_none() && summary.is_input;
+        if let Some(target) = target {
+            line.push(Span::new(target.to_string(), SUBDUED));
         } else {
-            first.to_string()
-        };
-        let more = match summary_lines.count() {
-            0 => String::new(),
-            count => format!(" {SUBDUED}(+{count} lines){RESET}"),
-        };
-        let changes = if tool_use.name == "Edit" {
+            let mut summary_lines = summary.text.lines();
+            let first = summary_lines.next().unwrap_or_default();
+            line.push(if is_input {
+                code_span(first)
+            } else {
+                Span::from(first)
+            });
+            match summary_lines.count() {
+                0 => {}
+                count => line.append(Line::from([
+                    " ".into(),
+                    Span::new(format!("(+{count} lines)"), SUBDUED),
+                ])),
+            }
+        }
+        if tool_use.name == "Edit" {
             let removed = read_field(&tool_use.input, "old_string").lines().count();
             let added = read_field(&tool_use.input, "new_string").lines().count();
-            format!(" {FAILED_OR_REMOVED}-{removed}{RESET} {DONE_OR_ADDED}+{added}{RESET}")
-        } else {
-            String::new()
-        };
-        let line = format!("{mark} {}:{RESET} {first}{more}{changes}", tool_use.name);
+            line.append(Line::from([
+                " ".into(),
+                Span::new(format!("-{removed}"), FAILED_OR_REMOVED),
+                " ".into(),
+                Span::new(format!("+{added}"), DONE_OR_ADDED),
+            ]));
+        }
         // A subagent's calls show only in the full view, since what it did shows in what it
         // reports back to Claude, and its end line counts them
         if tool_use.agent.is_some() {
             self.write_full_view_line(&line);
-        } else if summary.is_input {
+        } else if is_input {
             self.begin(Section::Tools);
-            self.push_noisy(&line);
+            self.push_noisy(&line, None);
         } else {
             self.begin(Section::Tools);
-            self.push_detail(&line);
+            self.push_detail(line);
         }
         // The call's line ends the full view now
         self.pending_calls.insert(
@@ -700,14 +697,14 @@ impl Output {
             },
         );
         for (field, value) in &tool_use.input {
+            let name = Line::from(["  ".into(), Span::new(format!("{field}:"), SUBDUED)]);
             if let Value::String(text) = value {
-                self.write_full_view_line(&format!("  {SUBDUED}{field}:{RESET}"));
+                self.write_full_view_line(&name);
                 for line in text.lines() {
-                    self.write_full_view_line(&format!("    {line}"));
+                    self.write_full_view_line(&Line::from(format!("    {line}")));
                 }
             } else {
-                let line = format!("  {SUBDUED}{field}:{RESET} {value}");
-                self.write_full_view_line(&line);
+                self.write_full_view_line(&name.with(format!(" {value}")));
             }
         }
     }
@@ -731,12 +728,15 @@ impl Output {
         // Other lines can come between a call and its result, so the result stands on its own
         let label = (call.as_ref())
             .map_or_else(String::new, |call| format!("{} {}: ", call.tag, call.name));
-        let line = format!("{outcome} {SUBDUED}{label}{first}{more}{RESET}");
+        let line = Line::from([
+            format!("{outcome} ").into(),
+            Span::new(format!("{label}{first}{more}"), SUBDUED),
+        ]);
         // Like its call, a subagent's result shows only in the full view
         if result.is_subagent() {
             self.write_full_view_line(&line);
             for line in text.lines().skip(1) {
-                self.write_full_view_line(&format!("  {line}"));
+                self.write_full_view_line(&Line::from(format!("  {line}")));
             }
             return;
         }
@@ -753,12 +753,10 @@ impl Output {
         if let Some(call) = &call
             && let Some(task) = task.take_if(|task| task.is_backgrounded)
         {
-            self.push_detail(&format!(
-                "◌ {SUBDUED}{} {}: running in background{RESET}",
-                call.tag, call.name
-            ));
+            let running = format!("{} {}: running in background", call.tag, call.name);
+            self.push_detail(Line::from(["◌ ".into(), Span::new(running, SUBDUED)]));
             for line in text.lines() {
-                self.write_full_view_line(&format!("  {line}"));
+                self.write_full_view_line(&Line::from(format!("  {line}")));
             }
             if let Some(end) = task.end {
                 self.push_task_end(call, &end);
@@ -792,9 +790,9 @@ impl Output {
             self.push_task_end(call, &end);
             return;
         }
-        self.push_noisy(&line);
+        self.push_noisy(&line, None);
         for line in text.lines().skip(1) {
-            self.write_full_view_line(&format!("  {line}"));
+            self.write_full_view_line(&Line::from(format!("  {line}")));
         }
     }
 
@@ -812,9 +810,10 @@ impl Output {
                 let line = (self.pending_calls.get(&ask.tool_use_id))
                     .map_or(self.full_view_lines.max(1), |call| call.line);
                 if let Some(reason) = &permission.reason {
-                    self.write_full_view_line(&format!("  {SUBDUED}reason:{RESET}"));
+                    let name = Line::from(["  ".into(), Span::new("reason:", SUBDUED)]);
+                    self.write_full_view_line(&name);
                     for reason_line in reason.lines() {
-                        self.write_full_view_line(&format!("    {reason_line}"));
+                        self.write_full_view_line(&Line::from(format!("    {reason_line}")));
                     }
                 }
                 vec![line]
@@ -840,7 +839,7 @@ impl Output {
         };
         if let Some(line) = line {
             self.begin(Section::Notice);
-            self.push_detail(&format!("{SUBDUED}{line}{RESET}"));
+            self.push_detail(Line::from(Span::new(line, SUBDUED)));
         }
         // A message that waits for its reply still waits when an older turn ends
         if self.position != Position::In(Section::Message) {
@@ -852,10 +851,11 @@ impl Output {
         self.begin(Section::Notice);
         for error in errors {
             let file = error.file.as_deref().unwrap_or("a settings file");
-            self.push_detail(&format!(
-                "{FAILED_OR_REMOVED}Claude Code skipped {file}, so none of its settings apply: {} {}{RESET}",
+            let skipped = format!(
+                "Claude Code skipped {file}, so none of its settings apply: {} {}",
                 error.path, error.message
-            ));
+            );
+            self.push_detail(Line::from(Span::new(skipped, FAILED_OR_REMOVED)));
         }
     }
 
@@ -863,26 +863,27 @@ impl Output {
     /// changes may break what claudio assumes, like the shape of what it writes.
     pub fn show_unchecked_version(&mut self, version: &str) {
         self.begin(Section::Notice);
-        self.push_detail(&format!(
-            "{ATTENTION}Claude Code {version} runs, but {} is the one checked to work{RESET}",
+        let warning = format!(
+            "Claude Code {version} runs, but {} is the one checked to work",
             crate::claude_code::VERSION
-        ));
+        );
+        self.push_detail(Line::from(Span::new(warning, ATTENTION)));
     }
 
     /// Warns that a resize can leave copies of the live rows in the scrollback, since frames can
     /// only count their way back to the first of them in this terminal.
     pub fn show_inexact_redraw(&mut self) {
         self.begin(Section::Notice);
-        self.push_detail(&format!(
-            "{ATTENTION}a resize in this terminal can leave copies of the label row and the box in the scrollback, which tmux 3.5 avoids{RESET}"
-        ));
+        self.push_detail(Line::from(Span::new(
+            "a resize in this terminal can leave copies of the label row and the box in the scrollback, which tmux 3.5 avoids",
+            ATTENTION,
+        )));
     }
 
     pub fn show_paying_key(&mut self, key: &str) {
         self.begin(Section::Notice);
-        self.push_detail(&format!(
-            "{ATTENTION}{key} pays for this session, not the subscription{RESET}"
-        ));
+        let warning = format!("{key} pays for this session, not the subscription");
+        self.push_detail(Line::from(Span::new(warning, ATTENTION)));
     }
 
     /// Shows that the hook `hook` failed with `exit_code`, or was cancelled, when
@@ -908,16 +909,16 @@ impl Output {
     /// Shows what Claude Code tells the user at `level`: in the full view only when it is
     /// `Info`, dim when it is a `Notice`, and else in orange, after the level's name.
     pub fn show_notice(&mut self, text: &str, level: Level) {
-        let lines: Vec<String> = match level {
+        let lines: Vec<Line> = match level {
             Level::Info => {
                 for line in text.lines() {
-                    self.write_full_view_line(line);
+                    self.write_full_view_line(&Line::from(line));
                 }
                 return;
             }
             Level::Notice => text
                 .lines()
-                .map(|line| format!("{SUBDUED}{line}{RESET}"))
+                .map(|line| Line::from(Span::new(line, SUBDUED)))
                 .collect(),
             Level::Suggestion | Level::Warning => {
                 let name = if level == Level::Warning {
@@ -928,21 +929,21 @@ impl Output {
                 text.lines()
                     .enumerate()
                     .map(|(index, line)| match index {
-                        0 => format!("{ATTENTION}{name}: {line}{RESET}"),
-                        _ => format!("{ATTENTION}{line}{RESET}"),
+                        0 => Line::from(Span::new(format!("{name}: {line}"), ATTENTION)),
+                        _ => Line::from(Span::new(line, ATTENTION)),
                     })
                     .collect()
             }
         };
         self.begin(Section::Notice);
         for line in lines {
-            self.push_detail(&line);
+            self.push_detail(line);
         }
     }
 
     pub fn show_error(&mut self, error: &str) {
         self.begin(Section::Notice);
-        self.push_detail(&format!("{FAILED_OR_REMOVED}{error}{RESET}"));
+        self.push_detail(Line::from(Span::new(error, FAILED_OR_REMOVED)));
     }
 
     /// Shows a line of Claude Code's error output. Claude's text has nothing that names it, so
@@ -965,9 +966,11 @@ impl Output {
     /// tag of an API error, so each line is red, as a failure.
     fn push_stderr(&mut self, line: &str) {
         self.begin(Section::Notice);
-        self.push_detail(&format!(
-            "{SUBDUED}stderr │{RESET} {FAILED_OR_REMOVED}{line}{RESET}"
-        ));
+        self.push_detail(Line::from([
+            Span::new("stderr │", SUBDUED),
+            " ".into(),
+            Span::new(line, FAILED_OR_REMOVED),
+        ]));
     }
 
     /// Sets what Claude does. Once Claude stops writing, the lines of error output that waited
@@ -1009,27 +1012,27 @@ impl Output {
         self.position = Position::In(section);
     }
 
-    /// Adds a whole line, after the break that sets it apart, if one waits.
-    fn push(&mut self, line: &str) {
+    /// Adds a whole row, after the break that sets it apart, if one waits.
+    fn push(&mut self, row: impl Into<Row>) {
         self.write_break();
-        self.emit(line);
+        self.emit(row);
     }
 
     fn write_break(&mut self) {
         match self.pending_break.take() {
-            Some(Break::Reply) => self.emit(&reply_mark()),
+            Some(Break::Reply) => self.emit(reply_mark()),
             Some(Break::Prose) => {
-                self.emit("");
-                self.emit(&reply_mark());
+                self.emit(Line::default());
+                self.emit(reply_mark());
             }
-            Some(Break::Blank) => self.emit(""),
+            Some(Break::Blank) => self.emit(Line::default()),
             None => {}
         }
     }
 
     /// Adds a detail line, after the break that sets it apart, if one waits. A detail line is any
     /// line other than the conversation itself, the user's words and Claude's prose.
-    fn push_detail(&mut self, line: &str) {
+    fn push_detail(&mut self, line: Line) {
         self.write_break();
         self.emit(line);
     }
@@ -1038,55 +1041,57 @@ impl Output {
     /// tool's input or output as it is, so it can run to hundreds of columns.
     ///
     /// The cut here is the only one a noisy line gets, so callers pass their text whole, and the
-    /// full view shows it as it was.
-    fn push_noisy(&mut self, line: &str) {
+    /// full view shows it as it was. On screen, the line's row takes `background`, when given.
+    fn push_noisy(&mut self, line: &Line, background: Option<Style>) {
         self.write_break();
         self.end_claude_line();
-        self.text.push_str(&cut(line, self.max_noisy_line_columns));
-        self.text.push('\n');
         self.write_full_view_line(line);
+        let row = Row::from(cut(line, self.max_noisy_line_columns));
+        self.text.push_line(match background {
+            Some(background) => row.on(background),
+            None => row,
+        });
     }
 
-    /// Adds a whole line to the screen and to the full view, on a row of its own.
-    fn emit(&mut self, line: &str) {
+    /// Adds a whole row to the screen and its line to the full view.
+    fn emit(&mut self, row: impl Into<Row>) {
+        let row = row.into();
         self.end_claude_line();
-        self.write(&format!("{line}\n"));
+        self.write_full_view_line(row.line());
+        self.text.push_line(row);
     }
 
     /// Ends Claude's line where Claude got to, as when a message interrupts Claude mid-line.
     fn end_claude_line(&mut self) {
         let colored = self.highlighter.end_line();
-        self.write(&colored);
+        self.write(colored);
     }
 
     /// Adds text to the screen and to the full view.
-    fn write(&mut self, text: &str) {
-        self.write_full_view_text(text);
-        self.text.push_str(text);
+    fn write(&mut self, text: Text) {
+        self.write_full_view_text(&text.to_pager());
+        self.text.append(text);
     }
 
     /// Adds a line to the full view only.
-    fn write_full_view_line(&mut self, line: &str) {
+    fn write_full_view_line(&mut self, line: &Line) {
         self.write_full_view_text(&format!("{line}\n"));
     }
 
-    /// Adds text to the full view, without the codes that fill a row with the bar, since a pager
-    /// shows only the codes of colors. A write that fails, like on a full disk, leaves the text
-    /// out of the full view only.
+    /// Adds text to the full view, as a pager shows it. A write that fails, like on a full disk,
+    /// leaves the text out of the full view only.
     fn write_full_view_text(&mut self, text: &str) {
         self.full_view_lines += text.matches('\n').count();
-        let _ = self
-            .full_view
-            .write_all(text.replace(FILL_ROW, "").as_bytes());
+        let _ = self.full_view.write_all(text.as_bytes());
     }
 
     /// Adds detail lines, and gives the line of the full view, from 1, that the first one is on.
-    fn push_details(&mut self, lines: Vec<String>) -> usize {
+    fn push_details(&mut self, lines: Vec<Line>) -> usize {
         self.write_break();
         self.end_claude_line();
         let first = self.full_view_lines + 1;
         for line in lines {
-            self.push_detail(&line);
+            self.push_detail(line);
         }
         first
     }
@@ -1094,63 +1099,62 @@ impl Output {
 
 /// A line of what the user did, like a command or a clear, on the bar, where the user's lines
 /// are, in the style of the label row's state. Only the user's lines are on the bar.
-pub fn user_line(what: &str) -> String {
-    format!(
-        "{}{} {SUBDUED_ON_BAR}{what}{RESET}",
-        start_bar_row(),
-        marks()
-    )
-}
-
-/// The start of a row on the bar, which fills the whole row.
-pub fn start_bar_row() -> String {
-    format!("{YOURS}{FILL_ROW}")
+pub fn user_line(what: &str) -> Row {
+    Line::from([marks(), Span::new(format!(" {what}"), SUBDUED_ON_BAR)]).on(YOURS)
 }
 
 /// The marks in front of a message, on a row of their own.
-pub fn marks() -> String {
-    format!("{MARK}››")
+pub fn marks() -> Span {
+    Span::new("››", MARK)
 }
 
 /// The marks in front of what Claude writes, on a row of their own, in the color of the user's
 /// marks, since both say who starts.
-fn reply_mark() -> String {
-    format!("{MARK}‹‹{RESET}")
+fn reply_mark() -> Line {
+    Line::from(Span::new("‹‹", MARK))
 }
 
 /// The lines of Markdown, highlighted.
-pub fn markdown_lines(markdown: &str) -> Vec<String> {
+pub fn markdown_lines(markdown: &str) -> Vec<Line> {
     let mut highlighter = Highlighter::new();
     let mut colored = highlighter.push(markdown.trim());
-    colored.push_str(&highlighter.finish());
-    colored.lines().map(str::to_string).collect()
+    colored.append(highlighter.finish());
+    colored
+        .into_rows()
+        .into_iter()
+        .map(Row::into_line)
+        .collect()
 }
 
 /// The lines of a question: its header and text, then its options, numbered from 1 as the question
 /// view numbers them.
-pub fn question_lines(question: &Question) -> Vec<String> {
-    let mut lines = vec![format!(
-        "{STRONG}{}{RESET} {}",
-        question.header, question.text
-    )];
+pub fn question_lines(question: &Question) -> Vec<Line> {
+    let mut lines = vec![Line::from([
+        Span::new(question.header.as_str(), STRONG),
+        format!(" {}", question.text).into(),
+    ])];
     for (number, choice) in (1..).zip(&question.options) {
-        lines.push(format!(
-            "  {number}. {} {SUBDUED}{}{RESET}",
-            choice.label, choice.description
-        ));
+        lines.push(Line::from([
+            format!("  {number}. {} ", choice.label).into(),
+            Span::new(choice.description.as_str(), SUBDUED),
+        ]));
         if let Some(preview) = &choice.preview {
             for line in preview.lines() {
-                lines.push(format!("     {SUBDUED}{line}{RESET}"));
+                lines.push(Line::from(["     ".into(), Span::new(line, SUBDUED)]));
             }
         }
     }
     lines
 }
 
-/// The question in front of an answer, on the bar.
-pub fn answer_label(question: &str) -> String {
-    let bar = start_bar_row();
-    format!("{bar}{STRONG}{question}{RESET}{bar} {MARK}›{RESET}{bar} ")
+/// The question in front of an answer.
+pub fn answer_label(question: &str) -> Line {
+    Line::from([
+        Span::new(question, STRONG),
+        " ".into(),
+        Span::new("›", MARK),
+        " ".into(),
+    ])
 }
 
 /// What sums up a call on its line.
@@ -1209,7 +1213,27 @@ mod tests {
 
     use super::*;
     use crate::config::Config;
-    use crate::style::CODE;
+    use crate::style::{CODE, PLAIN, Style};
+
+    /// The start of a call's line, before its summary, like `○ #00 Read: `.
+    fn call_line(tag: &str, tool: &str) -> Line {
+        Line::styled([
+            ("○", STRONG),
+            (" ", PLAIN),
+            (tag, SUBDUED),
+            (&format!(" {tool}:"), STRONG),
+            (" ", PLAIN),
+        ])
+    }
+
+    /// A line of `text` after `outcome`, like a result's or a task's end.
+    fn outcome_line(outcome: &str, text: &str) -> Line {
+        Line::styled([(&format!("{outcome} "), PLAIN), (text, SUBDUED)])
+    }
+
+    fn styled(text: &str, style: Style) -> Line {
+        Line::from(Span::new(text, style))
+    }
 
     fn new_output() -> Output {
         Output::new(
@@ -1229,7 +1253,7 @@ mod tests {
     fn a_reply_starts_with_its_mark() {
         let mut output = output_after_message();
         output.show_text("Hello.\n");
-        assert_eq!(output.take_lines(), [reply_mark(), "Hello.".to_string()]);
+        assert_eq!(output.take_lines(), [reply_mark(), Line::from("Hello.")]);
     }
 
     #[test]
@@ -1244,14 +1268,18 @@ mod tests {
             lines[..4],
             [
                 reply_mark(),
-                "One.".to_string(),
-                String::new(),
-                "Two.".to_string()
+                Line::from("One."),
+                Line::default(),
+                Line::from("Two.")
             ]
         );
         assert_eq!(
             lines[5],
-            format!("{SUBDUED}stderr │{RESET} {FAILED_OR_REMOVED}Failed{RESET}")
+            Line::styled([
+                ("stderr │", SUBDUED),
+                (" ", PLAIN),
+                ("Failed", FAILED_OR_REMOVED)
+            ])
         );
     }
 
@@ -1260,9 +1288,9 @@ mod tests {
         let mut output = output_after_message();
         output.show_text("Hel");
         output.show_message("Stop");
-        let lines = output.take_lines();
-        assert_eq!(lines[..2], [reply_mark(), "Hel".to_string()]);
-        assert!(lines[3].ends_with(&format!("Stop{FILL_ROW}{RESET}")));
+        let rows = output.take_rows();
+        assert_eq!(rows[..2], [reply_mark().into(), Line::from("Hel").into()]);
+        assert_eq!(rows[3], Line::from("Stop").on(YOURS));
     }
 
     #[test]
@@ -1274,9 +1302,9 @@ mod tests {
             output.take_lines(),
             [
                 reply_mark(),
-                "Hel".to_string(),
-                String::new(),
-                format!("{FAILED_OR_REMOVED}Failed{RESET}")
+                Line::from("Hel"),
+                Line::default(),
+                styled("Failed", FAILED_OR_REMOVED)
             ]
         );
     }
@@ -1287,7 +1315,7 @@ mod tests {
         output.show_text("##");
         output.show_message("Stop");
         let lines = output.take_lines();
-        assert_eq!(lines[..2], [reply_mark(), "##".to_string()]);
+        assert_eq!(lines[..2], [reply_mark(), Line::from("##")]);
     }
 
     #[test]
@@ -1312,7 +1340,7 @@ mod tests {
         output.note_interrupt(Interruption::Message);
         output.take_lines();
         output.show_turn_end(Some("error_during_execution"));
-        assert_eq!(output.take_lines(), Vec::<String>::new());
+        assert_eq!(output.take_lines(), Vec::<Line>::new());
     }
 
     #[test]
@@ -1325,10 +1353,10 @@ mod tests {
             output.take_lines(),
             [
                 reply_mark(),
-                "Hi.".to_string(),
-                String::new(),
+                Line::from("Hi."),
+                Line::default(),
                 reply_mark(),
-                "Done.".to_string()
+                Line::from("Done.")
             ]
         );
     }
@@ -1341,7 +1369,7 @@ mod tests {
         let lines = output.take_lines();
         assert_eq!(
             lines[2..],
-            [String::new(), reply_mark(), "Read it.".to_string()]
+            [Line::default(), reply_mark(), Line::from("Read it.")]
         );
     }
 
@@ -1356,10 +1384,10 @@ mod tests {
             output.take_lines(),
             [
                 reply_mark(),
-                "One.".to_string(),
-                String::new(),
+                Line::from("One."),
+                Line::default(),
                 reply_mark(),
-                "Two.".to_string()
+                Line::from("Two.")
             ]
         );
     }
@@ -1372,7 +1400,7 @@ mod tests {
         output.take_lines();
         output.show_turn_end(Some("error_during_execution"));
         output.show_text("Stopped.\n");
-        assert_eq!(output.take_lines(), [reply_mark(), "Stopped.".to_string()]);
+        assert_eq!(output.take_lines(), [reply_mark(), Line::from("Stopped.")]);
     }
 
     /// Reads back what the output wrote to the full view, after the user's first message.
@@ -1416,11 +1444,12 @@ mod tests {
         let text = std::fs::read_to_string(file.path()).expect("the full view reads back");
         let lines: Vec<&str> = text.lines().collect();
         let headers: Vec<&str> = starts.iter().map(|start| lines[start - 1]).collect();
+        let header = |header, text| Line::styled([(header, STRONG), (text, PLAIN)]).to_string();
         assert_eq!(
             headers,
             [
-                format!("{STRONG}Database{RESET} Which database?"),
-                format!("{STRONG}Checks{RESET} Which checks?"),
+                header("Database", " Which database?"),
+                header("Checks", " Which checks?"),
             ]
         );
     }
@@ -1474,10 +1503,10 @@ mod tests {
         assert_eq!(
             lines[2..],
             [
-                format!("  {SUBDUED}command:{RESET}"),
+                Line::styled([("  ", PLAIN), ("command:", SUBDUED)]).to_string(),
                 "    cd a".to_string(),
                 "    make".to_string(),
-                format!("  {SUBDUED}timeout:{RESET} 5"),
+                Line::styled([("  ", PLAIN), ("timeout:", SUBDUED), (" 5", PLAIN)]).to_string(),
             ]
         );
     }
@@ -1493,15 +1522,14 @@ mod tests {
         assert_eq!(
             lines[4..],
             [
-                format!("✓ {SUBDUED}#00 Read: one (+1 lines){RESET}"),
+                outcome_line("✓", "#00 Read: one (+1 lines)").to_string(),
                 "  two".to_string(),
-                format!(
-                    "{STRONG}○{RESET} {SUBDUED}#01{RESET}{STRONG} Read:{RESET} {}",
-                    code_span("b.txt")
-                ),
-                format!("  {SUBDUED}file_path:{RESET}"),
+                call_line("#01", "Read")
+                    .with(code_span("b.txt"))
+                    .to_string(),
+                Line::styled([("  ", PLAIN), ("file_path:", SUBDUED)]).to_string(),
                 "    b.txt".to_string(),
-                format!("✓ {SUBDUED}#01 Read: three{RESET}"),
+                outcome_line("✓", "#01 Read: three").to_string(),
             ]
         );
     }
@@ -1515,16 +1543,13 @@ mod tests {
             output.show_tool_use(&read_call("1", &path));
             screen = output.take_lines();
         });
-        let call = format!(
-            "{STRONG}○{RESET} {SUBDUED}#00{RESET}{STRONG} Read:{RESET} {}",
-            code_span(&path)
-        );
+        let call = call_line("#00", "Read").with(code_span(&path));
         assert_eq!(
             screen[1],
             cut(&call, Config::default().max_noisy_line_columns)
         );
         assert_ne!(screen[1], call);
-        assert_eq!(lines[1], call);
+        assert_eq!(lines[1], call.to_string());
     }
 
     #[test]
@@ -1544,7 +1569,7 @@ mod tests {
             agent_call: None,
             agent: None,
         });
-        assert!(output.take_lines()[1].contains(&description));
+        assert!(output.take_lines()[1].text().contains(&description));
     }
 
     #[test]
@@ -1554,14 +1579,20 @@ mod tests {
         output.show_error(&long);
         output.show_answer("Q", &long);
         let lines = output.take_lines();
-        assert_eq!(lines[1], format!("{FAILED_OR_REMOVED}{long}{RESET}"));
-        assert!(lines[2].contains(&long));
+        assert_eq!(lines[1], styled(&long, FAILED_OR_REMOVED));
+        assert!(lines[2].text().contains(&long));
     }
 
     #[test]
     fn the_full_view_leaves_out_the_codes_that_fill_a_row() {
-        let lines = full_view_after(|_| {});
-        assert!(!lines.join("").contains(FILL_ROW));
+        let file = tempfile::NamedTempFile::new().expect("the temporary directory takes a file");
+        let mut output = Output::new(
+            file.reopen().expect("the file opens again"),
+            Config::default().max_noisy_line_columns,
+        );
+        output.show_message("Hi");
+        let text = std::fs::read_to_string(file.path()).expect("the full view reads back");
+        assert!(!text.contains("\x1b[K"), "{text:?}");
     }
 
     fn read_call(id: &str, path: &str) -> ToolUse {
@@ -1592,19 +1623,13 @@ mod tests {
         output.show_tool_use(&read_call("2", "b.txt"));
         output.show_tool_result(&result("2", "b"));
         let lines = output.take_lines();
-        assert_eq!(
-            lines[2],
-            format!(
-                "{STRONG}○{RESET} {SUBDUED}#01{RESET}{STRONG} Read:{RESET} {}",
-                code_span("b.txt")
-            )
-        );
-        assert_eq!(lines[3], format!("✓ {SUBDUED}#01 Read: b{RESET}"));
+        assert_eq!(lines[2], call_line("#01", "Read").with(code_span("b.txt")));
+        assert_eq!(lines[3], outcome_line("✓", "#01 Read: b"));
     }
 
     /// Shows `lines` as Claude Code wrote them, by the events that claudio reads of tasks and
     /// calls, and gives the lines that come of them.
-    fn show_lines(output: &mut Output, lines: &[String]) -> Vec<String> {
+    fn show_lines(output: &mut Output, lines: &[String]) -> Vec<Line> {
         for line in lines {
             for event in crate::protocol::read_events(line).expect("a readable line") {
                 match event {
@@ -1630,8 +1655,8 @@ mod tests {
         output.take_lines()
     }
 
-    fn running_in_background(tag: &str) -> String {
-        format!("◌ {SUBDUED}{tag} Bash: running in background{RESET}")
+    fn running_in_background(tag: &str) -> Line {
+        outcome_line("◌", &format!("{tag} Bash: running in background"))
     }
 
     #[test]
@@ -1644,7 +1669,7 @@ mod tests {
                 lines[2..],
                 [
                     running_in_background("#00"),
-                    format!("{outcome} {SUBDUED}#00 Bash: {word}{RESET}"),
+                    outcome_line(outcome, &format!("#00 Bash: {word}")),
                 ]
             );
         }
@@ -1655,7 +1680,7 @@ mod tests {
         let mut output = output_after_message();
         let lines = show_lines(&mut output, &contract::moved_call());
         assert_eq!(lines[2], running_in_background("#00"));
-        assert_eq!(lines[3], format!("✓ {SUBDUED}#00 Bash: completed{RESET}"));
+        assert_eq!(lines[3], outcome_line("✓", "#00 Bash: completed"));
     }
 
     #[test]
@@ -1669,7 +1694,7 @@ mod tests {
             lines[2..],
             [
                 running_in_background("#00"),
-                format!("✓ {SUBDUED}#00 Bash: completed{RESET}"),
+                outcome_line("✓", "#00 Bash: completed"),
             ]
         );
         assert!(output.background_calls.is_empty());
@@ -1702,12 +1727,10 @@ mod tests {
         let lines = show_lines(&mut output, &contract::stopped_background_task());
         assert_eq!(
             lines[3],
-            format!(
-                "{STRONG}○{RESET} {SUBDUED}#01{RESET}{STRONG} TaskStop:{RESET} {SUBDUED}#00{RESET}"
-            )
+            call_line("#01", "TaskStop").with(Span::new("#00", SUBDUED))
         );
-        assert_eq!(lines[4], format!("✗ {SUBDUED}#00 Bash: stopped{RESET}"));
-        assert!(lines[5].starts_with(&format!("✓ {SUBDUED}#01 TaskStop: ")));
+        assert_eq!(lines[4], outcome_line("✗", "#00 Bash: stopped"));
+        assert!(lines[5].text().starts_with("✓ #01 TaskStop: "));
     }
 
     #[test]
@@ -1728,10 +1751,10 @@ mod tests {
             let lines = show_lines(&mut output, &contract::subagent(is_backgrounded));
             // After the reply mark, and the call, and its result, for a subagent in the
             // background
-            assert!(lines[1].contains(&format!("{SUBDUED}#00{RESET}{STRONG} Agent:{RESET}")));
+            assert!(lines[1].text().starts_with("○ #00 Agent: "));
             assert_eq!(
                 lines.last(),
-                Some(&format!("✓ {SUBDUED}#00 Agent: completed · 1 call{RESET}"))
+                Some(&outcome_line("✓", "#00 Agent: completed · 1 call"))
             );
             assert_eq!(lines.len(), if is_backgrounded { 4 } else { 3 });
         }
@@ -1742,14 +1765,13 @@ mod tests {
         let lines = full_view_after(|output| {
             show_lines(output, &contract::subagent(false));
         });
-        let call = format!("{STRONG}○{RESET} {SUBDUED}#00#00{RESET}{STRONG} SubagentHandback:");
+        let call = call_line("#00#00", "SubagentHandback").to_string();
+        let call = call.trim_end_matches(' ');
+        assert!(lines.iter().any(|line| line.starts_with(call)), "{lines:?}");
+        let result = outcome_line("✓", "#00#00 SubagentHandback: ").to_string();
+        let result = result.trim_end_matches(&PLAIN.code());
         assert!(
-            lines.iter().any(|line| line.starts_with(&call)),
-            "{lines:?}"
-        );
-        let result = format!("✓ {SUBDUED}#00#00 SubagentHandback: ");
-        assert!(
-            lines.iter().any(|line| line.starts_with(&result)),
+            lines.iter().any(|line| line.starts_with(result)),
             "{lines:?}"
         );
     }
@@ -1758,15 +1780,11 @@ mod tests {
     fn a_resumed_subagent_keeps_the_tag_of_the_call_that_first_started_it() {
         let mut output = output_after_message();
         let lines = show_lines(&mut output, &contract::resumed_subagent());
-        let send = format!(
-            "{STRONG}○{RESET} {SUBDUED}#01{RESET}{STRONG} SendMessage:{RESET} {SUBDUED}#00{RESET}"
-        );
+        let send = call_line("#01", "SendMessage").with(Span::new("#00", SUBDUED));
         assert!(lines.contains(&send), "{lines:?}");
         assert_eq!(
             lines.last(),
-            Some(&format!(
-                "✓ {SUBDUED}#01 SendMessage: completed · 1 call{RESET}"
-            ))
+            Some(&outcome_line("✓", "#01 SendMessage: completed · 1 call"))
         );
     }
 
@@ -1807,7 +1825,7 @@ mod tests {
             let lines = show_lines(&mut output, &failed_subagent(is_backgrounded));
             assert_eq!(
                 lines.last(),
-                Some(&format!("✗ {SUBDUED}#00 Agent: failed · 0 calls{RESET}"))
+                Some(&outcome_line("✗", "#00 Agent: failed · 0 calls"))
             );
         }
     }
@@ -1853,10 +1871,7 @@ mod tests {
         let result = json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "c", "content": "", "is_error": false}]}, "parent_tool_use_id": null});
         let lines = [call, started, ended, result].map(|line| line.to_string());
         let lines = show_lines(&mut output, &lines);
-        assert_eq!(
-            lines[2..],
-            [format!("✓ {SUBDUED}#00 Bash: (no output){RESET}")]
-        );
+        assert_eq!(lines[2..], [outcome_line("✓", "#00 Bash: (no output)")]);
         assert!(output.call_tasks.is_empty());
     }
 
@@ -1883,10 +1898,10 @@ mod tests {
         let lines = output.take_lines();
         assert_eq!(
             lines.last().expect("the call's line"),
-            &format!(
-                "{STRONG}○{RESET} {SUBDUED}#00{RESET}{STRONG} Bash:{RESET} {} {SUBDUED}(+2 lines){RESET}",
-                code_span("cd a")
-            )
+            &call_line("#00", "Bash")
+                .with(code_span("cd a"))
+                .with(" ")
+                .with(Span::new("(+2 lines)", SUBDUED))
         );
     }
 
@@ -1911,7 +1926,7 @@ mod tests {
         let lines = output.take_lines();
         assert_eq!(
             lines.last().expect("the call's line"),
-            &format!("{STRONG}○{RESET} {SUBDUED}#00{RESET}{STRONG} Bash:{RESET} Run the tests")
+            &call_line("#00", "Bash").with("Run the tests")
         );
     }
 
@@ -1922,9 +1937,9 @@ mod tests {
         output.show_tool_use(&tool_use("TodoWrite", json!({"message": message})));
         let lines = output.take_lines();
         let line = lines.last().expect("the call's line");
-        assert_eq!(line.matches('…').count(), 1);
+        assert_eq!(line.text().matches('…').count(), 1);
         // The `…` keeps the style of the code it stands for
-        assert!(line.ends_with(&format!("x{RESET}{CODE}…{RESET}")));
+        assert_eq!(line.characters().last(), Some(('…', CODE)));
     }
 
     #[test]
@@ -1934,10 +1949,7 @@ mod tests {
         let lines = output.take_lines();
         assert_eq!(
             lines.last().expect("the call's line"),
-            &format!(
-                "{STRONG}○{RESET} {SUBDUED}#00{RESET}{STRONG} TodoWrite:{RESET} {}",
-                code_span(r#"{"todos":[]}"#)
-            )
+            &call_line("#00", "TodoWrite").with(code_span(r#"{"todos":[]}"#))
         );
     }
 
@@ -1949,10 +1961,14 @@ mod tests {
         let lines = output.take_lines();
         assert_eq!(
             lines.last().expect("the call's line"),
-            &format!(
-                "{STRONG}○{RESET} {SUBDUED}#00{RESET}{STRONG} Edit:{RESET} {} {FAILED_OR_REMOVED}-2{RESET} {DONE_OR_ADDED}+1{RESET}",
-                code_span("a.rs")
-            )
+            &call_line("#00", "Edit")
+                .with(code_span("a.rs"))
+                .with_line(Line::styled([
+                    (" ", PLAIN),
+                    ("-2", FAILED_OR_REMOVED),
+                    (" ", PLAIN),
+                    ("+1", DONE_OR_ADDED)
+                ]))
         );
     }
 
@@ -1963,15 +1979,15 @@ mod tests {
             output.show_tool_use(&read_call(&id.to_string(), "a.txt"));
         }
         let lines = output.take_lines();
-        assert!(lines[256].contains("#ff"));
-        assert!(lines[257].contains("#00"));
+        assert!(lines[256].text().contains("#ff"));
+        assert!(lines[257].text().contains("#00"));
     }
 
     #[test]
     fn a_text_block_that_never_streamed_shows_whole_at_its_end() {
         let mut output = output_after_message();
         output.show_text_end("Usage");
-        assert_eq!(output.take_lines(), [reply_mark(), "Usage".to_string()]);
+        assert_eq!(output.take_lines(), [reply_mark(), Line::from("Usage")]);
     }
 
     #[test]
@@ -1979,7 +1995,7 @@ mod tests {
         let mut output = output_after_message();
         output.show_text("Hello.");
         output.show_text_end("Hello.");
-        assert_eq!(output.take_lines(), [reply_mark(), "Hello.".to_string()]);
+        assert_eq!(output.take_lines(), [reply_mark(), Line::from("Hello.")]);
     }
 
     #[test]
@@ -1988,11 +2004,11 @@ mod tests {
         output.show_command("compact");
         output.show_compacted(19_812, Some(6_578));
         assert_eq!(
-            output.take_lines(),
+            output.take_rows(),
             [
                 user_line("/compact"),
-                reply_mark(),
-                format!("{SUBDUED}compacted from 19,812 to 6,578 tokens{RESET}")
+                reply_mark().into(),
+                styled("compacted from 19,812 to 6,578 tokens", SUBDUED).into()
             ]
         );
     }
@@ -2030,9 +2046,10 @@ mod tests {
         let lines = output.take_lines();
         assert_eq!(
             lines[1],
-            format!("{FAILED_OR_REMOVED}Stop hook failed with exit code 1{RESET}")
+            styled("Stop hook failed with exit code 1", FAILED_OR_REMOVED)
         );
-        assert!(lines[2].contains("stderr │") && lines[2].contains("no tmux server"));
+        let stderr = lines[2].text();
+        assert!(stderr.contains("stderr │") && stderr.contains("no tmux server"));
         assert_eq!(lines.len(), 3);
     }
 
@@ -2043,9 +2060,10 @@ mod tests {
         output.show_notice("quiet", Level::Notice);
         output.show_notice("loud", Level::Warning);
         let lines = output.take_lines();
-        assert!(!lines.join("").contains("in the full view only"));
-        assert_eq!(lines[1], format!("{SUBDUED}quiet{RESET}"));
-        assert_eq!(lines[2], format!("{ATTENTION}warning: loud{RESET}"));
+        let text: Vec<String> = lines.iter().map(Line::text).collect();
+        assert!(!text.join("").contains("in the full view only"));
+        assert_eq!(lines[1], styled("quiet", SUBDUED));
+        assert_eq!(lines[2], styled("warning: loud", ATTENTION));
     }
 
     #[test]
@@ -2054,7 +2072,9 @@ mod tests {
         output.show_unknown("system message", "api_retry", "{}");
         output.show_unknown("system message", "api_retry", "{}");
         let lines = output.take_lines();
-        let warnings = lines.iter().filter(|line| line.contains("api_retry"));
+        let warnings = lines
+            .iter()
+            .filter(|line| line.text().contains("api_retry"));
         assert_eq!(warnings.count(), 1);
     }
 }

@@ -32,9 +32,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::climb::{self, Climb};
 use crate::config::Stream;
 use crate::context::COLD_COLOR;
-use crate::cut::{
-    self, ScreenRow, Whole, colors_at, cut, cut_before_hidden, cut_path, visible_width,
-};
+use crate::cut::{self, ScreenRow, Whole, cut, cut_before_hidden, cut_path};
 use crate::keys::{
     self, Action, Answering, BLOCK_ROWS, Confirmed, Effect, Ending, Field, Gate, Mark, OnEnding,
     OnMessage, OnQuestion, PREVIEWED_QUESTION_ROWS, Phase, Reading, SessionKey, Tone, View,
@@ -43,13 +41,14 @@ use crate::keys::{
 use crate::label::{KeyState, MainLabel, Progress, QuestionLabel};
 use crate::limits::{Level, limit_level};
 use crate::picker::{self, Cursor, Draft, Form, Move, Pick, question_name, request_name};
-use crate::render::{Output, Status, marks, start_bar_row, user_line};
+use crate::render::{Output, Status, marks, user_line};
 use crate::status;
 use crate::style::{
-    ATTENTION, DONE_OR_ADDED, FAILED_OR_REMOVED, MARK, RESET, REVERSE, STRONG, SUBDUED,
-    SUBDUED_ON_BAR, UNREVERSE,
+    ATTENTION, DONE_OR_ADDED, FAILED_OR_REMOVED, MARK, PLAIN, STRONG, SUBDUED, SUBDUED_ON_BAR,
+    YOURS,
 };
 use crate::terminal::{Settings, run_in_terminal};
+use crate::text::{Line, Row, Span, Text};
 use crate::vi::{Editor, Mode};
 use crate::wrap;
 use crate::{Shared, lock};
@@ -172,13 +171,13 @@ pub struct InputLine {
     /// The conversation's text not printed yet: whole lines, which wait for the main screen and
     /// for a screen with rows to show them, then the line Claude still writes, which shows among
     /// the live rows until it ends, when the user streams by chunk.
-    pending: String,
+    pending: Text,
     /// How each frame gets back to the first live row.
     climb: Climb,
     /// Where the last frame left the cursor among the live rows.
     drawn: Drawn,
     /// The label last drawn, which the input line redraws when it changes.
-    label: String,
+    label: Line,
     /// Whether the question view shows. It shows on the alternate screen, which keeps it out of
     /// the scrollback, since a question matters only while it is answered, and the
     /// conversation's new lines wait for the main screen to come back.
@@ -243,14 +242,14 @@ impl InputLine {
             gate: Gate::default(),
             layout,
             scroll: 0,
-            pending: String::new(),
+            pending: Text::default(),
             climb,
             // No live rows yet: the cursor is where the first one goes
             drawn: Drawn {
                 lines_above_cursor: 0,
                 width: layout.width,
             },
-            label: String::new(),
+            label: Line::default(),
             in_view: false,
             is_closed: false,
         })
@@ -373,7 +372,7 @@ impl InputLine {
         out.extend(climb::ERASE_DOWN.as_bytes());
         put!(out, SetCursorStyle::DefaultUserShape, DisableBracketedPaste);
         let pending = std::mem::take(&mut self.pending);
-        out.extend(pending.replace('\n', "\r\n").as_bytes());
+        out.extend(pending.to_terminal("\r\n").as_bytes());
         if self.climb == Climb::Exact {
             out.extend(climb::BACKSPACE_WRAPS_OFF.as_bytes());
         }
@@ -740,13 +739,13 @@ impl InputLine {
     /// Shows `error` on a screen of its own, like a program the input line runs, since it
     /// concerns the input line rather than the conversation.
     fn show_error(&mut self, error: &str) -> Result<(), String> {
-        self.show_screen(&[error.to_string()])
+        self.show_screen(&[Line::from(error)])
     }
 
     /// Shows `lines` at the bottom of the terminal's alternate screen, until the next key or a
     /// question from Claude Code closes them. The conversation stays as it was on the main
     /// screen, which comes back once they close.
-    fn show_screen(&mut self, lines: &[String]) -> Result<(), String> {
+    fn show_screen(&mut self, lines: &[Line]) -> Result<(), String> {
         // The question view is on the alternate screen already, and draws itself again after
         let mut out = Vec::new();
         if !self.in_view {
@@ -768,7 +767,7 @@ impl InputLine {
 
     /// Draws `lines` on the alternate screen until a key or a question from Claude Code closes
     /// it. Returns the size of the last resize meanwhile, if any.
-    fn show_screen_until_closed(&self, lines: &[String]) -> Result<Option<(u16, u16)>, String> {
+    fn show_screen_until_closed(&self, lines: &[Line]) -> Result<Option<(u16, u16)>, String> {
         let mut height = self.layout.height;
         let mut resized = None;
         let mut is_drawn = false;
@@ -777,6 +776,7 @@ impl InputLine {
                 let top = height.saturating_sub(u16::try_from(lines.len()).unwrap_or(u16::MAX));
                 let mut out = Vec::new();
                 put!(out, Clear(ClearType::All), MoveTo(0, top));
+                let lines: Vec<String> = lines.iter().map(Line::to_string).collect();
                 out.extend(lines.join("\r\n").as_bytes());
                 write_out(&out)?;
                 is_drawn = true;
@@ -852,7 +852,7 @@ impl InputLine {
         if text.is_empty() {
             return Ok(());
         }
-        self.pending.push_str(&text);
+        self.pending.append(text);
         if self.in_view {
             return Ok(());
         }
@@ -893,9 +893,11 @@ impl InputLine {
         out.extend(climb::ERASE_DOWN.as_bytes());
         // Each whole line ends with its line break, so the live rows start on a line of their own
         let shows_conversation = layout.shows_conversation();
-        if shows_conversation && let Some(end) = self.pending.rfind('\n') {
-            let lines: String = self.pending.drain(..=end).collect();
-            out.extend(lines.replace('\n', "\r\n").as_bytes());
+        if shows_conversation {
+            for line in self.pending.take_ended() {
+                out.extend(line.to_terminal().as_bytes());
+                out.extend(b"\r\n");
+            }
         }
         let columns = self.columns();
         let label_row = (layout.label_rows > 0).then(|| self.label_row());
@@ -927,7 +929,7 @@ impl InputLine {
         };
         let open_rows = if shows_conversation && self.stream == Stream::Chunk {
             let room = usize::from(layout.height).saturating_sub(label_height + box_rows.len());
-            open_line_rows(&self.pending, columns, room)
+            open_line_rows(self.pending.open(), columns, room)
         } else {
             Vec::new()
         };
@@ -938,7 +940,7 @@ impl InputLine {
             .chain(label_row)
             .chain(box_rows)
             .collect();
-        let text: Vec<&str> = lines.iter().map(ScreenRow::as_str).collect();
+        let text: Vec<String> = lines.iter().map(ScreenRow::to_terminal).collect();
         out.extend(text.join("\r\n").as_bytes());
         let lines_below_cursor = lines.len().saturating_sub(cursor_line + 1);
         climb::write(
@@ -971,7 +973,7 @@ impl InputLine {
         let rows = ViewRows::new(layout.height, self.input_rows.get(), view.choices.len());
         self.draw_question(&mut out, view, rows);
         if layout.label_rows > 0 {
-            put_bar_line(&mut out, rows.label, &self.question_label_row(view));
+            put_bar_line(&mut out, rows.label, self.question_label_row(view));
         }
         let (box_rows, cursor_row_in_box, cursor_column) = self.box_rows(rows.box_rows);
         for (row, line) in (rows.box_top..layout.height).zip(&box_rows) {
@@ -1009,7 +1011,7 @@ impl InputLine {
         let lines = (0..rows)
             .map(|y| {
                 let row = wrapped.rows.get(usize::from(self.scroll + y));
-                box_line(row.map(|row| row.text.as_str()), columns)
+                box_line(row.map(|row| &row.text), columns)
             })
             .collect();
         (
@@ -1033,8 +1035,9 @@ impl InputLine {
     /// out by `MainLabel`, so a half-typed command moves nothing.
     fn label_row(&self) -> ScreenRow {
         let columns = self.columns();
-        let row = MainLabel::new(columns).row(&self.label, &self.key_state());
-        on_bar(&row, columns)
+        MainLabel::new(columns)
+            .row(&self.label, &self.key_state())
+            .on(YOURS)
     }
 
     /// The question view's label row: the label, and at its end the progress through the batch
@@ -1095,7 +1098,7 @@ impl InputLine {
         if let Some(preview) = picker::preview(&view.choices, &self.pick) {
             fields.push(Field {
                 mark: Mark::Quote(preview.key),
-                value: preview.lines.join("\n"),
+                value: preview.markdown,
                 is_path: false,
                 tone: Tone::Plain,
                 rows: BLOCK_ROWS - PREVIEWED_QUESTION_ROWS,
@@ -1132,9 +1135,9 @@ impl InputLine {
             let line = options
                 .next()
                 .map_or_else(ScreenRow::empty, |line| ScreenRow::cut(line, columns));
-            put_bar_line(out, row, &line);
+            put_bar_line(out, row, line);
         }
-        put_bar_line(out, rows.own, &ScreenRow::cut(&own, columns));
+        put_bar_line(out, rows.own, ScreenRow::cut(&own, columns));
     }
 
     /// Lays the screen out for its new size, which the frame after it draws. The main screen
@@ -1145,8 +1148,8 @@ impl InputLine {
 
     /// What the label row says while a key waits for its second press, in the color of a
     /// warning.
-    fn confirmation(&self) -> Option<String> {
-        self.gate.label().map(|label| format!("{ATTENTION}{label}"))
+    fn confirmation(&self) -> Option<Span> {
+        self.gate.label().map(|label| Span::new(label, ATTENTION))
     }
 
     /// The label row: for a message, `››` with the budgets, then the activity, as AGENTS.md's
@@ -1155,7 +1158,7 @@ impl InputLine {
     /// that wait, in the color of a warning since only the user moves them on, the tasks that run
     /// in the background, the subagents that run, and what Claude does, `idle` too, so the user always sees whether it is
     /// their turn. For an answer, the question; at the end, the work Claude still does.
-    fn make_label(&self) -> String {
+    fn make_label(&self) -> Line {
         let shared = lock(&self.shared);
         match &shared.phase {
             Phase::Writing(Writing { waiting }) => {
@@ -1169,53 +1172,65 @@ impl InputLine {
                 } else {
                     (" ", SUBDUED_ON_BAR)
                 };
-                let budgets = format!(
-                    "{level_color}{cold_mark}T{} {} {}",
-                    show_level(level),
+                let budgets = Line::from([
+                    Span::new(format!("{cold_mark}T{}", show_level(level)), level_color),
+                    " ".into(),
                     limit_indicator('S', shared.limits.session().map(limit_level)),
+                    " ".into(),
                     limit_indicator('W', shared.limits.week().map(limit_level)),
-                );
+                ]);
                 let output = &shared.output;
                 // A subagent counts in A alone, as it runs in the background or not
                 let commands = (output.background_tasks().iter())
                     .filter(|task| !task.is_agent())
                     .count();
-                let activity = format!(
-                    "{} {} {}",
+                let activity = Line::from([
                     waiting_indicator(*waiting),
+                    " ".into(),
                     background_indicator(commands),
+                    " ".into(),
                     agents_indicator(output.running_agents()),
-                );
-                let indicators = format!("{}{budgets} {SUBDUED_ON_BAR}│ {activity}", marks());
-                let state = (self.confirmation())
-                    .or_else(|| describe_work(&shared.output))
-                    .unwrap_or_else(|| "idle".to_string());
-                format!("{indicators} {SUBDUED_ON_BAR}│ {state}")
+                ]);
+                let work = describe_work(&shared.output).unwrap_or_else(|| "idle".to_string());
+                let state =
+                    (self.confirmation()).unwrap_or_else(|| Span::new(work, SUBDUED_ON_BAR));
+                Line::from(marks())
+                    .with_line(budgets)
+                    .with(Span::new(" │ ", SUBDUED_ON_BAR))
+                    .with_line(activity)
+                    .with(Span::new(" │ ", SUBDUED_ON_BAR))
+                    .with(state)
             }
             Phase::Answering(Answering { view }) => {
                 let hint = if let Some(confirmation) = self.confirmation() {
-                    confirmation
+                    Line::from(confirmation)
                 } else if self.is_empty_warned {
                     let text = match view.form {
                         Form::One => "write your answer, or Esc goes back",
                         _ => "Space ticks one or more",
                     };
-                    format!("{ATTENTION}{text}")
+                    Line::from(Span::new(text, ATTENTION))
                 } else if view.is_submitted {
-                    format!("{DONE_OR_ADDED}submitted{SUBDUED_ON_BAR}, Enter edits it")
+                    Line::from([
+                        Span::new("submitted", DONE_OR_ADDED),
+                        Span::new(", Enter edits it", SUBDUED_ON_BAR),
+                    ])
                 } else {
-                    picker::hint(
+                    let hint = picker::hint(
                         view.form,
                         &self.pick,
                         view.choices.len(),
                         view.sends_at_once,
-                    )
+                    );
+                    Line::from(Span::new(hint, SUBDUED_ON_BAR))
                 };
-                format!(
-                    "{} {STRONG}{}{RESET} {SUBDUED_ON_BAR}│ {hint}",
+                Line::from([
                     marks(),
-                    header(&view.label)
-                )
+                    " ".into(),
+                    Span::new(header(&view.label), STRONG),
+                    Span::new(" │ ", SUBDUED_ON_BAR),
+                ])
+                .with_line(hint)
             }
             Phase::Ending(Ending) => {
                 let output = &shared.output;
@@ -1229,14 +1244,15 @@ impl InputLine {
                     .chain(describe_work(output))
                     .chain(background)
                     .collect();
-                let confirmation = self
-                    .confirmation()
-                    .map_or_else(String::new, |confirmation| format!(" │ {confirmation}"));
-                format!(
-                    "{} {SUBDUED_ON_BAR}{}{confirmation}",
+                let mut label = Line::from([
                     marks(),
-                    parts.join(" │ ")
-                )
+                    Span::new(format!(" {}", parts.join(" │ ")), SUBDUED_ON_BAR),
+                ]);
+                if let Some(confirmation) = self.confirmation() {
+                    label.push(Span::new(" │ ", SUBDUED_ON_BAR));
+                    label.push(confirmation);
+                }
+                label
             }
         }
     }
@@ -1328,17 +1344,19 @@ fn command_rows(
     );
     let rows = rows.min(wrapped.rows.len());
     let first = (wrapped.cursor_row + 1).saturating_sub(rows);
+    let prompt = COMMAND_PROMPT.trim_end();
     let lines = wrapped.rows[first..first + rows]
         .iter()
         .enumerate()
         .map(|(index, row)| {
-            let text = match row.text.strip_prefix(COMMAND_PROMPT.trim_end()) {
-                Some(rest) if first + index == 0 => {
-                    format!("{MARK}{}{RESET}{rest}", COMMAND_PROMPT.trim_end())
-                }
-                _ => row.text.clone(),
+            let text = if first + index == 0 {
+                // The prompt starts the first row, before any character the user typed
+                let rest = row.text.characters().skip(prompt.chars().count());
+                Line::from(Span::new(prompt, MARK)).with_line(rest.collect())
+            } else {
+                row.text.clone()
             };
-            ScreenRow::cut(&bar_row(&text), columns)
+            ScreenRow::cut(&text, columns).on(YOURS)
         })
         .collect();
     (
@@ -1348,14 +1366,11 @@ fn command_rows(
     )
 }
 
-/// The rows of the line Claude still writes, the text after the last line break in `pending`,
-/// as the terminal will wrap it on a screen `width` wide once it ends, so it moves to the
-/// conversation as it shows. At most `room` rows show: a taller line shows its end, after a row
-/// that says its start is cut, and shows whole once it ends.
-fn open_line_rows(pending: &str, columns: NonZeroUsize, room: usize) -> Vec<ScreenRow> {
-    let open = pending
-        .rfind('\n')
-        .map_or(pending, |end| &pending[end + 1..]);
+/// The rows of `open`, the line Claude still writes, as the terminal will wrap it on a screen
+/// `width` wide once it ends, so it moves to the conversation as it shows. At most `room` rows
+/// show: a taller line shows its end, after a row that says its start is cut, and shows whole
+/// once it ends.
+fn open_line_rows(open: &Line, columns: NonZeroUsize, room: usize) -> Vec<ScreenRow> {
     if open.is_empty() || room == 0 {
         return Vec::new();
     }
@@ -1363,60 +1378,36 @@ fn open_line_rows(pending: &str, columns: NonZeroUsize, room: usize) -> Vec<Scre
     let (cut, shown) = if rows.len() <= room {
         (None, &rows[..])
     } else {
-        let cut = format!("{SUBDUED_ON_BAR}… its start shows once it ends");
+        let cut = Line::from(Span::new("… its start shows once it ends", SUBDUED_ON_BAR));
         (Some(cut), &rows[rows.len() - (room - 1)..])
     };
     (cut.iter().chain(shown))
-        .map(|row| ScreenRow::cut(&format!("{row}{RESET}"), columns))
+        .map(|row| ScreenRow::cut(row, columns))
         .collect()
 }
 
-/// The rows the terminal wraps `line` onto at `width` columns, each after the color codes the
-/// rows before it set, so that printed on rows of their own they show as the line would. A
-/// character too wide for the rest of a row starts the next row.
+/// The rows the terminal wraps `line` onto at `width` columns, each in the styles of its own
+/// characters, so that printed on rows of their own they show as the line would. A character
+/// too wide for the rest of a row starts the next row.
 ///
 /// Assumes the terminal gives each character the width unicode-width gives it, and that the
 /// line holds no tab, which moves the cursor to a tab stop. A character the terminal gives
 /// another width, or a tab, ends a row elsewhere, which the terminal then wraps.
-fn terminal_rows(line: &str, width: usize) -> Vec<String> {
+fn terminal_rows(line: &Line, width: usize) -> Vec<Line> {
     let width = width.max(1);
-    let mut starts = vec![0];
+    let mut rows = vec![Line::default()];
     let mut column = 0;
-    let mut characters = line.char_indices();
-    while let Some((index, character)) = characters.next() {
-        if character == '\x1b' {
-            // Every sequence a line holds is a CSI, which ends with a letter and takes no column
-            characters.find(|(_, next)| next.is_ascii_alphabetic());
-            continue;
-        }
+    for (character, style) in line.characters() {
         let character_width = character.width().unwrap_or(0);
         if column + character_width > width && column > 0 {
-            starts.push(index);
+            rows.push(Line::default());
             column = 0;
         }
         column += character_width;
+        let row = rows.last_mut().expect("rows start with one");
+        row.push(Span::new(character, style));
     }
-    let ends = starts.iter().skip(1).copied().chain([line.len()]);
-    starts
-        .iter()
-        .zip(ends)
-        .map(|(&start, end)| format!("{}{}", colors_at(line, start), &line[start..end]))
-        .collect()
-}
-
-/// `row` on the bar, as `bar_row` draws it, whose codes take no column.
-fn on_bar(row: &ScreenRow, columns: NonZeroUsize) -> ScreenRow {
-    ScreenRow::cut(&bar_row(row.as_str()), columns)
-}
-
-/// `line` on the bar, whose background fills the row. A reset inside the line ends the bar,
-/// which then starts again.
-fn bar_row(line: &str) -> String {
-    let bar = start_bar_row();
-    format!(
-        "{bar}{}{RESET}",
-        line.replace(RESET, &format!("{RESET}{bar}"))
-    )
+    rows
 }
 
 /// Scrolls the whole screen up by `rows`, which sends its top rows to the scrollback.
@@ -1440,7 +1431,7 @@ pub(crate) fn cannot_read_terminal(error: &io::Error) -> String {
 }
 
 /// The last line of the session, on the bar, with the session's id once Claude Code told it.
-pub fn final_line(session_id: Option<&str>) -> String {
+pub fn final_line(session_id: Option<&str>) -> Row {
     let session = session_id.map_or_else(String::new, |id| format!(" │ session {id}"));
     user_line(&format!("ended{session}"))
 }
@@ -1452,15 +1443,18 @@ fn show_level(level: Option<usize>) -> String {
 
 /// The letter of a usage limit and its level, in the level's color, so the color only repeats
 /// what the level says.
-fn limit_indicator(letter: char, level: Option<Level>) -> String {
+fn limit_indicator(letter: char, level: Option<Level>) -> Span {
     let color = level.and_then(Level::color).unwrap_or(SUBDUED_ON_BAR);
-    format!("{color}{letter}{}", show_level(level.map(Level::to_number)))
+    Span::new(
+        format!("{letter}{}", show_level(level.map(Level::to_number))),
+        color,
+    )
 }
 
 /// The names of the requests that have a key, as for the questions of a batch, even for a
 /// single request, so the part next to where the keys go is always there. The names are keys,
 /// so a request after the fourth, which `}` reaches, shows none, and the title gives its place.
-fn request_names(view: &View) -> String {
+fn request_names(view: &View) -> Line {
     let keyed = view.requests.len().min(picker::REQUEST_KEYS.len());
     let name = |index| request_name(index).expect("a named request");
     name_row(
@@ -1491,9 +1485,9 @@ fn next_match(shown: Option<usize>, count: usize, is_backward: bool) -> Option<u
 
 /// A row of the box, on the bar: a row of the text, or past the text's end, a dim `~`, as vim
 /// marks the rows past a buffer's end, so an empty line of the text shows apart from no line.
-fn box_line(text: Option<&str>, columns: NonZeroUsize) -> ScreenRow {
-    let text = text.map_or_else(|| format!("{SUBDUED_ON_BAR}~"), str::to_string);
-    ScreenRow::cut(&format!("{}{text}{RESET}", start_bar_row()), columns)
+fn box_line(text: Option<&Line>, columns: NonZeroUsize) -> ScreenRow {
+    let text = text.map_or_else(|| Line::from(Span::new("~", SUBDUED_ON_BAR)), Line::clone);
+    ScreenRow::cut(&text, columns).on(YOURS)
 }
 
 /// The place of the request shown among those that wait, like `2/7`, when more than one waits,
@@ -1508,56 +1502,62 @@ fn request_place(view: &View) -> Option<String> {
 }
 
 /// The names of the items of one level of the question view, like the questions of a batch:
-/// each item's name, which is its key, green once `done`, with the one `shown` in reverse video,
-/// which ends without a reset, so the bar stays behind them. Letters keep the marks the same
-/// size, and set them apart from the options' numbers. A dim `·` stands for each name of the
-/// `room` the level has that it lacks, like `a s · ·`, so the level shows how much room it has,
-/// in the columns it always takes. A level of one item has nothing to move to, so it shows no
-/// names, nor dots.
-fn names(done: &[bool], shown: usize, name: fn(usize) -> char, room: usize) -> Option<String> {
+/// each item's name, which is its key, green once `done`, with the one `shown` in reverse video.
+/// Letters keep the marks the same size, and set them apart from the options' numbers. A dim `·`
+/// stands for each name of the `room` the level has that it lacks, like `a s · ·`, so the level
+/// shows how much room it has, in the columns it always takes. A level of one item has nothing
+/// to move to, so it shows no names, nor dots.
+fn names(done: &[bool], shown: usize, name: fn(usize) -> char, room: usize) -> Option<Line> {
     (done.len() > 1).then(|| name_row(done, shown, name, room))
 }
 
 /// The names of `done`'s items, as `names` shows them, however many they are.
-fn name_row(done: &[bool], shown: usize, name: fn(usize) -> char, room: usize) -> String {
-    let dots = (done.len()..room).map(|_| format!("{SUBDUED_ON_BAR}·"));
+fn name_row(done: &[bool], shown: usize, name: fn(usize) -> char, room: usize) -> Line {
+    let dots = (done.len()..room).map(|_| Span::new("·", SUBDUED_ON_BAR));
     let names = done.iter().enumerate().map(|(index, &is_done)| {
         let color = if is_done {
             DONE_OR_ADDED
         } else {
             SUBDUED_ON_BAR
         };
-        let (on, off) = if index == shown {
-            (REVERSE, UNREVERSE)
+        let style = if index == shown {
+            color.reversed()
         } else {
-            ("", "")
+            color
         };
-        format!("{color}{on}{}{off}", name(index))
+        Span::new(name(index), style)
     });
-    names.chain(dots).collect::<Vec<_>>().join(" ")
+    let mut row = Line::default();
+    for (index, item) in names.chain(dots).enumerate() {
+        if index > 0 {
+            row.push(Span::new(" ", SUBDUED_ON_BAR));
+        }
+        row.push(item);
+    }
+    row
 }
 
 /// Y and how many questions wait, in the color of a warning while any waits, since only the
 /// user moves them on.
-fn waiting_indicator(waiting: usize) -> String {
+fn waiting_indicator(waiting: usize) -> Span {
     let color = if waiting == 0 {
         SUBDUED_ON_BAR
     } else {
         ATTENTION
     };
-    format!("{color}Y{}", show_count(waiting))
+    Span::new(format!("Y{}", show_count(waiting)), color)
 }
 
 /// B and how many tasks run in the background, like a shell Claude started, in the bar's grey
 /// however many run, since they need nothing from the user.
-fn background_indicator(tasks: usize) -> String {
-    format!("{SUBDUED_ON_BAR}B{}", show_count(tasks))
+fn background_indicator(tasks: usize) -> Span {
+    Span::new(format!("B{}", show_count(tasks)), SUBDUED_ON_BAR)
 }
 
 /// A and how many subagents run, in the foreground or in the background, in the bar's grey, as
 /// for B.
-fn agents_indicator(agents: usize) -> String {
-    format!("{SUBDUED_ON_BAR}A{}", show_count(agents))
+fn agents_indicator(agents: usize) -> Span {
+    Span::new(format!("A{}", show_count(agents)), SUBDUED_ON_BAR)
 }
 
 /// A count up to 9, and + for more, which keeps one character for the count, so the label's
@@ -1591,9 +1591,9 @@ const QUESTION_LABEL_COLUMNS: usize = 3 + HEADER_COLUMNS + 3 + 12;
 /// after it starts in the same column on every request.
 fn header(label: &str) -> String {
     let columns = NonZeroUsize::new(HEADER_COLUMNS).unwrap_or(NonZeroUsize::MIN);
-    let label = cut(label, columns);
-    let pad = " ".repeat(HEADER_COLUMNS.saturating_sub(visible_width(&label)));
-    format!("{label}{pad}")
+    let label = cut(&Line::from(label), columns);
+    let pad = " ".repeat(HEADER_COLUMNS.saturating_sub(label.width()));
+    format!("{}{pad}", label.text())
 }
 
 /// The columns a field's mark takes in front of its value: 2 for a sign, `NAME_COLUMNS` for a
@@ -1617,21 +1617,23 @@ struct Title<'a> {
 /// A title across a screen `width` wide: the kind between two dashes, then dashes, then the
 /// place between two dashes at the edge, as fzf labels its preview window. A screen too narrow
 /// for both whole keeps the kind alone.
-fn title_line(title: &Title, width: NonZeroUsize) -> String {
-    let frame = visible_width("──  ");
+fn title_line(title: &Title, width: NonZeroUsize) -> Line {
+    let frame = "──  ".width();
     let end = (title.place)
         .map(|place| format!(" {place} ──"))
-        .filter(|end| frame + visible_width(title.kind) + visible_width(end) < width.get())
+        .filter(|end| frame + title.kind.width() + end.width() < width.get())
         .unwrap_or_default();
-    let room = width.get().saturating_sub(frame + visible_width(&end));
+    let room = width.get().saturating_sub(frame + end.width());
     let room = NonZeroUsize::new(room).unwrap_or(NonZeroUsize::MIN);
-    let kind = format!(
-        "── {}{RESET}{SUBDUED} ",
-        cut(&format!("{STRONG}{}", title.kind), room)
+    let kind = cut(&Line::from(Span::new(title.kind, STRONG)), room);
+    let fill = "─".repeat(
+        width
+            .get()
+            .saturating_sub(frame + kind.width() + end.width()),
     );
-    let taken = visible_width(&kind) + visible_width(&end);
-    let fill = "─".repeat(width.get().saturating_sub(taken));
-    format!("{SUBDUED}{kind}{fill}{end}")
+    Line::from(Span::new("── ", SUBDUED))
+        .with_line(kind)
+        .with(Span::new(format!(" {fill}{end}"), SUBDUED))
 }
 
 /// The rows of a field on a screen `columns` wide that its value takes, as `block_lines` shows
@@ -1639,7 +1641,7 @@ fn title_line(title: &Title, width: NonZeroUsize) -> String {
 fn used_rows(field: &Field, columns: NonZeroUsize) -> usize {
     match &field.mark {
         _ if field.value.is_empty() => 0,
-        Mark::Quote(_) => field.value.lines().count(),
+        Mark::Quote(_) => picker::preview_rows(&field.value),
         _ if field.rows == 1 => 1,
         mark => word_rows(
             field.value.trim_end_matches('\n'),
@@ -1652,40 +1654,42 @@ fn used_rows(field: &Field, columns: NonZeroUsize) -> usize {
 /// The margin of a quote's row and its width: the key of the option the quote previews in
 /// front of the first row, which takes the style of the key under the cursor in the options, and
 /// on every row a bar, which stays in the same column on each, as `2▎ `.
-fn quote_margin(key: Option<&str>, is_first: bool) -> (String, usize) {
+fn quote_margin(key: Option<&str>, is_first: bool) -> (Line, usize) {
     let key_width = key.map_or(1, |key| key.width().max(1));
     let key = match key {
-        Some(key) if is_first => format!("{STRONG}{key}{RESET}"),
-        _ => " ".repeat(key_width),
+        Some(key) if is_first => Span::new(key, STRONG),
+        _ => Span::from(" ".repeat(key_width)),
     };
-    (format!("{key}{SUBDUED}▎{RESET} "), key_width + 2)
+    let margin = Line::from([key, Span::new("▎", SUBDUED), " ".into()]);
+    (margin, key_width + 2)
 }
 
 /// The `field.rows` rows of a quote, the preview of an option: its lines, each cut to a row, with
 /// a bar in their margin, as a long value does, ending in a row that counts the lines left out.
 /// On one row, which has no room to count, its first line ends in `…`, as a value of one row
 /// does, which says more is hidden.
-fn quoted_lines(key: Option<&str>, field: &Field, columns: NonZeroUsize) -> Vec<String> {
-    let content: Vec<&str> = field.value.lines().collect();
+fn quoted_lines(key: Option<&str>, field: &Field, columns: NonZeroUsize) -> Vec<Line> {
+    let content = picker::preview_lines(&field.value);
+    let rows = field.rows;
     let (_, margin_width) = quote_margin(key, true);
     let room =
         NonZeroUsize::new(columns.get().saturating_sub(margin_width)).unwrap_or(NonZeroUsize::MIN);
-    let rows: Vec<String> = if field.rows == 1 && content.len() > 1 {
-        vec![cut_before_hidden(content[0], room)]
-    } else if content.len() > field.rows {
-        let shown = field.rows - 1;
+    let cut_rows: Vec<Line> = if rows == 1 && content.len() > 1 {
+        vec![cut_before_hidden(&content[0], room)]
+    } else if content.len() > rows {
+        let shown = rows - 1;
         let more = cut::more_lines(content.len() - shown, Whole::FullView);
         (content[..shown].iter())
             .map(|line| cut(line, room))
-            .chain([cut(&format!("{SUBDUED}{more}"), room)])
+            .chain([cut(&Line::from(Span::new(more, SUBDUED)), room)])
             .collect()
     } else {
         content.iter().map(|line| cut(line, room)).collect()
     };
-    let mut lines: Vec<String> = (rows.iter().enumerate())
-        .map(|(index, row)| format!("{}{row}{RESET}", quote_margin(key, index == 0).0))
+    let mut lines: Vec<Line> = (cut_rows.into_iter().enumerate())
+        .map(|(index, row)| quote_margin(key, index == 0).0.with_line(row))
         .collect();
-    lines.resize(field.rows, String::new());
+    lines.resize(rows, Line::default());
     lines
 }
 
@@ -1700,13 +1704,10 @@ fn stack_lines(
 ) -> Vec<ScreenRow> {
     let lines = match rows {
         0 => Vec::new(),
-        1 => {
-            let request = cut::the_request(Whole::FullView);
-            vec![format!(
-                "{}{RESET}",
-                cut(&format!("{SUBDUED}{request}"), columns)
-            )]
-        }
+        1 => vec![Line::from(Span::new(
+            cut::the_request(Whole::FullView),
+            SUBDUED,
+        ))],
         _ => {
             let mut lines = vec![title_line(title, columns)];
             lines.extend(block_lines(fields, rows - 1, columns));
@@ -1725,7 +1726,7 @@ fn stack_lines(
 /// it is a path. A value of more rows wraps, and when it still does not fit, its last row counts
 /// the rows left out. A quote shows its lines by `quoted_lines`. Rows a value leaves empty stay
 /// empty, so the block always takes `rows` rows.
-fn block_lines(fields: &[Field], rows: usize, columns: NonZeroUsize) -> Vec<String> {
+fn block_lines(fields: &[Field], rows: usize, columns: NonZeroUsize) -> Vec<Line> {
     let fields = cut::fit(fields, rows, |field| used_rows(field, columns));
     let mut lines = Vec::new();
     for field in &fields {
@@ -1734,7 +1735,7 @@ fn block_lines(fields: &[Field], rows: usize, columns: NonZeroUsize) -> Vec<Stri
             continue;
         }
         let tone = match field.tone {
-            Tone::Plain => RESET,
+            Tone::Plain => PLAIN,
             Tone::Bold => STRONG,
             Tone::Note | Tone::Comment => SUBDUED,
             Tone::Removed => FAILED_OR_REMOVED,
@@ -1742,7 +1743,7 @@ fn block_lines(fields: &[Field], rows: usize, columns: NonZeroUsize) -> Vec<Stri
         };
         // The mark of the first row, and of each row of the value on `every_row`
         let (mark, every_row) = match &field.mark {
-            Mark::None => (String::new(), false),
+            Mark::None => (Line::default(), false),
             Mark::Sign {
                 sign,
                 every_row,
@@ -1753,25 +1754,28 @@ fn block_lines(fields: &[Field], rows: usize, columns: NonZeroUsize) -> Vec<Stri
                     Tone::Added => DONE_OR_ADDED,
                     _ => SUBDUED,
                 };
-                (format!("{color}{sign}{RESET} "), *every_row)
+                (
+                    Line::from([Span::new(*sign, color), " ".into()]),
+                    *every_row,
+                )
             }
-            Mark::Name(name) if name.is_empty() => (" ".repeat(NAME_COLUMNS), false),
+            Mark::Name(name) if name.is_empty() => (Line::from(" ".repeat(NAME_COLUMNS)), false),
             Mark::Quote(_) => unreachable!("a quote shows its own rows"),
             Mark::Name(name) => {
-                // The name holds its color, which the cut sets again after the `…`
                 let width = NonZeroUsize::new(NAME_WIDTH).unwrap_or(NonZeroUsize::MIN);
-                let name = format!("{}:", cut(&format!("{SUBDUED}{name}"), width));
-                let pad = " ".repeat(NAME_COLUMNS.saturating_sub(visible_width(&name)));
-                (format!("{name}{RESET}{pad}"), false)
+                let name = cut(&Line::from(Span::new(name.as_str(), SUBDUED)), width)
+                    .with(Span::new(":", SUBDUED));
+                let pad = " ".repeat(NAME_COLUMNS.saturating_sub(name.width()));
+                (name.with(pad), false)
             }
         };
-        let indent = visible_width(&mark);
+        let indent = mark.width();
         let value_columns =
             NonZeroUsize::new(columns.get().saturating_sub(indent)).unwrap_or(NonZeroUsize::MIN);
         let value = field.value.trim_end_matches('\n');
         // Each row, and whether it shows the value, rather than counting the rows left out
-        let rows: Vec<(String, bool)> = if field.rows == 1 {
-            let line = format!("{tone}{}", value.replace('\n', "↵"));
+        let rows: Vec<(Line, bool)> = if field.rows == 1 {
+            let line = Line::from(Span::new(value.replace('\n', "↵"), tone));
             let line = if field.is_path {
                 cut_path(&line, value_columns)
             } else {
@@ -1782,15 +1786,18 @@ fn block_lines(fields: &[Field], rows: usize, columns: NonZeroUsize) -> Vec<Stri
             let wrapped = word_rows(value, value_columns.get());
             if wrapped.len() <= field.rows {
                 (wrapped.into_iter())
-                    .map(|row| (format!("{tone}{row}"), true))
+                    .map(|row| (Line::from(Span::new(row, tone)), true))
                     .collect()
             } else {
                 let shown = field.rows - 1;
-                let mut rows: Vec<(String, bool)> = (wrapped[..shown].iter())
-                    .map(|row| (format!("{tone}{row}"), true))
-                    .collect();
                 let more = cut::more_lines(wrapped.len() - shown, Whole::FullView);
-                rows.push((cut(&format!("{SUBDUED}{more}"), value_columns), false));
+                let mut rows: Vec<(Line, bool)> = (wrapped.into_iter().take(shown))
+                    .map(|row| (Line::from(Span::new(row, tone)), true))
+                    .collect();
+                rows.push((
+                    cut(&Line::from(Span::new(more, SUBDUED)), value_columns),
+                    false,
+                ));
                 rows
             }
         };
@@ -1799,15 +1806,15 @@ fn block_lines(fields: &[Field], rows: usize, columns: NonZeroUsize) -> Vec<Stri
         {
             let line = match row {
                 Some((row, is_value)) if number == 0 || (every_row && is_value) => {
-                    format!("{mark}{row}{RESET}")
+                    mark.clone().with_line(row)
                 }
-                Some((row, _)) => format!("{}{row}{RESET}", " ".repeat(indent)),
-                None => String::new(),
+                Some((row, _)) => Line::from(" ".repeat(indent)).with_line(row),
+                None => Line::default(),
             };
             lines.push(line);
         }
     }
-    lines.resize(rows, String::new());
+    lines.resize(rows, Line::default());
     lines
 }
 
@@ -1856,18 +1863,15 @@ fn word_rows(text: &str, width: usize) -> Vec<String> {
     rows
 }
 
-/// Writes `line` on `row`, from its start, and resets the colors after it, so they reach nothing
-/// drawn next.
+/// Writes `line` on `row`, from its start.
 fn put_line(out: &mut Vec<u8>, row: u16, line: &ScreenRow) {
     put!(out, MoveTo(0, row));
-    out.extend(format!("{}{RESET}", line.as_str()).as_bytes());
+    out.extend(line.to_terminal().as_bytes());
 }
 
-/// Writes `line` on `row` on the bar, like `put_line`. A reset inside the line ends the bar, which
-/// then starts again.
-fn put_bar_line(out: &mut Vec<u8>, row: u16, line: &ScreenRow) {
-    put!(out, MoveTo(0, row));
-    out.extend(bar_row(line.as_str()).as_bytes());
+/// Writes `line` on `row` on the bar, like `put_line`.
+fn put_bar_line(out: &mut Vec<u8>, row: u16, line: ScreenRow) {
+    put_line(out, row, &line.on(YOURS));
 }
 
 /// The most rows of the stack above the label row: the request's title and the block under it.
@@ -1964,18 +1968,9 @@ mod tests {
     #[test]
     fn the_command_line_starts_with_its_prompt() {
         let (rows, row, column) = command_rows("model sonnet", 5, columns(40), 3);
-        let rows: Vec<&str> = rows.iter().map(ScreenRow::as_str).collect();
         assert_eq!(rows.len(), 1);
-        assert!(
-            rows[0].contains(&format!("{MARK}command:{RESET}")),
-            "{:?}",
-            rows[0]
-        );
-        assert!(
-            rows[0].ends_with(&format!(" model sonnet{RESET}")),
-            "{:?}",
-            rows[0]
-        );
+        let expected = Line::from([Span::new("command:", MARK), " model sonnet".into()]);
+        assert_eq!(rows[0].to_terminal(), expected.on(YOURS).to_terminal());
         assert_eq!((row, column), (0, 14));
     }
 
@@ -1989,28 +1984,34 @@ mod tests {
         let (rows, row, _) = command_rows(text, 20, columns(10), 2);
         assert_eq!(rows.len(), 2);
         assert_eq!(row, 1);
-        assert!(!rows[0].as_str().contains("command"));
+        assert!(!rows[0].line().text().contains("command"));
         let (rows, row, column) = command_rows(text, 0, columns(10), 2);
-        assert!(rows[0].as_str().contains("command"));
+        assert!(rows[0].line().text().contains("command"));
         assert_eq!((row, column), (0, 9));
     }
 
     #[test]
     fn a_count_keeps_one_character() {
-        assert_eq!(background_indicator(0), format!("{SUBDUED_ON_BAR}B0"));
-        assert_eq!(background_indicator(9), format!("{SUBDUED_ON_BAR}B9"));
-        assert_eq!(background_indicator(10), format!("{SUBDUED_ON_BAR}B+"));
-        assert_eq!(waiting_indicator(0), format!("{SUBDUED_ON_BAR}Y0"));
-        assert_eq!(waiting_indicator(12), format!("{ATTENTION}Y+"));
+        assert_eq!(background_indicator(0), Span::new("B0", SUBDUED_ON_BAR));
+        assert_eq!(background_indicator(9), Span::new("B9", SUBDUED_ON_BAR));
+        assert_eq!(background_indicator(10), Span::new("B+", SUBDUED_ON_BAR));
+        assert_eq!(waiting_indicator(0), Span::new("Y0", SUBDUED_ON_BAR));
+        assert_eq!(waiting_indicator(12), Span::new("Y+", ATTENTION));
     }
 
     #[test]
     fn a_level_names_its_items_only_when_it_has_several() {
         assert_eq!(names(&[false], 0, question_name, 4), None);
         let two = names(&[true, false], 1, question_name, 4).expect("names");
-        assert!(two.ends_with(&format!("{SUBDUED_ON_BAR}· {SUBDUED_ON_BAR}·")));
-        assert!(two.contains(&format!("{DONE_OR_ADDED}a")));
-        assert!(two.contains(&format!("{REVERSE}s")));
+        assert_eq!(
+            two,
+            Line::styled([
+                ("a", DONE_OR_ADDED),
+                (" ", SUBDUED_ON_BAR),
+                ("s", SUBDUED_ON_BAR.reversed()),
+                (" · ·", SUBDUED_ON_BAR)
+            ])
+        );
     }
 
     #[test]
@@ -2031,12 +2032,11 @@ mod tests {
             is_submitted: false,
             sends_at_once: false,
         };
-        assert_eq!(plain(&request_names(&view(1, 0, 1))), "q · · ·");
+        assert_eq!(request_names(&view(1, 0, 1)).text(), "q · · ·");
         assert_eq!(request_place(&view(1, 0, 1)), None);
-        assert_eq!(plain(&request_names(&view(2, 0, 1))), "q w · ·");
+        assert_eq!(request_names(&view(2, 0, 1)).text(), "q w · ·");
         let sixth = request_names(&view(6, 5, 2));
-        assert!(!sixth.contains(REVERSE), "{sixth}");
-        assert_eq!(plain(&sixth), "q w e r");
+        assert_eq!(sixth, Line::from(Span::new("q w e r", SUBDUED_ON_BAR)));
         assert_eq!(request_place(&view(6, 5, 2)).as_deref(), Some("6/6"));
         assert_eq!(request_place(&view(12, 1, 1)).as_deref(), Some("2/+"));
         assert_eq!(request_place(&view(12, 9, 1)).as_deref(), Some("+/+"));
@@ -2044,43 +2044,45 @@ mod tests {
 
     use crate::style::STRONG;
 
+    fn texts(lines: &[Line]) -> Vec<String> {
+        lines.iter().map(Line::text).collect()
+    }
+
     #[test]
     fn a_line_that_fits_takes_one_row() {
-        assert_eq!(terminal_rows("abc", 5), ["abc"]);
-        assert_eq!(terminal_rows("", 5), [""]);
+        assert_eq!(texts(&terminal_rows(&Line::from("abc"), 5)), ["abc"]);
+        assert_eq!(texts(&terminal_rows(&Line::default(), 5)), [""]);
     }
 
     #[test]
     fn rows_end_where_the_terminal_wraps() {
-        assert_eq!(terminal_rows("abcdefg", 3), ["abc", "def", "g"]);
-        assert_eq!(terminal_rows("abcdef", 3), ["abc", "def"]);
+        let rows = |text| texts(&terminal_rows(&Line::from(text), 3));
+        assert_eq!(rows("abcdefg"), ["abc", "def", "g"]);
+        assert_eq!(rows("abcdef"), ["abc", "def"]);
     }
 
     #[test]
     fn a_wide_character_that_does_not_fit_starts_the_next_row() {
-        assert_eq!(terminal_rows("ab日", 3), ["ab", "日"]);
+        assert_eq!(texts(&terminal_rows(&Line::from("ab日"), 3)), ["ab", "日"]);
     }
 
     #[test]
-    fn each_row_starts_with_the_colors_set_before_it() {
-        let line = format!("a{STRONG}bc{RESET}d{STRONG}efg");
+    fn each_row_keeps_the_styles_of_its_characters() {
+        let line = Line::styled([("a", PLAIN), ("bc", STRONG), ("d", PLAIN), ("efg", STRONG)]);
         assert_eq!(
             terminal_rows(&line, 3),
             [
-                format!("a{STRONG}bc{RESET}"),
-                format!("d{STRONG}ef"),
-                format!("{STRONG}g")
+                Line::styled([("a", PLAIN), ("bc", STRONG)]),
+                Line::styled([("d", PLAIN), ("ef", STRONG)]),
+                Line::styled([("g", STRONG)])
             ]
         );
     }
 
     #[test]
-    fn the_open_line_is_the_text_after_the_last_line_break() {
-        assert_eq!(
-            open_rows("done\nabcd", 2, 9),
-            [format!("ab{RESET}"), format!("cd{RESET}")]
-        );
-        assert_eq!(open_rows("done\n", 2, 9), Vec::<String>::new());
+    fn the_open_line_shows_on_the_rows_it_will_take() {
+        assert_eq!(open_rows("abcd", 2, 9), ["ab", "cd"]);
+        assert_eq!(open_rows("", 2, 9), Vec::<String>::new());
     }
 
     #[test]
@@ -2088,14 +2090,14 @@ mod tests {
         let rows = open_rows("abcdef", 2, 2);
         assert_eq!(rows.len(), 2);
         assert!(rows[0].contains('…'));
-        assert_eq!(rows[1], format!("ef{RESET}"));
+        assert_eq!(rows[1], "ef");
     }
 
     #[test]
     fn the_row_for_a_cut_start_fits_the_screen() {
         // The row that stands for the start is wider than 2 columns, and is cut to them
-        for row in open_line_rows("abcdef", columns(2), 2) {
-            assert!(visible_width(row.as_str()) <= 2, "{:?}", row.as_str());
+        for row in open_line_rows(&Line::from("abcdef"), columns(2), 2) {
+            assert!(row.line().width() <= 2, "{:?}", row.line());
         }
     }
 
@@ -2103,7 +2105,7 @@ mod tests {
     fn block_text(fields: &[Field], columns: usize) -> Vec<String> {
         let columns = NonZeroUsize::new(columns).expect("some columns");
         (block_lines(fields, BLOCK_ROWS, columns).iter())
-            .map(|line| plain(line))
+            .map(plain)
             .collect()
     }
 
@@ -2111,26 +2113,16 @@ mod tests {
         NonZeroUsize::new(columns).expect("some columns")
     }
 
-    /// The text of the open line's rows on a screen `width` wide, with `room` rows.
-    fn open_rows(pending: &str, width: usize, room: usize) -> Vec<String> {
-        (open_line_rows(pending, columns(width), room).iter())
-            .map(|row| row.as_str().to_string())
+    /// The text of the rows of `open`, the open line, on a screen `width` wide, with `room` rows.
+    fn open_rows(open: &str, width: usize, room: usize) -> Vec<String> {
+        (open_line_rows(&Line::from(open), columns(width), room).iter())
+            .map(|row| row.line().text())
             .collect()
     }
 
-    /// A row's text without its colors and the spaces at its end.
-    fn plain(line: &str) -> String {
-        // Every sequence a row holds is a CSI, which ends with a letter
-        let mut text = String::new();
-        let mut characters = line.chars();
-        while let Some(character) = characters.next() {
-            if character == '\x1b' {
-                characters.find(char::is_ascii_alphabetic);
-            } else {
-                text.push(character);
-            }
-        }
-        text.trim_end().to_string()
+    /// A row's text without its styles and the spaces at its end.
+    fn plain(line: &Line) -> String {
+        line.text().trim_end().to_string()
     }
 
     #[test]
@@ -2147,7 +2139,7 @@ mod tests {
             field("/home/user/src/greet.js", true),
         ];
         let columns = NonZeroUsize::new(20).expect("20 is not zero");
-        let lines = block_lines(&fields, 2, columns);
+        let lines = texts(&block_lines(&fields, 2, columns));
         assert!(lines[0].contains("cargo test") && !lines[0].contains("targets"));
         assert!(lines[1].contains("/home") && lines[1].contains("greet.js"));
     }
@@ -2211,9 +2203,9 @@ mod tests {
         );
         let columns = NonZeroUsize::new(40).expect("columns");
         let line = &block_lines(&fields, BLOCK_ROWS, columns)[0];
-        assert!(
-            line.contains(&format!("{SUBDUED}a_very_lo{RESET}{SUBDUED}…{RESET}:")),
-            "{line:?}"
+        assert_eq!(
+            line,
+            &Line::styled([("a_very_lo…:", SUBDUED), (" 1", PLAIN)])
         );
     }
 
@@ -2256,12 +2248,11 @@ mod tests {
     #[test]
     fn a_row_past_the_texts_end_shows_a_tilde_and_an_empty_line_shows_nothing() {
         let columns = NonZeroUsize::new(10).expect("a column");
-        assert_eq!(plain(box_line(None, columns).as_str()).trim_end(), "~");
-        assert_eq!(plain(box_line(Some(""), columns).as_str()).trim_end(), "");
-        assert_eq!(
-            plain(box_line(Some("hi"), columns).as_str()).trim_end(),
-            "hi"
-        );
+        let text =
+            |line: Option<&str>| plain(box_line(line.map(Line::from).as_ref(), columns).line());
+        assert_eq!(text(None), "~");
+        assert_eq!(text(Some("")), "");
+        assert_eq!(text(Some("hi")), "hi");
     }
 
     #[test]
@@ -2301,7 +2292,7 @@ mod tests {
                 place: None,
             };
             (stack_lines(&title, &fields, rows, columns).iter())
-                .map(|line| plain(line.as_str()))
+                .map(|line| plain(line.line()))
                 .collect::<Vec<_>>()
         };
         assert_eq!(

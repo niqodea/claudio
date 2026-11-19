@@ -124,9 +124,10 @@ pub enum Mark {
     /// The field's name, cut to a column of the same width on every tool, in front of a value of
     /// one row.
     Name(String),
-    /// A preview of an option: its lines, already colored, each on its own row behind a bar in the
-    /// margin. The option's key, like `2▎`, goes in front of the first row, or nothing when the
-    /// cursor is on no option.
+    /// A preview of an option, whose value is the preview's Markdown, which shows highlighted, as
+    /// `picker::preview_lines` gives its lines, each on its own row behind a bar in the margin.
+    /// The option's key, like `2▎`, goes in front of the first row, or nothing when the cursor is
+    /// on no option.
     Quote(Option<String>),
 }
 

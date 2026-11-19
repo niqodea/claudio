@@ -6,12 +6,13 @@ use std::sync::OnceLock;
 use syntect::easy::ScopeRegionIterator;
 use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxSet};
 
-use crate::style::RESET;
 use crate::style::grammar::{BLUE, GREEN, GREY, MAGENTA, RED, YELLOW};
+use crate::style::{PLAIN, Style};
+use crate::text::{Line, Span};
 
 /// The color of each kind of token, in the terminal's own colors. A token takes the color of
 /// the first kind in the list that it is.
-const COLORS: [(&str, &str); 13] = [
+const COLORS: [(&str, Style); 13] = [
     ("comment", GREY),
     ("markup.inserted", GREEN),
     ("markup.deleted", RED),
@@ -36,7 +37,7 @@ static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
 pub struct Highlighter {
     parse_state: ParseState,
     scopes: ScopeStack,
-    colors: Vec<(Scope, &'static str)>,
+    colors: Vec<(Scope, Style)>,
 }
 
 impl Highlighter {
@@ -60,17 +61,16 @@ impl Highlighter {
 
     /// Colors the next line of the block, given without its line ending. A grammar that fails
     /// on a line leaves it uncolored, which loses nothing of the line.
-    pub fn color_line(&mut self, line: &str) -> String {
+    pub fn color_line(&mut self, line: &str) -> Line {
         // The grammars read lines with their line ending, which some of their rules match
         let ended = format!("{line}\n");
         let Ok(operations) = self.parse_state.parse_line(&ended, load_syntaxes()) else {
-            return line.to_string();
+            return Line::from(line);
         };
-        let mut colored = String::new();
-        let mut current = "";
+        let mut colored = Line::default();
         for (text, operation) in ScopeRegionIterator::new(&operations, &ended) {
             if self.scopes.apply(operation).is_err() {
-                return line.to_string();
+                return Line::from(line);
             }
             let text = text.trim_end_matches('\n');
             if text.is_empty() {
@@ -85,18 +85,8 @@ impl Highlighter {
                         .iter()
                         .any(|scope| kind.is_prefix_of(*scope))
                 })
-                .map_or("", |(_, color)| *color);
-            if color != current {
-                if !current.is_empty() {
-                    colored.push_str(RESET);
-                }
-                colored.push_str(color);
-                current = color;
-            }
-            colored.push_str(text);
-        }
-        if !current.is_empty() {
-            colored.push_str(RESET);
+                .map_or(PLAIN, |(_, color)| *color);
+            colored.push(Span::new(text, color));
         }
         colored
     }
@@ -110,23 +100,24 @@ fn load_syntaxes() -> &'static SyntaxSet {
 mod tests {
     use super::*;
 
+    fn line<const N: usize>(spans: [(&str, Style); N]) -> Line {
+        Line::styled(spans)
+    }
+
     #[test]
     fn a_python_line_colors_its_keyword_and_string() {
         let mut highlighter = Highlighter::new("python").expect("syntect knows Python");
         assert_eq!(
             highlighter.color_line("import os  # load"),
-            format!("{MAGENTA}import{RESET} os  {GREY}# load{RESET}")
+            line([("import", MAGENTA), (" os  ", PLAIN), ("# load", GREY)])
         );
     }
 
     #[test]
     fn a_diff_colors_added_and_removed_lines() {
         let mut highlighter = Highlighter::new("diff").expect("syntect knows diff");
-        assert_eq!(highlighter.color_line("-old"), format!("{RED}-old{RESET}"));
-        assert_eq!(
-            highlighter.color_line("+new"),
-            format!("{GREEN}+new{RESET}")
-        );
+        assert_eq!(highlighter.color_line("-old"), line([("-old", RED)]));
+        assert_eq!(highlighter.color_line("+new"), line([("+new", GREEN)]));
     }
 
     #[test]
@@ -135,7 +126,12 @@ mod tests {
         highlighter.color_line("{");
         assert_eq!(
             highlighter.color_line("  \"name\": \"Ada\""),
-            format!("  {BLUE}\"name\"{RESET}: {GREEN}\"Ada\"{RESET}")
+            line([
+                ("  ", PLAIN),
+                ("\"name\"", BLUE),
+                (": ", PLAIN),
+                ("\"Ada\"", GREEN)
+            ])
         );
     }
 
@@ -144,7 +140,7 @@ mod tests {
         let mut highlighter = Highlighter::new("yaml").expect("syntect knows YAML");
         assert_eq!(
             highlighter.color_line("name: \"Ada\""),
-            format!("{BLUE}name{RESET}: {GREEN}\"Ada\"{RESET}")
+            line([("name", BLUE), (": ", PLAIN), ("\"Ada\"", GREEN)])
         );
     }
 

@@ -17,15 +17,16 @@
 use crate::code;
 use crate::table::Table;
 
-use crate::style::{CODE, RESET, STRONG, SUBDUED};
+use crate::style::{CODE, PLAIN, STRONG, SUBDUED, Style};
+use crate::text::{Line, Span, Text};
 
 // Opens a code block, and closes it
 const FENCE: &str = "```";
 
 /// `text` as a code span, the way Markdown marks literal text: its backticks say it without
 /// color, and the color says it at a glance.
-pub fn code_span(text: &str) -> String {
-    format!("{CODE}`{text}`{RESET}")
+pub fn code_span(text: &str) -> Span {
+    Span::new(format!("`{text}`"), CODE)
 }
 
 /// Colors one block of Markdown as it streams in.
@@ -33,7 +34,7 @@ pub struct Highlighter {
     code_block: Option<CodeBlock>,
     /// The rows of a table, held until the table ends.
     table: Vec<String>,
-    line: Line,
+    line: Open,
 }
 
 /// A code block, colored in its language when a grammar knows the language.
@@ -43,7 +44,7 @@ enum CodeBlock {
 }
 
 /// The line that streams in.
-enum Line {
+enum Open {
     /// The line's start, which does not settle yet what the line is.
     Start(String),
     Settled(Settled),
@@ -78,14 +79,13 @@ impl Highlighter {
         Highlighter {
             code_block: None,
             table: Vec::new(),
-            line: Line::Start(String::new()),
+            line: Open::Start(String::new()),
         }
     }
 
-    /// Takes the next piece of the Markdown and returns the colored text it settles, each line
-    /// that ended followed by a line break.
-    pub fn push(&mut self, text: &str) -> String {
-        let mut colored = String::new();
+    /// Takes the next piece of the Markdown and returns the colored text it settles.
+    pub fn push(&mut self, text: &str) -> Text {
+        let mut colored = Text::default();
         for character in text.chars() {
             self.push_character(character, &mut colored);
         }
@@ -94,26 +94,26 @@ impl Highlighter {
 
     /// Ends the line where the Markdown got to, when it got into one, and returns the colored
     /// text that settles.
-    pub fn end_line(&mut self) -> String {
+    pub fn end_line(&mut self) -> Text {
         match &self.line {
-            Line::Start(start) if start.is_empty() => String::new(),
-            Line::Start(_) | Line::Settled(_) => self.push("\n"),
+            Open::Start(start) if start.is_empty() => Text::default(),
+            Open::Start(_) | Open::Settled(_) => self.push("\n"),
         }
     }
 
     /// Ends the block and returns the colored text still held, then starts afresh for the next
     /// block.
-    pub fn finish(&mut self) -> String {
+    pub fn finish(&mut self) -> Text {
         let mut colored = self.end_line();
-        colored.push_str(&self.take_table());
+        self.take_table(&mut colored);
         *self = Highlighter::new();
         colored
     }
 
-    fn push_character(&mut self, character: char, colored: &mut String) {
+    fn push_character(&mut self, character: char, colored: &mut Text) {
         let is_end = character == '\n';
         match &mut self.line {
-            Line::Start(start) => {
+            Open::Start(start) => {
                 if !is_end {
                     start.push(character);
                 }
@@ -121,59 +121,52 @@ impl Highlighter {
                     return;
                 };
                 let start = std::mem::take(start);
-                self.line = Line::Settled(self.settle(kind, &start, colored));
+                self.line = Open::Settled(self.settle(kind, &start, colored));
                 // The line's end settles what the line is, and then ends it
                 if is_end {
                     self.push_character(character, colored);
                 }
             }
-            Line::Settled(line) if is_end => {
+            Open::Settled(line) if is_end => {
                 match line {
                     Settled::Row(row) => self.table.push(std::mem::take(row)),
                     Settled::Code(code) => {
                         let code = std::mem::take(code);
-                        colored.push_str(&self.color_code(&code));
-                        colored.push('\n');
+                        colored.push_line(self.color_code(&code));
                     }
-                    Settled::Heading => {
-                        colored.push_str(RESET);
-                        colored.push('\n');
-                    }
+                    Settled::Heading => colored.end_line(),
                     Settled::Prose(inline) => {
                         std::mem::take(inline).end(colored);
-                        colored.push('\n');
+                        colored.end_line();
                     }
                 }
-                self.line = Line::Start(String::new());
+                self.line = Open::Start(String::new());
             }
-            Line::Settled(Settled::Row(text) | Settled::Code(text)) => text.push(character),
-            Line::Settled(Settled::Heading) => colored.push(character),
-            Line::Settled(Settled::Prose(inline)) => inline.push(character, colored),
+            Open::Settled(Settled::Row(text) | Settled::Code(text)) => text.push(character),
+            Open::Settled(Settled::Heading) => colored.push(Span::new(character, STRONG)),
+            Open::Settled(Settled::Prose(inline)) => inline.push(character, colored),
         }
     }
 
     /// The line `kind` makes of its start, with the start's colored text: a line other than a
     /// row ends the table before it.
-    fn settle(&mut self, kind: Kind, start: &str, colored: &mut String) -> Settled {
+    fn settle(&mut self, kind: Kind, start: &str, colored: &mut Text) -> Settled {
         match kind {
             Kind::Row => {}
             Kind::Code | Kind::Heading | Kind::Marked(_) | Kind::Prose => {
-                colored.push_str(&self.take_table());
+                self.take_table(colored);
             }
         }
         match kind {
             Kind::Row => Settled::Row(start.to_string()),
             Kind::Code => Settled::Code(start.to_string()),
             Kind::Heading => {
-                colored.push_str(STRONG);
-                colored.push_str(start);
+                colored.push(Span::new(start, STRONG));
                 Settled::Heading
             }
             Kind::Marked(length) => {
                 let (mark, text) = start.split_at(length);
-                colored.push_str(SUBDUED);
-                colored.push_str(mark);
-                colored.push_str(RESET);
+                colored.push(Span::new(mark, SUBDUED));
                 let mut inline = Inline::default();
                 inline.push_str(text, colored);
                 Settled::Prose(inline)
@@ -187,7 +180,7 @@ impl Highlighter {
     }
 
     /// Colors a code fence, which opens or closes a code block, or a line of a code block.
-    fn color_code(&mut self, line: &str) -> String {
+    fn color_code(&mut self, line: &str) -> Line {
         if is_fence(line) {
             self.code_block = if self.code_block.is_some() {
                 None
@@ -203,25 +196,27 @@ impl Highlighter {
                 }
             };
             // The whole fence line, language name included, is a mark
-            return format!("{SUBDUED}{line}{RESET}");
+            return Line::from(Span::new(line, SUBDUED));
         }
         match &mut self.code_block {
             Some(CodeBlock::Language(highlighter)) => highlighter.color_line(line),
             // Only a fence opens a code block, so every line here but a fence is in one
-            Some(CodeBlock::Plain) | None => format!("{CODE}{line}{RESET}"),
+            Some(CodeBlock::Plain) | None => Line::from(Span::new(line, CODE)),
         }
     }
 
-    /// The table's rows held, laid out when they make a table, and as they were written
-    /// otherwise, each followed by a line break. A table wider than the terminal is laid out
-    /// too, and the terminal wraps its lines.
-    fn take_table(&mut self) -> String {
+    /// Adds the table's rows held to `colored`, laid out when they make a table, and as they
+    /// were written otherwise. A table wider than the terminal is laid out too, and the terminal
+    /// wraps its lines.
+    fn take_table(&mut self, colored: &mut Text) {
         let rows = std::mem::take(&mut self.table);
         let lines = match Table::read(&rows) {
             Some(table) => table.render(color_inline),
-            None => rows,
+            None => rows.into_iter().map(Line::from).collect(),
         };
-        lines.into_iter().map(|line| line + "\n").collect()
+        for line in lines {
+            colored.push_line(line);
+        }
     }
 }
 
@@ -290,7 +285,7 @@ pub fn is_fence(line: &str) -> bool {
 #[derive(Default)]
 struct Inline {
     /// A code span that waits for the backticks that close it.
-    span: Option<Span>,
+    span: Option<CodeSpan>,
     is_bold: bool,
     /// A `*` that waits for the next character: with another `*` it opens or closes bold, and
     /// with any other character it is a star.
@@ -301,7 +296,7 @@ struct Inline {
 /// closes it, so a span can hold fewer or more of them.
 /// Ref: <https://spec.commonmark.org/0.31.2/#code-spans>
 #[derive(Default)]
-struct Span {
+struct CodeSpan {
     /// The backticks that open the span.
     ticks: usize,
     /// What follows them, the backticks that may close it included.
@@ -310,24 +305,29 @@ struct Span {
     run: usize,
 }
 
-impl Span {
+impl CodeSpan {
     fn is_closed(&self) -> bool {
         self.run == self.ticks
     }
 
-    fn colored(&self) -> String {
-        format!("{CODE}{}{}{RESET}", "`".repeat(self.ticks), self.text)
+    fn colored(&self) -> Span {
+        Span::new(format!("{}{}", "`".repeat(self.ticks), self.text), CODE)
     }
 }
 
 impl Inline {
-    fn push_str(&mut self, text: &str, colored: &mut String) {
+    /// The style of the prose where the line got to.
+    fn style(&self) -> Style {
+        if self.is_bold { STRONG } else { PLAIN }
+    }
+
+    fn push_str(&mut self, text: &str, colored: &mut Text) {
         for character in text.chars() {
             self.push(character, colored);
         }
     }
 
-    fn push(&mut self, character: char, colored: &mut String) {
+    fn push(&mut self, character: char, colored: &mut Text) {
         if let Some(span) = &mut self.span {
             match character {
                 '`' if span.text.is_empty() => span.ticks += 1,
@@ -336,10 +336,7 @@ impl Inline {
                     span.run += 1;
                 }
                 _ if span.is_closed() => {
-                    colored.push_str(&span.colored());
-                    if self.is_bold {
-                        colored.push_str(STRONG);
-                    }
+                    colored.push(span.colored());
                     self.span = None;
                     self.push(character, colored);
                 }
@@ -352,86 +349,97 @@ impl Inline {
         }
         if std::mem::take(&mut self.has_star) {
             if character == '*' {
-                if self.is_bold {
-                    colored.push_str("**");
-                    colored.push_str(RESET);
-                } else {
-                    colored.push_str(STRONG);
-                    colored.push_str("**");
-                }
+                // Both pairs of stars are bold, as what they mark
+                colored.push(Span::new("**", STRONG));
                 self.is_bold = !self.is_bold;
                 return;
             }
-            colored.push('*');
+            colored.push(Span::new('*', self.style()));
         }
         match character {
             '`' => {
-                self.span = Some(Span {
+                self.span = Some(CodeSpan {
                     ticks: 1,
-                    ..Span::default()
+                    ..CodeSpan::default()
                 });
             }
             '*' => self.has_star = true,
-            character => colored.push(character),
+            character => colored.push(Span::new(character, self.style())),
         }
     }
 
     /// Ends the line: a star that waits stays a star, a span that never closed leaves its
     /// backticks plain and its text read again, and the marks still open close.
-    fn end(mut self, colored: &mut String) {
+    fn end(mut self, colored: &mut Text) {
         if let Some(span) = self.span.take() {
             if span.is_closed() {
-                colored.push_str(&span.colored());
+                colored.push(span.colored());
             } else {
-                colored.push_str(&"`".repeat(span.ticks));
+                colored.push(Span::new("`".repeat(span.ticks), self.style()));
                 self.push_str(&span.text, colored);
                 return self.end(colored);
             }
         }
         if self.has_star {
-            colored.push('*');
-        }
-        if self.is_bold {
-            colored.push_str(RESET);
+            colored.push(Span::new('*', self.style()));
         }
     }
 }
 
 /// Colors the inline marks of `text`, as a whole line's.
-fn color_inline(text: &str) -> String {
-    let mut colored = String::new();
+fn color_inline(text: &str) -> Line {
+    let mut colored = Text::default();
     let mut inline = Inline::default();
     inline.push_str(text, &mut colored);
     inline.end(&mut colored);
-    colored
+    colored.open().clone()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text::Row;
 
-    fn color(lines: &[&str]) -> Vec<String> {
-        color_in_pieces(&[lines.join("\n")])
-            .lines()
-            .map(str::to_string)
+    fn color(lines: &[&str]) -> Vec<Line> {
+        (color_in_pieces(&[lines.join("\n")]).into_rows().into_iter())
+            .map(Row::into_line)
             .collect()
     }
 
     #[test]
     fn plain_text_stays_as_it_is() {
-        assert_eq!(color(&["Hello, world."]), ["Hello, world."]);
+        assert_eq!(color(&["Hello, world."]), [Line::from("Hello, world.")]);
     }
 
     #[test]
     fn bold_keeps_its_marks_and_turns_bold() {
-        assert_eq!(color(&["a **b** c"]), [format!("a {STRONG}**b**{RESET} c")]);
+        assert_eq!(
+            color(&["a **b** c"]),
+            [Line::styled([
+                ("a ", PLAIN),
+                ("**b**", STRONG),
+                (" c", PLAIN)
+            ])]
+        );
     }
 
     #[test]
     fn inline_code_turns_code_colored() {
         assert_eq!(
             color(&["run `ls` now"]),
-            [format!("run {CODE}`ls`{RESET} now")]
+            [Line::styled([
+                ("run ", PLAIN),
+                ("`ls`", CODE),
+                (" now", PLAIN)
+            ])]
+        );
+    }
+
+    #[test]
+    fn a_code_span_inside_bold_leaves_the_rest_bold() {
+        assert_eq!(
+            color(&["**a `b` c**"]),
+            [Line::styled([("**a `b` c**", STRONG)])]
         );
     }
 
@@ -439,39 +447,52 @@ mod tests {
     fn a_code_span_closes_only_with_as_many_backticks_as_opened_it() {
         assert_eq!(
             color(&["a `` `x` `` and `f``g` b"]),
-            [format!(
-                "a {CODE}`` `x` ``{RESET} and {CODE}`f``g`{RESET} b"
-            )]
+            [Line::styled([
+                ("a ", PLAIN),
+                ("`` `x` ``", CODE),
+                (" and ", PLAIN),
+                ("`f``g`", CODE),
+                (" b", PLAIN)
+            ])]
         );
     }
 
     #[test]
     fn backticks_that_never_close_stay_plain() {
-        assert_eq!(color(&["a `b and ``"]), ["a `b and ``"]);
+        assert_eq!(color(&["a `b and ``"]), [Line::from("a `b and ``")]);
         // What the backticks held reads again as prose
-        assert_eq!(color(&["`a **b**"]), [format!("`a {STRONG}**b**{RESET}")]);
+        assert_eq!(
+            color(&["`a **b**"]),
+            [Line::styled([("`a ", PLAIN), ("**b**", STRONG)])]
+        );
     }
 
     #[test]
     fn a_heading_is_bold() {
         assert_eq!(
             color(&["## Title", "Text"]),
-            [format!("{STRONG}## Title{RESET}"), "Text".to_string()]
+            [Line::styled([("## Title", STRONG)]), Line::from("Text")]
         );
     }
 
     #[test]
     fn a_list_mark_is_dim() {
-        assert_eq!(color(&["- item"]), [format!("{SUBDUED}-{RESET} item")]);
+        assert_eq!(
+            color(&["- item"]),
+            [Line::styled([("-", SUBDUED), (" item", PLAIN)])]
+        );
         assert_eq!(
             color(&["  12. item"]),
-            [format!("{SUBDUED}  12.{RESET} item")]
+            [Line::styled([("  12.", SUBDUED), (" item", PLAIN)])]
         );
     }
 
     #[test]
     fn a_line_that_starts_with_bold_is_no_list_item() {
-        assert_eq!(color(&["**b** c"]), [format!("{STRONG}**b**{RESET} c")]);
+        assert_eq!(
+            color(&["**b** c"]),
+            [Line::styled([("**b**", STRONG), (" c", PLAIN)])]
+        );
     }
 
     #[test]
@@ -479,9 +500,9 @@ mod tests {
         assert_eq!(
             color(&["```", "# not a **heading**", "```"]),
             [
-                format!("{SUBDUED}```{RESET}"),
-                format!("{CODE}# not a **heading**{RESET}"),
-                format!("{SUBDUED}```{RESET}"),
+                Line::styled([("```", SUBDUED)]),
+                Line::styled([("# not a **heading**", CODE)]),
+                Line::styled([("```", SUBDUED)]),
             ]
         );
     }
@@ -492,9 +513,9 @@ mod tests {
         assert_eq!(
             color(&["```python", "import os", "```"]),
             [
-                format!("{SUBDUED}```python{RESET}"),
+                Line::styled([("```python", SUBDUED)]),
                 python.color_line("import os"),
-                format!("{SUBDUED}```{RESET}"),
+                Line::styled([("```", SUBDUED)]),
             ]
         );
     }
@@ -503,9 +524,9 @@ mod tests {
     fn a_table_is_laid_out_once_it_ends() {
         let rows = ["| a | b |", "|---|---|", "| long cell | x |"];
         let lines: Vec<String> = rows.iter().map(ToString::to_string).collect();
-        let mut expected = vec!["Before".to_string()];
+        let mut expected = vec![Line::from("Before")];
         expected.extend(Table::read(&lines).expect("a table").render(color_inline));
-        expected.push("After".to_string());
+        expected.push(Line::from("After"));
         assert_eq!(
             color(&["Before", rows[0], rows[1], rows[2], "After"]),
             expected
@@ -524,7 +545,7 @@ mod tests {
     fn rows_that_make_no_table_stay_as_written() {
         assert_eq!(
             color(&["| not a table |", "Text"]),
-            ["| not a table |", "Text"]
+            [Line::from("| not a table |"), Line::from("Text")]
         );
     }
 
@@ -538,17 +559,17 @@ mod tests {
 
     #[test]
     fn a_lone_star_stays_plain() {
-        assert_eq!(color(&["2 * 3 = 6"]), ["2 * 3 = 6"]);
+        assert_eq!(color(&["2 * 3 = 6"]), [Line::from("2 * 3 = 6")]);
     }
 
     /// Colors the Markdown that arrives in `pieces`, one after the other.
-    fn color_in_pieces<S: AsRef<str>>(pieces: &[S]) -> String {
+    fn color_in_pieces<S: AsRef<str>>(pieces: &[S]) -> Text {
         let mut highlighter = Highlighter::new();
-        let mut colored: String = pieces
-            .iter()
-            .map(|piece| highlighter.push(piece.as_ref()))
-            .collect();
-        colored.push_str(&highlighter.finish());
+        let mut colored = Text::default();
+        for piece in pieces {
+            colored.append(highlighter.push(piece.as_ref()));
+        }
+        colored.append(highlighter.finish());
         colored
     }
 
@@ -572,60 +593,72 @@ mod tests {
         }
     }
 
-    /// Asserts that each piece, pushed in turn, settles the colored text paired with it.
-    fn assert_settles(pieces: &[(&str, &str)]) {
+    /// Asserts that each piece, pushed in turn, settles the text paired with it, a text and its
+    /// style for each span, with `\n` where a line ends.
+    fn assert_settles(pieces: &[(&str, &[(&str, Style)])]) {
         let mut highlighter = Highlighter::new();
         for (piece, settled) in pieces {
-            assert_eq!(highlighter.push(piece), *settled, "after {piece:?}");
+            let mut expected = Text::default();
+            for &(text, style) in *settled {
+                if text == "\n" {
+                    expected.end_line();
+                } else {
+                    expected.push(Span::new(text, style));
+                }
+            }
+            assert_eq!(highlighter.push(piece), expected, "after {piece:?}");
         }
     }
 
     #[test]
     fn prose_is_written_as_it_arrives() {
-        assert_settles(&[("Hello wor", "Hello wor"), ("ld", "ld")]);
+        assert_settles(&[
+            ("Hello wor", &[("Hello wor", PLAIN)]),
+            ("ld", &[("ld", PLAIN)]),
+        ]);
     }
 
     #[test]
     fn a_line_start_waits_for_the_character_that_settles_its_mark() {
-        assert_settles(&[("-", ""), (" item", &format!("{SUBDUED}-{RESET} item"))]);
-        assert_settles(&[("-", ""), ("1", "-1")]);
+        assert_settles(&[("-", &[]), (" item", &[("-", SUBDUED), (" item", PLAIN)])]);
+        assert_settles(&[("-", &[]), ("1", &[("-1", PLAIN)])]);
         assert_settles(&[
-            ("12", ""),
-            (".", ""),
-            (" x", &format!("{SUBDUED}12.{RESET} x")),
+            ("12", &[]),
+            (".", &[]),
+            (" x", &[("12.", SUBDUED), (" x", PLAIN)]),
         ]);
-        assert_settles(&[("##", ""), (" T", &format!("{STRONG}## T"))]);
-        assert_settles(&[("  ", ""), ("x", "  x")]);
-        assert_settles(&[("``", ""), ("x", "")]);
+        assert_settles(&[("##", &[]), (" T", &[("## T", STRONG)])]);
+        assert_settles(&[("  ", &[]), ("x", &[("  x", PLAIN)])]);
+        assert_settles(&[("``", &[]), ("x", &[])]);
     }
 
     #[test]
     fn a_star_waits_for_the_next_character() {
         assert_settles(&[
-            ("a *", "a "),
-            ("*", &format!("{STRONG}**")),
-            ("b*", "b"),
-            ("*", &format!("**{RESET}")),
+            ("a *", &[("a ", PLAIN)]),
+            ("*", &[("**", STRONG)]),
+            ("b*", &[("b", STRONG)]),
+            ("*", &[("**", STRONG)]),
         ]);
-        assert_settles(&[("2 *", "2 "), (" 3", "* 3")]);
+        assert_settles(&[("2 *", &[("2 ", PLAIN)]), (" 3", &[("* 3", PLAIN)])]);
     }
 
     #[test]
     fn a_code_span_waits_for_the_backticks_that_close_it() {
         assert_settles(&[
-            ("a `b", "a "),
-            ("`", ""),
-            (" c", &format!("{CODE}`b`{RESET} c")),
+            ("a `b", &[("a ", PLAIN)]),
+            ("`", &[]),
+            (" c", &[("`b`", CODE), (" c", PLAIN)]),
         ]);
     }
 
     #[test]
     fn a_fence_and_a_row_wait_for_their_line_to_end() {
         assert_settles(&[
-            ("``", ""),
-            ("`py", ""),
-            ("\n", &format!("{SUBDUED}```py{RESET}\n")),
+            ("``", &[]),
+            ("`py", &[]),
+            ("\n", &[("```py", SUBDUED), ("\n", PLAIN)]),
         ]);
-        assert_settles(&[("| a |", ""), ("\n", "")]);
+        assert_settles(&[("| a |", &[]), ("\n", &[])]);
     }
 }

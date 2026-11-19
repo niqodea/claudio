@@ -3,12 +3,13 @@
 
 use unicode_width::UnicodeWidthChar;
 
-use crate::style::{REVERSE, UNREVERSE};
+use crate::style::PLAIN;
+use crate::text::{Line, Span};
 
 #[derive(Default)]
 pub struct Row {
-    /// The row's characters, with the codes that reverse the selection.
-    pub text: String,
+    /// The row's characters, the selection reversed.
+    pub text: Line,
     /// The columns the row's characters take.
     pub width: usize,
 }
@@ -28,20 +29,19 @@ pub fn wrap(text: &str, cursor: usize, selection: Option<(usize, usize)>, width:
     let mut rows = vec![Row::default()];
     let mut column = 0;
     let mut cursor_at = None;
-    let mut is_reversed = false;
     for (index, character) in text.chars().enumerate() {
         if character == '\n' {
             if index == cursor {
                 cursor_at = Some((rows.len() - 1, column));
             }
-            end_row(&mut rows, &mut is_reversed);
+            rows.push(Row::default());
             column = 0;
             continue;
         }
         let shown = if character == '\t' { ' ' } else { character };
         let character_width = shown.width().unwrap_or(0);
         if column + character_width > width && column > 0 {
-            end_row(&mut rows, &mut is_reversed);
+            rows.push(Row::default());
             column = 0;
         }
         if index == cursor {
@@ -49,25 +49,18 @@ pub fn wrap(text: &str, cursor: usize, selection: Option<(usize, usize)>, width:
         }
         let is_selected = selection.is_some_and(|(start, end)| (start..end).contains(&index));
         let row = rows.last_mut().expect("rows start with one");
-        if is_selected != is_reversed {
-            row.text
-                .push_str(if is_selected { REVERSE } else { UNREVERSE });
-            is_reversed = is_selected;
-        }
-        row.text.push(shown);
+        let style = if is_selected { PLAIN.reversed() } else { PLAIN };
+        row.text.push(Span::new(shown, style));
         column += character_width;
         row.width = column;
     }
     let (cursor_row, cursor_column) = cursor_at.unwrap_or_else(|| {
         if column >= width {
-            end_row(&mut rows, &mut is_reversed);
+            rows.push(Row::default());
             column = 0;
         }
         (rows.len() - 1, column)
     });
-    if is_reversed && let Some(row) = rows.last_mut() {
-        row.text.push_str(UNREVERSE);
-    }
     Wrapped {
         rows,
         cursor_row,
@@ -75,21 +68,12 @@ pub fn wrap(text: &str, cursor: usize, selection: Option<(usize, usize)>, width:
     }
 }
 
-/// Ends the last row, with its reversed text turned back, and starts a new one.
-fn end_row(rows: &mut Vec<Row>, is_reversed: &mut bool) {
-    if *is_reversed && let Some(row) = rows.last_mut() {
-        row.text.push_str(UNREVERSE);
-        *is_reversed = false;
-    }
-    rows.push(Row::default());
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn texts(wrapped: &Wrapped) -> Vec<&str> {
-        wrapped.rows.iter().map(|row| row.text.as_str()).collect()
+    fn texts(wrapped: &Wrapped) -> Vec<String> {
+        wrapped.rows.iter().map(|row| row.text.text()).collect()
     }
 
     #[test]
@@ -123,11 +107,13 @@ mod tests {
     #[test]
     fn the_selection_is_reversed_on_every_row_it_spans() {
         let wrapped = wrap("abcdef", 0, Some((1, 5)), 3);
+        let reversed = |text| Span::new(text, PLAIN.reversed());
+        let rows: Vec<&Line> = wrapped.rows.iter().map(|row| &row.text).collect();
         assert_eq!(
-            texts(&wrapped),
+            rows,
             [
-                format!("a{REVERSE}bc{UNREVERSE}"),
-                format!("{REVERSE}de{UNREVERSE}f")
+                &Line::from(["a".into(), reversed("bc")]),
+                &Line::from([reversed("de"), "f".into()])
             ]
         );
     }

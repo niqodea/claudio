@@ -3,7 +3,8 @@
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::style::{RESET, STRONG, SUBDUED};
+use crate::style::{STRONG, SUBDUED};
+use crate::text::{Line, Span};
 
 // The narrowest divider cell Markdown reads as one
 const MIN_COLUMN_WIDTH: usize = 3;
@@ -59,14 +60,14 @@ impl Table {
 
     /// The lines of the laid-out table, header in bold and the body's cells as `color_cell`
     /// colors them.
-    pub fn render(&self, color_cell: impl Fn(&str) -> String) -> Vec<String> {
-        let pipe = format!("{SUBDUED}|{RESET}");
-        let mut header = pipe.clone();
+    pub fn render(&self, color_cell: impl Fn(&str) -> Line) -> Vec<Line> {
+        let pipe = || Span::new("|", SUBDUED);
+        let mut header = Line::from(pipe());
         for (column, cell) in self.header.iter().enumerate() {
-            header.push_str(&self.pad(column, cell, &format!("{STRONG}{cell}{RESET}")));
-            header.push_str(&pipe);
+            header.append(self.pad(column, cell, Line::from(Span::new(cell, STRONG))));
+            header.push(pipe());
         }
-        let mut divider = format!("{SUBDUED}|");
+        let mut divider = String::from("|");
         for (alignment, width) in self.alignments.iter().zip(&self.widths) {
             let dashes = match alignment {
                 Alignment::Left => "-".repeat(*width),
@@ -77,13 +78,12 @@ impl Table {
             divider.push_str(&dashes);
             divider.push_str(" |");
         }
-        divider.push_str(RESET);
-        let mut lines = vec![header, divider];
+        let mut lines = vec![header, Line::from(Span::new(divider, SUBDUED))];
         for row in &self.rows {
-            let mut line = pipe.clone();
+            let mut line = Line::from(pipe());
             for (column, cell) in row.iter().enumerate() {
-                line.push_str(&self.pad(column, cell, &color_cell(cell)));
-                line.push_str(&pipe);
+                line.append(self.pad(column, cell, color_cell(cell)));
+                line.push(pipe());
             }
             lines.push(line);
         }
@@ -91,14 +91,16 @@ impl Table {
     }
 
     /// The cell's `text`, colored, with the spaces that align `cell` in its column around it.
-    fn pad(&self, column: usize, cell: &str, text: &str) -> String {
+    fn pad(&self, column: usize, cell: &str, text: Line) -> Line {
         let space = self.widths[column] - cell.width();
         let (before, after) = match self.alignments[column] {
             Alignment::Left => (0, space),
             Alignment::Center => (space / 2, space - space / 2),
             Alignment::Right => (space, 0),
         };
-        format!(" {}{text}{} ", " ".repeat(before), " ".repeat(after))
+        let mut padded = Line::from(" ".repeat(before + 1));
+        padded.append(text);
+        padded.with(" ".repeat(after + 1))
     }
 }
 
@@ -154,11 +156,8 @@ mod tests {
     }
 
     fn render_plain(table: &Table) -> String {
-        let colored = table.render(ToString::to_string).join("\n");
-        colored
-            .replace(RESET, "")
-            .replace(STRONG, "")
-            .replace(SUBDUED, "")
+        let lines = table.render(|cell| Line::from(cell));
+        lines.iter().map(Line::text).collect::<Vec<_>>().join("\n")
     }
 
     #[test]

@@ -32,6 +32,7 @@ mod style;
 mod subagents;
 mod table;
 mod terminal;
+mod text;
 mod vi;
 mod wrap;
 
@@ -267,8 +268,8 @@ fn end(
     };
     output.show_end(describe_exit(status).as_deref());
     // The text ends with a line break, since the end ended every line
-    print!("{}", output.take_text());
-    println!("{}", final_line(shared.session_id.as_deref()));
+    print!("{}", output.take_text().to_terminal("\n"));
+    println!("{}", final_line(shared.session_id.as_deref()).to_terminal());
     Ok(code)
 }
 

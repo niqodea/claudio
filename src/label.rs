@@ -8,8 +8,9 @@ use std::num::NonZeroUsize;
 
 use unicode_width::UnicodeWidthChar;
 
-use crate::cut::{ScreenRow, cut, visible_width};
+use crate::cut::{ScreenRow, cut};
 use crate::style::SUBDUED_ON_BAR;
+use crate::text::{Line, Span};
 
 /// The columns kept for the keys of a half-typed vi command, which most commands fit, like `d2`
 /// or `ci`. A longer one keeps its newest keys.
@@ -34,12 +35,9 @@ impl KeyState {
     /// The key state in its slot: the mode's letter at the slot's end, at the row's edge, and
     /// the half-typed command's keys in the columns before it, from their start, so a key once
     /// shown stays in its column as the next ones come.
-    fn fill(&self) -> String {
-        format!(
-            "{SUBDUED_ON_BAR}{} {}",
-            newest(&self.pending, PENDING_COLUMNS),
-            self.mode
-        )
+    fn fill(&self) -> Line {
+        let keys = newest(&self.pending, PENDING_COLUMNS);
+        Line::from(Span::new(format!("{keys} {}", self.mode), SUBDUED_ON_BAR))
     }
 }
 
@@ -67,11 +65,11 @@ impl MainLabel {
         }
     }
 
-    pub fn row(&self, label: &str, key_state: &KeyState) -> ScreenRow {
+    pub fn row(&self, label: &Line, key_state: &KeyState) -> ScreenRow {
         let mut row = fill(label, self.label);
         if self.has_key_state {
-            row.push(' ');
-            row.push_str(&key_state.fill());
+            row.push(" ");
+            row.append(key_state.fill());
         }
         ScreenRow::cut(&row, self.columns)
     }
@@ -83,8 +81,8 @@ impl MainLabel {
 /// on the options. The one part that may be missing is the outermost, so its empty slot merges
 /// with the room after the label, and the row never shows a gap between two parts.
 pub struct Progress {
-    pub questions: Option<String>,
-    pub requests: String,
+    pub questions: Option<Line>,
+    pub requests: Line,
     pub key_state: Option<KeyState>,
 }
 
@@ -159,22 +157,22 @@ impl QuestionLabel {
         (part as usize) < self.kept
     }
 
-    pub fn row(&self, label: &str, progress: &Progress) -> ScreenRow {
+    pub fn row(&self, label: &Line, progress: &Progress) -> ScreenRow {
         let mut row = fill(label, self.label);
         if self.label == self.columns.get() {
             return ScreenRow::cut(&row, self.columns);
         }
-        row.push(' ');
+        row.push(" ");
         if self.kept < PARTS.len() {
             let hides = (!self.keeps(Part::Questions) && progress.questions.is_some())
                 || !self.keeps(Part::Requests)
                 || (!self.keeps(Part::KeyState) && progress.key_state.is_some());
             let sign = if hides { "…" } else { "" };
-            row.push_str(&fill(&format!("{SUBDUED_ON_BAR}{sign}"), 1));
+            row.append(fill(&Line::from(Span::new(sign, SUBDUED_ON_BAR)), 1));
         }
         if self.keeps(Part::Questions) {
-            let questions = progress.questions.as_deref().unwrap_or("");
-            row.push_str(&fill(questions, QUESTIONS_COLUMNS));
+            let questions = progress.questions.clone().unwrap_or_default();
+            row.append(fill(&questions, QUESTIONS_COLUMNS));
         }
         if self.keeps(Part::Requests) {
             // The bar sets the requests apart from the questions, when both show
@@ -183,29 +181,28 @@ impl QuestionLabel {
             } else {
                 "   "
             };
-            row.push_str(&fill(
-                &format!("{SUBDUED_ON_BAR}{gap}{}", progress.requests),
-                Part::Requests.columns(),
-            ));
+            let mut requests = Line::from(Span::new(gap, SUBDUED_ON_BAR));
+            requests.append(progress.requests.clone());
+            row.append(fill(&requests, Part::Requests.columns()));
         }
         // A `│` sets where the keys go apart, as between the other groups
         if self.keeps(Part::KeyState) {
-            let key_state = (progress.key_state.as_ref()).map_or_else(String::new, KeyState::fill);
-            let part = format!("{SUBDUED_ON_BAR} │ {key_state}");
-            row.push_str(&fill(&part, Part::KeyState.columns()));
+            let mut part = Line::from(Span::new(" │ ", SUBDUED_ON_BAR));
+            part.append((progress.key_state.as_ref()).map_or_else(Line::default, KeyState::fill));
+            row.append(fill(&part, Part::KeyState.columns()));
         }
         ScreenRow::cut(&row, self.columns)
     }
 }
 
 /// `text` in a slot `width` columns wide: padded at its end, or cut there with `…`.
-fn fill(text: &str, width: usize) -> String {
+fn fill(text: &Line, width: usize) -> Line {
     let Some(columns) = NonZeroUsize::new(width) else {
-        return String::new();
+        return Line::default();
     };
     let text = cut(text, columns);
-    let pad = width.saturating_sub(visible_width(&text));
-    format!("{text}{}", " ".repeat(pad))
+    let pad = width.saturating_sub(text.width());
+    text.with(" ".repeat(pad))
 }
 
 /// The newest keys of `keys`, a half-typed command, that fit in `width` columns, padded at their
@@ -234,22 +231,9 @@ mod tests {
         NonZeroUsize::new(count).expect("a column")
     }
 
-    /// `row` without its escape sequences.
+    /// `row` without its styles.
     fn plain(row: &ScreenRow) -> String {
-        let mut plain = String::new();
-        let mut characters = row.as_str().chars();
-        while let Some(character) = characters.next() {
-            if character == '\x1b' {
-                for next in characters.by_ref() {
-                    if next.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            } else {
-                plain.push(character);
-            }
-        }
-        plain
+        row.line().text()
     }
 
     fn key_state(pending: &str, mode: char) -> KeyState {
@@ -261,8 +245,8 @@ mod tests {
 
     fn progress(questions: &str, requests: &str, key: Option<KeyState>) -> Progress {
         Progress {
-            questions: (!questions.is_empty()).then(|| questions.to_string()),
-            requests: requests.to_string(),
+            questions: (!questions.is_empty()).then(|| Line::from(questions)),
+            requests: Line::from(requests),
             key_state: key,
         }
     }
@@ -270,8 +254,8 @@ mod tests {
     #[test]
     fn a_half_typed_command_moves_nothing_on_the_main_label_row() {
         let layout = MainLabel::new(columns(30));
-        let idle = plain(&layout.row("›› idle", &key_state("", 'N')));
-        let typing = plain(&layout.row("›› idle", &key_state("d2", 'N')));
+        let idle = plain(&layout.row(&Line::from("›› idle"), &key_state("", 'N')));
+        let typing = plain(&layout.row(&Line::from("›› idle"), &key_state("d2", 'N')));
         assert_eq!(idle, "›› idle                      N");
         assert_eq!(typing, "›› idle                  d2  N");
     }
@@ -281,7 +265,7 @@ mod tests {
         let layout = QuestionLabel::new(columns(60), 20);
         let row = |pending: &str| {
             plain(&layout.row(
-                "›› Code style",
+                &Line::from("›› Code style"),
                 &progress("a s d f", "q w · ·", Some(key_state(pending, 'N'))),
             ))
         };
@@ -306,9 +290,15 @@ mod tests {
     #[test]
     fn each_part_keeps_its_columns_from_one_request_to_the_next() {
         let layout = QuestionLabel::new(columns(60), 20);
-        let two = plain(&layout.row("›› Code style", &progress("a s · ·", "q w e ·", None)));
-        let one = plain(&layout.row("›› Code style", &progress("", "q w e ·", None)));
-        let alone = plain(&layout.row("›› Code style", &progress("a s · ·", "q · · ·", None)));
+        let two = plain(&layout.row(
+            &Line::from("›› Code style"),
+            &progress("a s · ·", "q w e ·", None),
+        ));
+        let one = plain(&layout.row(&Line::from("›› Code style"), &progress("", "q w e ·", None)));
+        let alone = plain(&layout.row(
+            &Line::from("›› Code style"),
+            &progress("a s · ·", "q · · ·", None),
+        ));
         assert_eq!(
             alone,
             "›› Code style                      a s · · │ q · · · │      "
@@ -328,7 +318,7 @@ mod tests {
     fn a_narrow_screen_gives_up_the_parts_from_the_left_whatever_the_label_says() {
         let full = progress("a s · ·", "q w · ·", Some(key_state("", 'I')));
         let row = |label: &str, count: usize| {
-            plain(&QuestionLabel::new(columns(count), 20).row(label, &full))
+            plain(&QuestionLabel::new(columns(count), 20).row(&Line::from(label), &full))
         };
         let short = "›› Code style";
         assert_eq!(
@@ -353,7 +343,7 @@ mod tests {
     #[test]
     fn a_part_given_up_with_nothing_to_show_leaves_no_sign() {
         let layout = QuestionLabel::new(columns(44), 20);
-        let row = plain(&layout.row("›› Code style", &progress("", "q · · ·", None)));
+        let row = plain(&layout.row(&Line::from("›› Code style"), &progress("", "q · · ·", None)));
         assert!(!row.contains('…'), "{row}");
     }
 
@@ -361,17 +351,12 @@ mod tests {
     fn every_row_takes_the_whole_screen() {
         let full = progress("a s d f", "q w e r", Some(key_state("100d", 'N')));
         for count in 1..80 {
-            let question =
-                QuestionLabel::new(columns(count), 20).row("›› Code style │ hint", &full);
-            let main =
-                MainLabel::new(columns(count)).row("›› T1 S1 W2 │ idle", &key_state("d", 'N'));
-            assert_eq!(
-                visible_width(question.as_str()),
-                count,
-                "{}",
-                plain(&question)
-            );
-            assert_eq!(visible_width(main.as_str()), count, "{}", plain(&main));
+            let question = QuestionLabel::new(columns(count), 20)
+                .row(&Line::from("›› Code style │ hint"), &full);
+            let main = MainLabel::new(columns(count))
+                .row(&Line::from("›› T1 S1 W2 │ idle"), &key_state("d", 'N'));
+            assert_eq!(question.line().width(), count, "{}", plain(&question));
+            assert_eq!(main.line().width(), count, "{}", plain(&main));
         }
     }
 }

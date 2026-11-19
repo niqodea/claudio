@@ -19,7 +19,8 @@ use crossterm::event::{KeyCode, KeyEvent};
 use crate::keys::Input;
 use crate::markdown::is_fence;
 use crate::render::markdown_lines;
-use crate::style::{ATTENTION, DONE_OR_ADDED, MARK, RESET, STRONG, SUBDUED};
+use crate::style::{ATTENTION, DONE_OR_ADDED, MARK, PLAIN, STRONG, SUBDUED};
+use crate::text::{Line, Span};
 
 /// The key of the user's own answer, and its mark, the same on every question.
 pub const OWN_KEY: char = '>';
@@ -386,26 +387,27 @@ pub fn lines(
     form: Form,
     pick: &Pick,
     submitted: Option<&Chosen>,
-) -> (Vec<String>, String) {
+) -> (Vec<Line>, Line) {
+    // The start of an item's line, and the style of the rest of it
     let start = |key: &str, cursor: Cursor, is_ticked: bool| {
-        let (pointer, color, is_ticked) = match submitted {
+        let (pointer, style, is_ticked) = match submitted {
             Some(chosen) => {
                 let is_chosen = match cursor {
                     Cursor::Option(index) => chosen.options.contains(&index),
                     Cursor::Own | Cursor::Writing => chosen.is_own,
                 };
                 match (is_chosen, form) {
-                    (true, Form::One) => (format!("{DONE_OR_ADDED}✓{RESET}"), DONE_OR_ADDED, false),
-                    (true, _) => (" ".to_string(), DONE_OR_ADDED, true),
-                    (false, _) => (" ".to_string(), SUBDUED, false),
+                    (true, Form::One) => (Span::new("✓", DONE_OR_ADDED), DONE_OR_ADDED, false),
+                    (true, _) => (" ".into(), DONE_OR_ADDED, true),
+                    (false, _) => (" ".into(), SUBDUED, false),
                 }
             }
             None => match (pick.cursor == cursor, pick.cursor) {
-                (true, _) => (format!("{MARK}❯{RESET}"), STRONG, is_ticked),
+                (true, _) => (Span::new("❯", MARK), STRONG, is_ticked),
                 (false, Cursor::Writing) if cursor == Cursor::Own => {
-                    (format!("{SUBDUED}❯{RESET}"), "", is_ticked)
+                    (Span::new("❯", SUBDUED), PLAIN, is_ticked)
                 }
-                (false, _) => (" ".to_string(), "", is_ticked),
+                (false, _) => (" ".into(), PLAIN, is_ticked),
             },
         };
         let tick = match (form, is_ticked) {
@@ -413,7 +415,12 @@ pub fn lines(
             (_, true) => "[✓] ",
             (_, false) => "[ ] ",
         };
-        format!("{pointer} {color}{key:<2} {tick}")
+        let start = Line::from([
+            pointer,
+            " ".into(),
+            Span::new(format!("{key:<2} {tick}"), style),
+        ]);
+        (start, style)
     };
     let options = choices
         .iter()
@@ -424,37 +431,38 @@ pub fn lines(
                 (_, Some(key)) => key.to_string(),
                 (_, None) => (index + 1).to_string(),
             };
-            let start = start(
+            let (start, style) = start(
                 &format!("{key}."),
                 Cursor::Option(index),
                 pick.ticked.contains(&index),
             );
-            let description = if choice.description.is_empty() {
-                String::new()
+            let style = if choice.risk.is_some() && submitted.is_none() {
+                ATTENTION.on(style)
             } else {
-                format!("  {SUBDUED}{}", choice.description)
+                style
             };
-            let risk = if choice.risk.is_some() && submitted.is_none() {
-                ATTENTION
+            let line = start.with(Span::new(choice.label.as_str(), style));
+            if choice.description.is_empty() {
+                line
             } else {
-                ""
-            };
-            format!("{start}{risk}{}{RESET}{description}", choice.label)
+                line.with("  ")
+                    .with(Span::new(choice.description.as_str(), SUBDUED))
+            }
         })
         .collect();
     if form == Form::Review {
-        return (options, String::new());
+        return (options, Line::default());
     }
-    let own = start(&OWN_KEY.to_string(), Cursor::Own, pick.is_own_ticked);
-    (options, format!("{own}{own_label}{RESET}"))
+    let (own, style) = start(&OWN_KEY.to_string(), Cursor::Own, pick.is_own_ticked);
+    (options, own.with(Span::new(own_label, style)))
 }
 
 /// The preview of the option the cursor is on.
 pub struct Preview {
     /// The key of the option as its line shows it, like `1`, none off the options.
     pub key: Option<String>,
-    /// None when the option has no preview.
-    pub lines: Vec<String>,
+    /// The preview's Markdown, empty when the option has no preview.
+    pub markdown: String,
 }
 
 /// Whether any option of a question has a preview, which gives every option of it the preview's
@@ -479,26 +487,36 @@ pub fn preview(choices: &[Choice], pick: &Pick) -> Option<Preview> {
                 .key
                 .map_or_else(|| (index + 1).to_string(), String::from)
         }),
-        // Claude Code shows a preview as Markdown, which Claude then writes it in
-        lines: preview_lines(
-            focused
-                .and_then(|(_, choice)| choice.preview.as_deref())
-                .unwrap_or_default(),
-        ),
+        markdown: focused
+            .and_then(|(_, choice)| choice.preview.clone())
+            .unwrap_or_default(),
     })
 }
 
-/// The lines of a preview, highlighted as Markdown, without its code fences, which would take 2
-/// of its few rows, while the code's colors already set the code apart. Ctrl+O shows it whole,
-/// fences included.
-fn preview_lines(markdown: &str) -> Vec<String> {
+/// The lines of a preview, highlighted as Markdown, since Claude Code shows a preview as
+/// Markdown, which Claude then writes it in, without its code fences, which would take 2 of its
+/// few rows, while the code's colors already set the code apart. Ctrl+O shows it whole, fences
+/// included.
+pub fn preview_lines(markdown: &str) -> Vec<Line> {
     let markdown = markdown.trim();
     // The highlighter keeps every line, so each colored line is the one of the Markdown
     (markdown.lines())
         .zip(markdown_lines(markdown))
-        .filter(|(line, _)| !is_fence(line))
+        .filter(|(line, _)| shows_in_preview(line))
         .map(|(_, colored)| colored)
         .collect()
+}
+
+/// The count of `preview_lines(markdown)`, without highlighting them.
+pub fn preview_rows(markdown: &str) -> usize {
+    (markdown.trim().lines())
+        .filter(|line| shows_in_preview(line))
+        .count()
+}
+
+/// Whether a preview shows `line` of its Markdown: every line but a code fence.
+fn shows_in_preview(line: &str) -> bool {
+    !is_fence(line)
 }
 
 /// What the label row says the keys do, after the question's header, with `pick` on `choices`
@@ -587,7 +605,7 @@ mod tests {
             Effect::Submit
         );
         let (lines, _) = lines(&decision(), "", Form::One, &pick, None);
-        assert!(lines[1].contains("n. "));
+        assert!(lines[1].text().contains("n. "));
     }
 
     #[test]
@@ -756,9 +774,9 @@ mod tests {
         let choices = [choice(Some("a\nb\nc")), choice(None)];
         let first = preview(&choices, &pick(Cursor::Option(0))).expect("a preview");
         assert_eq!(first.key.as_deref(), Some("1"));
-        assert_eq!(first.lines.len(), 3);
+        assert_eq!(first.markdown, "a\nb\nc");
         let second = preview(&choices, &pick(Cursor::Option(1))).expect("a preview");
-        assert_eq!(second.lines, Vec::<String>::new());
+        assert_eq!(second.markdown, "");
         let own = preview(&choices, &pick(Cursor::Own)).expect("a preview");
         assert!(own.key.is_none());
         assert!(preview(&choices[1..], &pick(Cursor::Option(0))).is_none());
@@ -768,9 +786,10 @@ mod tests {
     fn a_preview_hides_its_code_fences_and_keeps_its_other_lines() {
         let lines = preview_lines("Intro\n```js\nconst a = 1;\n```\nOutro");
         assert_eq!(lines.len(), 3);
-        assert!(lines[0].contains("Intro"));
-        assert!(lines[1].contains("const"));
-        assert!(lines[2].contains("Outro"));
+        assert_eq!(lines[0].text(), "Intro");
+        assert_eq!(lines[1].text(), "const a = 1;");
+        assert_eq!(lines[2].text(), "Outro");
+        assert_eq!(preview_rows("Intro\n```js\nconst a = 1;\n```\nOutro"), 3);
     }
 
     #[test]

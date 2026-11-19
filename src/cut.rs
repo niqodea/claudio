@@ -9,10 +9,11 @@
 
 use std::num::NonZeroUsize;
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
 
 use crate::keys::{Field, Mark, Tone};
-use crate::style::RESET;
+use crate::style::Style;
+use crate::text::{Line, Row, Span};
 
 /// A view that shows whole what a cut hides, which the cut's sign names.
 #[derive(Clone, Copy)]
@@ -33,20 +34,31 @@ impl Whole {
 /// A row drawn on the screen, which takes at most the screen's columns, since only a cut or
 /// `empty` makes one, and so exactly one row of the terminal. A screen drawn from
 /// these takes as many rows as it has rows, where a row that wrapped would take more.
-pub struct ScreenRow(String);
+pub struct ScreenRow(Row);
 
 impl ScreenRow {
     /// `line` as a row `columns` wide, cut at its end when longer, by `cut`.
-    pub fn cut(line: &str, columns: NonZeroUsize) -> Self {
-        Self(cut(line, columns))
+    pub fn cut(line: &Line, columns: NonZeroUsize) -> Self {
+        Self(Row::from(cut(line, columns)))
     }
 
     pub fn empty() -> Self {
-        Self(String::new())
+        Self(Row::default())
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
+    /// The row on `background`, as `Row::on`, which takes no column.
+    #[must_use]
+    pub fn on(self, background: Style) -> Self {
+        Self(self.0.on(background))
+    }
+
+    #[cfg(test)]
+    pub fn line(&self) -> &Line {
+        self.0.line()
+    }
+
+    pub fn to_terminal(&self) -> String {
+        self.0.to_terminal()
     }
 }
 
@@ -78,35 +90,22 @@ pub fn the_request(whole: Whole) -> String {
 /// Ref: <https://www.patternfly.org/components/truncate/design-guidelines>, whose default
 /// truncation is at the end of the text
 ///
-/// The line holds its own colors, as for `cut_path`.
-pub fn cut(line: &str, columns: NonZeroUsize) -> String {
+/// The `…` stands for the text it replaces, so it takes the style of that text's start.
+pub fn cut(line: &Line, columns: NonZeroUsize) -> Line {
+    if line.width() <= columns.get() {
+        return line.clone();
+    }
+    let mut kept = Line::default();
     let mut width = 0;
-    let mut rest = line.char_indices();
-    let mut start_end = None;
-    let kept_columns = columns.get() - 1;
-    while let Some((index, character)) = rest.next() {
-        if character == '\x1b' {
-            // Every sequence a line holds is a CSI, which ends with a letter and takes no column
-            rest.find(|(_, next)| next.is_ascii_alphabetic());
-            continue;
-        }
+    for (character, style) in line.characters() {
         let character_width = character.width().unwrap_or(0);
-        if start_end.is_none() && width + character_width > kept_columns {
-            start_end = Some(index);
+        if width + character_width > columns.get() - 1 {
+            return kept.with(Span::new("…", style));
         }
         width += character_width;
+        kept.push(Span::new(character, style));
     }
-    match start_end {
-        Some(start_end) if width > columns.get() => {
-            // The `…` stands for the text it replaces, so it takes the colors of that text
-            format!(
-                "{}{RESET}{}…{RESET}",
-                &line[..start_end],
-                colors_at(line, start_end),
-            )
-        }
-        _ => line.to_string(),
-    }
+    unreachable!("a line wider than its columns has a character past them")
 }
 
 /// `path`, a file's path or a URL, cut in the middle to take at most `columns` columns on screen,
@@ -117,109 +116,42 @@ pub fn cut(line: &str, columns: NonZeroUsize) -> String {
 /// Ref: <https://v5-archive.patternfly.org/ux-writing/truncation>, which cuts where the part
 /// that tells one text from the next is not
 ///
-/// The path holds its own colors, since the `…` and the end take the colors in effect where the
-/// path has them, and know nothing of colors set before it.
-pub fn cut_path(path: &str, columns: NonZeroUsize) -> String {
-    let mut characters = Vec::new();
-    let mut rest = path.char_indices();
-    while let Some((index, character)) = rest.next() {
-        if character == '\x1b' {
-            // Every sequence a path holds is a CSI, which ends with a letter and takes no column
-            rest.find(|(_, next)| next.is_ascii_alphabetic());
-            continue;
-        }
-        characters.push((index, character, character.width().unwrap_or(0)));
+/// The `…` takes the style of the start of the text it replaces, as for `cut`.
+pub fn cut_path(path: &Line, columns: NonZeroUsize) -> Line {
+    if path.width() <= columns.get() {
+        return path.clone();
     }
-    if characters.iter().map(|(_, _, width)| width).sum::<usize>() <= columns.get() {
-        return path.to_string();
-    }
+    let characters: Vec<(char, Style)> = path.characters().collect();
     // The `…` takes a column, and the start takes the odd one of the rest
     let kept_columns = columns.get() - 1;
-    let (mut start_end, mut start_width) = (0, 0);
-    for (index, character, width) in &characters {
-        if start_width + width > kept_columns.div_ceil(2) {
-            break;
+    let fits = |room: usize| {
+        let mut width = 0;
+        move |(character, _): &&(char, Style)| {
+            width += character.width().unwrap_or(0);
+            width <= room
         }
-        start_width += width;
-        start_end = index + character.len_utf8();
-    }
-    let (mut end_start, mut end_width) = (path.len(), 0);
-    for (index, _, width) in characters.iter().rev() {
-        if end_width + width > kept_columns / 2 {
-            break;
-        }
-        end_width += width;
-        end_start = *index;
-    }
-    // The `…` stands for the text it replaces, so it takes the colors of that text's start
-    let cut_start = characters
-        .iter()
-        .find(|(index, _, _)| *index >= start_end)
-        .map_or(start_end, |(index, _, _)| *index);
-    let end = &path[end_start..];
-    let end = if end.is_empty() {
-        String::new()
-    } else {
-        format!("{}{end}", colors_at(path, end_start))
     };
-    format!(
-        "{}{RESET}{}…{RESET}{end}",
-        &path[..start_end],
-        colors_at(path, cut_start),
-    )
-}
-
-/// The color codes in effect at byte `end` of `line`, those since its last reset, which set the
-/// colors again where printing starts there.
-pub fn colors_at(line: &str, end: usize) -> String {
-    let mut codes = String::new();
-    let mut characters = line[..end].char_indices();
-    while let Some((index, character)) = characters.next() {
-        if character != '\x1b' {
-            continue;
-        }
-        // Every sequence a line holds is a CSI, which ends with a letter, and those that end with
-        // `m` set colors
-        let sequence_end = characters
-            .find(|(_, next)| next.is_ascii_alphabetic())
-            .map_or(end, |(next_index, next)| next_index + next.len_utf8());
-        let sequence = &line[index..sequence_end];
-        if sequence == RESET {
-            codes.clear();
-        } else if sequence.ends_with('m') {
-            codes.push_str(sequence);
-        }
-    }
-    codes
-}
-
-/// The columns `text` takes on screen, without its escape sequences.
-pub fn visible_width(text: &str) -> usize {
-    let mut visible = String::new();
-    let mut characters = text.chars();
-    while let Some(character) = characters.next() {
-        if character == '\x1b' {
-            // Every sequence a line holds is a CSI, which ends with a letter
-            for next in characters.by_ref() {
-                if next.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else {
-            visible.push(character);
-        }
-    }
-    visible.width()
+    let start = (characters.iter())
+        .take_while(fits(kept_columns.div_ceil(2)))
+        .count();
+    let end = (characters.iter().rev())
+        .take_while(fits(kept_columns / 2))
+        .count();
+    let (_, cut_style) = characters[start];
+    (characters[..start].iter().copied())
+        .chain([('…', cut_style)])
+        .chain(characters[characters.len() - end..].iter().copied())
+        .collect()
 }
 
 /// `line` cut to `columns` columns with `…` at its end even when it fits, since what follows it
 /// is hidden.
-pub fn cut_before_hidden(line: &str, columns: NonZeroUsize) -> String {
-    if visible_width(line) < columns.get() {
-        format!("{line}{RESET}…{RESET}")
+pub fn cut_before_hidden(line: &Line, columns: NonZeroUsize) -> Line {
+    if line.width() < columns.get() {
+        line.clone().with("…")
     } else {
         // A space after it makes the line too wide, so the cut always takes place
-        cut(&format!("{line} "), columns)
+        cut(&line.clone().with(" "), columns)
     }
 }
 
@@ -309,68 +241,75 @@ mod tests {
         NonZeroUsize::new(count).expect("the count is not zero")
     }
 
+    fn plain(text: &str) -> Line {
+        Line::from(text)
+    }
+
+    fn subdued(text: &str) -> Span {
+        Span::new(text, SUBDUED)
+    }
+
     #[test]
     fn a_line_that_fits_stays_whole() {
-        assert_eq!(cut_path("abc", columns(3)), "abc");
+        assert_eq!(cut_path(&plain("abc"), columns(3)), plain("abc"));
     }
 
     #[test]
     fn a_path_too_long_keeps_its_start_and_its_end() {
+        assert_eq!(cut_path(&plain("abcdefgh"), columns(6)), plain("abc…gh"));
+    }
+
+    #[test]
+    fn the_end_kept_keeps_its_style() {
         assert_eq!(
-            cut_path("abcdefgh", columns(6)),
-            format!("abc{RESET}…{RESET}gh")
+            cut_path(&Line::from(subdued("abcdef")), columns(4)),
+            Line::from(subdued("ab…f"))
+        );
+        let path = Line::from([Span::new("ab", STRONG), "cdefgh".into()]);
+        assert_eq!(
+            cut_path(&path, columns(4)),
+            Line::from([Span::new("ab", STRONG), "…h".into()])
         );
     }
 
     #[test]
-    fn the_end_kept_starts_with_the_colors_in_effect_there() {
+    fn the_ellipsis_takes_the_style_of_the_text_it_replaces() {
+        let path = Line::from(["ab".into(), subdued("cdefgh")]);
         assert_eq!(
-            cut_path(&format!("{SUBDUED}abcdef"), columns(4)),
-            format!("{SUBDUED}ab{RESET}{SUBDUED}…{RESET}{SUBDUED}f")
+            cut_path(&path, columns(4)),
+            Line::from(["ab".into(), subdued("…h")])
         );
+        // The style set before the cut holds after it, where once its code was lost
+        let line = Line::from([Span::new("name", STRONG), ": value".into()]);
         assert_eq!(
-            cut_path(&format!("{STRONG}ab{RESET}cdefgh"), columns(4)),
-            format!("{STRONG}ab{RESET}…{RESET}h")
-        );
-    }
-
-    #[test]
-    fn the_ellipsis_takes_the_colors_of_the_text_it_replaces() {
-        assert_eq!(
-            cut_path(&format!("ab{SUBDUED}cdefgh"), columns(4)),
-            format!("ab{RESET}{SUBDUED}…{RESET}{SUBDUED}h")
+            cut(&line, columns(3)),
+            Line::from([Span::new("na", STRONG), Span::new("…", STRONG)])
         );
     }
 
     #[test]
-    fn a_line_too_long_keeps_its_start_and_its_colors() {
-        assert_eq!(cut("abcdef", columns(6)), "abcdef");
-        assert_eq!(cut("abcdefgh", columns(6)), format!("abcde{RESET}…{RESET}"));
+    fn a_line_too_long_keeps_its_start_and_its_style() {
+        assert_eq!(cut(&plain("abcdef"), columns(6)), plain("abcdef"));
+        assert_eq!(cut(&plain("abcdefgh"), columns(6)), plain("abcde…"));
         assert_eq!(
-            cut(&format!("{SUBDUED}abcdef"), columns(4)),
-            format!("{SUBDUED}abc{RESET}{SUBDUED}…{RESET}")
+            cut(&Line::from(subdued("abcdef")), columns(4)),
+            Line::from(subdued("abc…"))
         );
-        assert_eq!(cut("ab日本", columns(4)), format!("ab{RESET}…{RESET}"));
+        assert_eq!(cut(&plain("ab日本"), columns(4)), plain("ab…"));
     }
 
     #[test]
     fn a_wide_character_that_does_not_fit_is_cut_whole() {
-        assert_eq!(cut_path("ab日本", columns(4)), format!("ab{RESET}…{RESET}"));
+        assert_eq!(cut_path(&plain("ab日本"), columns(4)), plain("ab…"));
     }
 
     #[test]
     fn a_line_before_hidden_text_always_ends_in_an_ellipsis() {
+        assert_eq!(cut_before_hidden(&plain("ab"), columns(4)), plain("ab…"));
+        assert_eq!(cut_before_hidden(&plain("abcd"), columns(4)), plain("abc…"));
         assert_eq!(
-            cut_before_hidden("ab", columns(4)),
-            format!("ab{RESET}…{RESET}")
-        );
-        assert_eq!(
-            cut_before_hidden("abcd", columns(4)),
-            format!("abc{RESET}…{RESET}")
-        );
-        assert_eq!(
-            cut_before_hidden("abcdef", columns(4)),
-            format!("abc{RESET}…{RESET}")
+            cut_before_hidden(&plain("abcdef"), columns(4)),
+            plain("abc…")
         );
     }
 
@@ -432,21 +371,13 @@ mod tests {
 
     #[test]
     fn the_last_row_names_parts_that_are_not_a_calls_fields_as_the_request() {
-        let preview = Field {
-            mark: Mark::Quote(Some("1".to_string())),
-            ..field("x", 1)
-        };
-        let fitted = fit(&[field("question", 1), preview], 1, |_| 0);
+        let fitted = fit(&[field("question", 1), preview("x", 1)], 1, |_| 0);
         assert_eq!(shape(&fitted), [("… Ctrl+O shows the request", 1)]);
     }
 
     #[test]
     fn a_preview_gives_up_its_rows_down_to_one_as_any_value() {
-        let preview = Field {
-            mark: Mark::Quote(Some("1".to_string())),
-            ..field("x\ny\nz", 5)
-        };
-        let fields = [field("question", 3), preview];
+        let fields = [field("question", 3), preview("x\ny\nz", 5)];
         let rows = |count| {
             let fitted = fit(&fields, count, |_| 0);
             fitted.iter().map(|field| field.rows).collect::<Vec<_>>()
@@ -461,5 +392,13 @@ mod tests {
         let used_rows = |field: &Field| field.value.lines().count();
         let fitted = fit(&fields, 5, used_rows);
         assert_eq!(shape(&fitted), [("question", 2), ("x\ny\nz", 3)]);
+    }
+
+    /// The preview of an option, of `markdown`, in `rows` rows.
+    fn preview(markdown: &str, rows: usize) -> Field {
+        Field {
+            mark: Mark::Quote(Some("1".to_string())),
+            ..field(markdown, rows)
+        }
     }
 }

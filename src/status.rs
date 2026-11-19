@@ -9,7 +9,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::context::{COLD_COLOR, Context};
 use crate::limits::{Limits, level, limit_level};
 use crate::protocol::{Ceiling, Limit};
-use crate::style::{RESET, SUBDUED};
+use crate::style::{PLAIN, SUBDUED, Style};
+use crate::text::{Line, Span};
 
 /// How long before the cache turns cold its cold-at time shows in yellow.
 const NEAR_COLD: Duration = Duration::from_mins(5);
@@ -35,27 +36,27 @@ pub fn lines(
     context: &Context,
     now: Instant,
     wall_now: SystemTime,
-) -> Vec<String> {
+) -> Vec<Line> {
     vec![
         text_row("Model", model),
         text_row(
             "Resume",
             session_id.or(context.is_new().then_some("none yet")),
         ),
-        String::new(),
+        Line::default(),
         limit_row("Session", limits.session(), wall_now),
         limit_row("Week", limits.week(), wall_now),
-        String::new(),
+        Line::default(),
         context_row(context, now, wall_now),
         ceiling_row(context),
     ]
 }
 
-fn text_row(name: &str, value: Option<&str>) -> String {
-    format!("{}{}", label(name), value.unwrap_or("?"))
+fn text_row(name: &str, value: Option<&str>) -> Line {
+    Line::from(label(name)).with(value.unwrap_or("?"))
 }
 
-fn limit_row(name: &str, limit: Option<Limit>, wall_now: SystemTime) -> String {
+fn limit_row(name: &str, limit: Option<Limit>, wall_now: SystemTime) -> Line {
     let Some(limit) = limit else {
         return unknown_row(name);
     };
@@ -74,7 +75,7 @@ fn limit_row(name: &str, limit: Option<Limit>, wall_now: SystemTime) -> String {
 
 /// The context's tokens, and whether its cache is warm. A new session's cache holds nothing to
 /// lose, so its row shows only the tokens.
-fn context_row(context: &Context, now: Instant, wall_now: SystemTime) -> String {
+fn context_row(context: &Context, now: Instant, wall_now: SystemTime) -> Line {
     let tokens = Cell::new(context.tokens().map_or("?".to_string(), grouped), None);
     match context.warm_until(now) {
         Some(cold_at) => {
@@ -100,7 +101,7 @@ fn context_row(context: &Context, now: Instant, wall_now: SystemTime) -> String 
 }
 
 /// The tokens the context can take before its ceiling, in the color of how near it is.
-fn ceiling_row(context: &Context) -> String {
+fn ceiling_row(context: &Context) -> Line {
     let (name, ceiling) = match context.ceiling() {
         Some(Ceiling::Compact(tokens)) => ("Compact", Some(tokens)),
         Some(Ceiling::Window(tokens)) => ("Window", Some(tokens)),
@@ -119,57 +120,57 @@ fn ceiling_row(context: &Context) -> String {
     )
 }
 
-fn unknown_row(name: &str) -> String {
+fn unknown_row(name: &str) -> Line {
     row(name, &Cell::new("?", None), None, None)
 }
 
-/// A row of a number and what it is, followed by when that changes. Each column is padded
-/// before its color, so the colors' codes take no width.
-fn row(name: &str, number: &Cell, word: Option<&Cell>, change: Option<&Cell>) -> String {
+/// A row of a number and what it is, followed by when that changes.
+fn row(name: &str, number: &Cell, word: Option<&Cell>, change: Option<&Cell>) -> Line {
     let number = Cell::new(format!("{:>NUMBER_WIDTH$}", number.text), number.color);
-    let start = format!("{}{}", label(name), number.painted());
+    let start = Line::from([label(name), number.painted()]);
     match (word, change) {
         (word, Some(change)) => {
             let (text, color) = word.map_or(("", None), |word| (word.text.as_str(), word.color));
             let word = Cell::new(format!("{text:<WORD_WIDTH$}"), color);
-            format!("{start}  {}  {}", word.painted(), change.painted())
+            start
+                .with("  ")
+                .with(word.painted())
+                .with("  ")
+                .with(change.painted())
         }
-        (Some(word), None) => format!("{start}  {}", word.painted()),
+        (Some(word), None) => start.with("  ").with(word.painted()),
         (None, None) => start,
     }
 }
 
 /// When something changes, like "resets at 16:00", in `color`.
-fn change(verb: &str, at: SystemTime, wall_now: SystemTime, color: Option<&'static str>) -> Cell {
+fn change(verb: &str, at: SystemTime, wall_now: SystemTime, color: Option<Style>) -> Cell {
     Cell::new(
         format!("{verb:>VERB_WIDTH$} {}", clock(at, wall_now)),
         color,
     )
 }
 
-fn label(text: &str) -> String {
-    format!("{SUBDUED}{text:<LABEL_WIDTH$}{RESET}")
+fn label(text: &str) -> Span {
+    Span::new(format!("{text:<LABEL_WIDTH$}"), SUBDUED)
 }
 
 /// A part of a row, in its color, none for the terminal's own.
 struct Cell {
     text: String,
-    color: Option<&'static str>,
+    color: Option<Style>,
 }
 
 impl Cell {
-    fn new(text: impl Into<String>, color: Option<&'static str>) -> Self {
+    fn new(text: impl Into<String>, color: Option<Style>) -> Self {
         Cell {
             text: text.into(),
             color,
         }
     }
 
-    fn painted(&self) -> String {
-        match self.color {
-            Some(color) => format!("{color}{}{RESET}", self.text),
-            None => self.text.clone(),
-        }
+    fn painted(&self) -> Span {
+        Span::new(self.text.clone(), self.color.unwrap_or(PLAIN))
     }
 }
 
@@ -228,7 +229,7 @@ mod tests {
 
     const HOUR: Duration = Duration::from_hours(1);
 
-    /// The lines of a status, without their colors' codes.
+    /// The lines of a status, without their styles.
     fn plain_lines(
         context: &Context,
         limits: &Limits,
@@ -244,21 +245,8 @@ mod tests {
             wall_now,
         )
         .iter()
-        .map(|line| strip_colors(line))
+        .map(Line::text)
         .collect()
-    }
-
-    fn strip_colors(line: &str) -> String {
-        let mut text = String::new();
-        let mut chars = line.chars();
-        while let Some(character) = chars.next() {
-            if character == '\x1b' {
-                chars.by_ref().find(|&end| end == 'm');
-            } else {
-                text.push(character);
-            }
-        }
-        text
     }
 
     fn context_with(tokens: u64, cache_ttl: Duration, ceiling: u64, now: Instant) -> Context {
@@ -319,10 +307,7 @@ mod tests {
             SystemTime::now(),
         );
         assert_eq!(
-            status
-                .iter()
-                .map(|line| strip_colors(line))
-                .collect::<Vec<_>>(),
+            status.iter().map(Line::text).collect::<Vec<_>>(),
             [
                 "Model    ?",
                 "Resume   ?",
@@ -342,7 +327,10 @@ mod tests {
         let context = context_with(41_203, NEAR_COLD, 967_000, now);
         let status = lines(None, None, &Limits::new(), &context, now, wall_now);
         let cold_at = clock(wall_now + NEAR_COLD, wall_now);
-        assert!(status[6].contains(&format!("{COLD_COLOR}  cold at {cold_at}")));
+        assert_eq!(
+            status[6].style_of(&format!("  cold at {cold_at}")),
+            Some(COLD_COLOR)
+        );
     }
 
     #[test]
@@ -353,6 +341,6 @@ mod tests {
         let color = level(900_000.0 / 967_000.0, false)
             .color()
             .expect("a level near its end has a color");
-        assert!(status[7].contains(&format!("{color}   67,000")));
+        assert_eq!(status[7].style_of("   67,000"), Some(color));
     }
 }

@@ -21,6 +21,7 @@ use crate::markdown::is_fence;
 use crate::render::markdown_lines;
 use crate::style::{ATTENTION, DONE_OR_ADDED, MARK, PLAIN, STRONG, SUBDUED};
 use crate::text::{Line, Span};
+use crate::wording::{Hint, hints};
 
 /// The key of the user's own answer, and its mark, the same on every question.
 pub const OWN_KEY: char = '>';
@@ -519,20 +520,26 @@ fn shows_in_preview(line: &str) -> bool {
     !is_fence(line)
 }
 
+/// The hint of Esc, which goes back from the user's own answer to the options.
+pub const GO_BACK: Hint = Hint::new("Esc", "goes back");
+
 /// What the label row says the keys do, after the question's header, with `pick` on `choices`
 /// options, where Enter sends the answer at once when `sends_at_once`, and else submits it. On
 /// the review, Enter sends the answers when all are ticked, and else opens the unticked ones,
 /// which the label says, so Enter never surprises.
 pub fn hint(form: Form, pick: &Pick, choices: usize, sends_at_once: bool) -> String {
     let unticked = choices - pick.ticked.len();
-    let enter = if sends_at_once { "sends" } else { "submits" };
+    let edit_unticked = format!("edits {unticked}");
+    let enter = |does| Hint::new("Enter", does);
+    let space = |does| Hint::new("Space", does);
+    let answer = enter(if sends_at_once { "sends" } else { "submits" });
     match (form, pick.cursor == Cursor::Writing) {
-        (Form::Review, _) if unticked == 0 => "Space unticks to edit, Enter sends".to_string(),
-        (Form::Review, _) => format!("Enter edits {unticked}"),
-        (Form::One, false) => format!("Enter {enter}"),
-        (Form::Several, false) => format!("Space ticks, Enter {enter}"),
-        (Form::One, true) => format!("Enter {enter}, Esc goes back"),
-        (Form::Several, true) => "Enter adds it, Esc goes back".to_string(),
+        (Form::Review, _) if unticked == 0 => hints(&[space("unticks"), enter("sends")]),
+        (Form::Review, _) => hints(&[enter(&edit_unticked)]),
+        (Form::One, false) => hints(&[answer]),
+        (Form::Several, false) => hints(&[space("ticks"), answer]),
+        (Form::One, true) => hints(&[answer, GO_BACK]),
+        (Form::Several, true) => hints(&[enter("adds"), GO_BACK]),
     }
 }
 

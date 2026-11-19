@@ -41,15 +41,16 @@ use crate::keys::{
 use crate::label::{KeyState, MainLabel, Progress, QuestionLabel};
 use crate::limits::{Level, limit_level};
 use crate::picker::{self, Cursor, Draft, Form, Move, Pick, question_name, request_name};
-use crate::render::{Output, Status, marks, user_line};
+use crate::render::{Output, Status};
 use crate::status;
 use crate::style::{
     ATTENTION, DONE_OR_ADDED, FAILED_OR_REMOVED, MARK, PLAIN, STRONG, SUBDUED, SUBDUED_ON_BAR,
     YOURS,
 };
 use crate::terminal::{Settings, run_in_terminal};
-use crate::text::{Line, Row, Span, Text};
+use crate::text::{Line, Span, Text};
 use crate::vi::{Editor, Mode};
+use crate::wording::{GROUP, Hint, PART, marks, with_hint};
 use crate::work::{Kind, Work};
 use crate::wrap;
 use crate::{Shared, lock};
@@ -1165,6 +1166,34 @@ impl InputLine {
         self.gate.label().map(|label| Span::new(label, ATTENTION))
     }
 
+    /// What the label row says on the question screen, after the request's label: a key that
+    /// waits for its second press, a warning, or what the keys do.
+    fn answering_hint(&self, view: &View) -> Line {
+        if let Some(confirmation) = self.confirmation() {
+            Line::from(confirmation)
+        } else if self.is_empty_warned {
+            let text = match view.form {
+                Form::One => with_hint("write your answer", &picker::GO_BACK),
+                _ => "Space ticks one or more".to_string(),
+            };
+            Line::from(Span::new(text, ATTENTION))
+        } else if view.is_submitted {
+            let edit = Hint::new("Enter", "edits");
+            Line::from([
+                Span::new("submitted", DONE_OR_ADDED),
+                Span::new(format!("{PART}{edit}"), SUBDUED_ON_BAR),
+            ])
+        } else {
+            let hint = picker::hint(
+                view.form,
+                &self.pick,
+                view.choices.len(),
+                view.sends_at_once,
+            );
+            Line::from(Span::new(hint, SUBDUED_ON_BAR))
+        }
+    }
+
     /// The label row: for a message, `››` with the budgets, then the activity, as AGENTS.md's
     /// rules for the label row group them. The budgets are the context's level, marked and red
     /// on a cold cache, and the levels of the plan's usage limits. The activity is the questions
@@ -1209,44 +1238,23 @@ impl InputLine {
                     (self.confirmation()).unwrap_or_else(|| Span::new(work, SUBDUED_ON_BAR));
                 let mut label = Line::from(marks())
                     .with_line(budgets)
-                    .with(Span::new(" │ ", SUBDUED_ON_BAR))
+                    .with(Span::new(GROUP, SUBDUED_ON_BAR))
                     .with_line(activity)
-                    .with(Span::new(" │ ", SUBDUED_ON_BAR))
+                    .with(Span::new(GROUP, SUBDUED_ON_BAR))
                     .with(state);
                 if shared.is_clear_waiting {
-                    label.push(Span::new(" │ ", SUBDUED_ON_BAR));
+                    label.push(Span::new(GROUP, SUBDUED_ON_BAR));
                     label.push(clear_wait(shared.work.listed().len()));
                 }
                 label
             }
             Phase::Answering(Answering { view }) => {
-                let hint = if let Some(confirmation) = self.confirmation() {
-                    Line::from(confirmation)
-                } else if self.is_empty_warned {
-                    let text = match view.form {
-                        Form::One => "write your answer, or Esc goes back",
-                        _ => "Space ticks one or more",
-                    };
-                    Line::from(Span::new(text, ATTENTION))
-                } else if view.is_submitted {
-                    Line::from([
-                        Span::new("submitted", DONE_OR_ADDED),
-                        Span::new(", Enter edits it", SUBDUED_ON_BAR),
-                    ])
-                } else {
-                    let hint = picker::hint(
-                        view.form,
-                        &self.pick,
-                        view.choices.len(),
-                        view.sends_at_once,
-                    );
-                    Line::from(Span::new(hint, SUBDUED_ON_BAR))
-                };
+                let hint = self.answering_hint(view);
                 Line::from([
                     marks(),
                     " ".into(),
                     Span::new(header(&view.label), STRONG),
-                    Span::new(" │ ", SUBDUED_ON_BAR),
+                    Span::new(GROUP, SUBDUED_ON_BAR),
                 ])
                 .with_line(hint)
             }
@@ -1264,10 +1272,10 @@ impl InputLine {
                     .collect();
                 let mut label = Line::from([
                     marks(),
-                    Span::new(format!(" {}", parts.join(" │ ")), SUBDUED_ON_BAR),
+                    Span::new(format!(" {}", parts.join(GROUP)), SUBDUED_ON_BAR),
                 ]);
                 if let Some(confirmation) = self.confirmation() {
-                    label.push(Span::new(" │ ", SUBDUED_ON_BAR));
+                    label.push(Span::new(GROUP, SUBDUED_ON_BAR));
                     label.push(confirmation);
                 }
                 label
@@ -1448,12 +1456,6 @@ pub(crate) fn cannot_read_terminal(error: &io::Error) -> String {
     format!("cannot read the terminal: {error}")
 }
 
-/// The last line of the session, on the bar, with the session's id once Claude Code told it.
-pub fn final_line(session_id: Option<&str>) -> Row {
-    let session = session_id.map_or_else(String::new, |id| format!(" │ session {id}"));
-    user_line(&format!("ended{session}"))
-}
-
 /// A level, with ? for one not known yet.
 fn show_level(level: Option<usize>) -> String {
     level.map_or_else(|| "?".to_string(), |level| level.to_string())
@@ -1581,12 +1583,13 @@ fn agents_indicator(agents: usize) -> Span {
 /// What the label row says while a clear waits for `tasks` tasks in the background to end, in
 /// the color of a warning, since it waits for the user too, and the key that ends the wait.
 fn clear_wait(tasks: usize) -> Span {
-    let (tasks, them) = match tasks {
-        1 => ("1 background task".to_string(), "it"),
-        count => (format!("{count} background tasks"), "them"),
+    let tasks = match tasks {
+        1 => "1 task".to_string(),
+        count => format!("{count} tasks"),
     };
+    let stop = Hint::new("Ctrl+K", "stops");
     Span::new(
-        format!("clear waits for {tasks}, Ctrl+K stops {them}"),
+        with_hint(&format!("clear waits for {tasks}"), &stop),
         ATTENTION,
     )
 }

@@ -22,11 +22,12 @@ use crate::protocol::{
 use crate::status::grouped;
 use crate::work::{Call, End, Resulted, Work};
 
-use crate::style::{
-    ATTENTION, DONE_OR_ADDED, FAILED_OR_REMOVED, MARK, STRONG, SUBDUED, SUBDUED_ON_BAR, Style,
-    YOURS,
-};
+use crate::style::{DONE_OR_ADDED, FAILED_OR_REMOVED, STRONG, SUBDUED, Style, YOURS};
 use crate::text::{Line, Row, Span, Text};
+use crate::wording::{
+    CallMark, Hint, Notice, NoticeMark, SessionEnd, answer_label, marks, part, parts, reply_mark,
+    session_end, user_line, with_hint,
+};
 
 /// The tools whose input carries a `description` of the call in Claude's words, which sums it up
 /// in place of its input, still whole in the full view.
@@ -90,6 +91,9 @@ pub struct Output {
     /// The lines of Claude Code's error output that wait for Claude to finish the text it
     /// writes.
     waiting_stderr: Vec<String>,
+    /// The lines of the full view after the last line of Claude Code's error output, while it
+    /// ends a block that the next line of it goes on.
+    stderr_end: Option<usize>,
 }
 
 /// What Claude does, which the marker in front of the input line shows.
@@ -169,6 +173,7 @@ impl Output {
             interruption: None,
             highlighter: Highlighter::new(),
             waiting_stderr: Vec::new(),
+            stderr_end: None,
         }
     }
 
@@ -198,18 +203,20 @@ impl Output {
     /// the full view, and only there for a subagent's own call, as its other lines. The line of
     /// a subagent's end counts its calls, which show only in the full view.
     fn push_task_end(&mut self, work: &Work, call: &Call, end: &End) {
-        let (outcome, how) = match end.status {
-            TaskStatus::Completed => ("✓", "completed"),
-            TaskStatus::Failed => ("✗", "failed"),
-            TaskStatus::Stopped => ("✗", "stopped"),
+        let (mark, how) = match end.status {
+            TaskStatus::Completed => (CallMark::Succeeded, "completed"),
+            TaskStatus::Failed => (CallMark::Failed, "failed"),
+            TaskStatus::Stopped => (CallMark::Failed, "stopped"),
         };
         let subagent = (call.task.as_ref()).and_then(|task| work.subagent(task));
-        let calls = subagent.map_or_else(String::new, |subagent| match subagent.calls {
-            1 => " · 1 call".to_string(),
-            calls => format!(" · {calls} calls"),
+        let calls = subagent.map(|subagent| match subagent.calls {
+            1 => "1 call".to_string(),
+            calls => format!("{calls} calls"),
         });
-        let what = format!("{} {}: {how}{calls}", call.tag, call.tool);
-        let line = Line::from([format!("{outcome} ").into(), Span::new(what, SUBDUED)]);
+        let mut what = vec![part(&call.subject(), how)];
+        what.extend(calls);
+        let what = parts(&what);
+        let line = mark.line(Span::new(what, SUBDUED));
         if call.tag.is_claude() {
             self.begin(Section::Tools);
             self.push_detail(line);
@@ -257,7 +264,16 @@ impl Output {
     /// Marks where the context was cleared, which ended the session with `previous_session`, so
     /// the conversation reads as a new one from there.
     pub fn show_reset(&mut self, previous_session: &str) {
-        self.show_user_line(&format!("cleared │ session {previous_session}"));
+        self.show_session_end(SessionEnd::Cleared, Some(previous_session));
+    }
+
+    /// Ends the session with `session`, when Claude Code told its id, as `end` ended it.
+    pub fn show_session_end(&mut self, end: SessionEnd, session: Option<&str>) {
+        self.end_text();
+        self.begin(Section::Notice);
+        for line in session_end(end, session) {
+            self.push_detail(line);
+        }
     }
 
     /// Marks a command the user runs, which Claude Code runs in place of Claude, so the
@@ -278,9 +294,8 @@ impl Output {
     /// Notes that Claude Code compacted the context, from `before` tokens to `after`, when known.
     pub fn show_compacted(&mut self, before: u64, after: Option<u64>) {
         let after = after.map_or_else(String::new, |after| format!(" to {}", grouped(after)));
-        self.begin(Section::Notice);
         let compacted = format!("compacted from {}{after} tokens", grouped(before));
-        self.push_detail(Line::from(Span::new(compacted, SUBDUED)));
+        self.show_notice(Notice::new(NoticeMark::Noted, compacted));
     }
 
     /// Says once for each kind that claudio skips what Claude Code sent, `name` of `part`, which
@@ -290,9 +305,9 @@ impl Output {
         if !self.unknown_kinds.insert((part, name.to_string())) {
             return;
         }
-        self.begin(Section::Notice);
-        let skipped = format!("Claude Code's {name} {part}s are not shown: Ctrl+O shows the first");
-        self.push_detail(Line::from(Span::new(skipped, ATTENTION)));
+        let skipped = format!("Claude Code's {name} {part}s are not shown");
+        let show = Hint::new("Ctrl+O", "shows the first");
+        self.show_notice(Notice::new(NoticeMark::Warning, with_hint(&skipped, &show)));
         self.write_full_view_line(&Line::from(format!("  {line}")));
     }
 
@@ -310,7 +325,10 @@ impl Output {
             (work.call(&ask.tool_use_id)).map_or_else(String::new, |call| format!("{} ", call.tag));
         let summary = summarize(&ask.tool_name, &ask.input);
         let first = summary.text.lines().next().unwrap_or_default();
-        let line = format!("{decision} {tag}{}: {first}", ask.tool_name);
+        let line = format!(
+            "{decision} {}",
+            part(&format!("{tag}{}", ask.tool_name), first)
+        );
         self.push_noisy(&Line::from(line), Some(YOURS));
         if let Some(reason) = reason {
             self.show_answer("reason", reason);
@@ -386,8 +404,7 @@ impl Output {
         self.end_text();
         self.set_status(Status::Idle);
         if let Some(exit) = exit {
-            self.begin(Section::Notice);
-            self.push_detail(Line::from(Span::new(exit, SUBDUED)));
+            self.show_notice(Notice::new(NoticeMark::Noted, exit));
         }
     }
 
@@ -423,13 +440,11 @@ impl Output {
             let subagent = work.subagent(read_field(&tool_use.input, "to"))?;
             subagent.start.clone()
         });
-        let mut line = Line::from([
-            Span::new("○", STRONG),
-            " ".into(),
+        let mut line = CallMark::Started.line(Line::from([
             Span::new(tag.to_string(), SUBDUED),
             Span::new(format!(" {}:", tool_use.name), STRONG),
             " ".into(),
-        ]);
+        ]));
         let summary = summarize(&tool_use.name, &tool_use.input);
         let is_input = target.is_none() && summary.is_input;
         if let Some(target) = target {
@@ -493,7 +508,11 @@ impl Output {
         let resulted = work.take_result(&result.tool_use_id);
         let text = result.text.as_deref().map_or("(no text)", str::trim);
         // The outcome is all the line adds to the call's line, so the rest stays in the back
-        let outcome = if result.is_error { "✗" } else { "✓" };
+        let mark = if result.is_error {
+            CallMark::Failed
+        } else {
+            CallMark::Succeeded
+        };
         let first = text.lines().next().unwrap_or("(no output)");
         let more = match text.lines().count().saturating_sub(1) {
             0 => String::new(),
@@ -504,11 +523,12 @@ impl Output {
             Resulted::Background(call, _) | Resulted::Subagent(call, _) => Some(call),
         };
         // Other lines can come between a call and its result, so the result stands on its own
-        let label = call.map_or_else(String::new, |call| format!("{} {}: ", call.tag, call.tool));
-        let line = Line::from([
-            format!("{outcome} ").into(),
-            Span::new(format!("{label}{first}{more}"), SUBDUED),
-        ]);
+        let shown = format!("{first}{more}");
+        let shown = match call {
+            Some(call) => part(&call.subject(), &shown),
+            None => shown,
+        };
+        let line = mark.line(Span::new(shown, SUBDUED));
         // Like its call, a subagent's result shows only in the full view
         if result.is_subagent() {
             self.write_full_view_line(&line);
@@ -529,8 +549,8 @@ impl Output {
             // Claude Code's note to Claude with the task's id and output file, so the line says
             // that the task runs, and the task's end shows the outcome
             Resulted::Background(call, end) => {
-                let running = format!("{} {}: running in background", call.tag, call.tool);
-                self.push_detail(Line::from(["◌ ".into(), Span::new(running, SUBDUED)]));
+                let running = part(&call.subject(), "running in background");
+                self.push_detail(CallMark::Running.line(Span::new(running, SUBDUED)));
                 for line in text.lines() {
                     self.write_full_view_line(&Line::from(format!("  {line}")));
                 }
@@ -601,11 +621,10 @@ impl Output {
         let line = match (failure, self.interruption.take()) {
             (None, _) | (Some(_), Some(Interruption::Message)) => None,
             (Some(_), Some(Interruption::Stop)) => Some("stopped".to_string()),
-            (Some(reason), None) => Some(format!("turn ended: {reason}")),
+            (Some(reason), None) => Some(part("turn ended", reason)),
         };
         if let Some(line) = line {
-            self.begin(Section::Notice);
-            self.push_detail(Line::from(Span::new(line, SUBDUED)));
+            self.show_notice(Notice::new(NoticeMark::Noted, line));
         }
         // A message that waits for its reply still waits when an older turn ends
         if self.position != Position::In(Section::Message) {
@@ -614,46 +633,40 @@ impl Output {
     }
 
     pub fn show_settings_errors(&mut self, errors: &[SettingsError]) {
-        self.begin(Section::Notice);
         for error in errors {
             let file = error.file.as_deref().unwrap_or("a settings file");
-            let skipped = format!(
-                "Claude Code skipped {file}, so none of its settings apply: {} {}",
-                error.path, error.message
-            );
-            self.push_detail(Line::from(Span::new(skipped, FAILED_OR_REMOVED)));
+            let skipped = format!("Claude Code skipped {file}, so none of its settings apply");
+            let why = format!("{} {}", error.path, error.message);
+            self.show_notice(Notice::new(NoticeMark::Error, skipped).quoting(&why));
         }
     }
 
     /// Warns that claudio runs a Claude Code other than the one it was checked against, whose
     /// changes may break what claudio assumes, like the shape of what it writes.
     pub fn show_unchecked_version(&mut self, version: &str) {
-        self.begin(Section::Notice);
         let warning = format!(
             "Claude Code {version} runs, but {} is the one checked to work",
             crate::claude_code::VERSION
         );
-        self.push_detail(Line::from(Span::new(warning, ATTENTION)));
+        self.show_notice(Notice::new(NoticeMark::Warning, warning));
     }
 
     /// Warns that a resize can leave copies of the live rows in the scrollback, since frames can
     /// only count their way back to the first of them in this terminal.
     pub fn show_inexact_redraw(&mut self) {
-        self.begin(Section::Notice);
-        self.push_detail(Line::from(Span::new(
-            "a resize in this terminal can leave copies of the label row and the box in the scrollback, which tmux 3.5 avoids",
-            ATTENTION,
-        )));
+        self.show_notice(Notice::new(
+            NoticeMark::Warning,
+            "a resize can leave copies of the label row and box in the scrollback, which tmux 3.5 avoids",
+        ));
     }
 
     pub fn show_paying_key(&mut self, key: &str) {
-        self.begin(Section::Notice);
         let warning = format!("{key} pays for this session, not the subscription");
-        self.push_detail(Line::from(Span::new(warning, ATTENTION)));
+        self.show_notice(Notice::new(NoticeMark::Warning, warning));
     }
 
     /// Shows that the hook `hook` failed with `exit_code`, or was cancelled, when
-    /// `is_cancelled`, then its error output.
+    /// `is_cancelled`, then its error output, under it.
     pub fn show_hook_failure(
         &mut self,
         hook: &str,
@@ -666,50 +679,45 @@ impl Output {
             Some(code) => format!("failed with exit code {code}"),
             None => "failed".to_string(),
         };
-        self.show_error(&format!("{hook} hook {how}"));
-        for line in stderr.lines().filter(|line| !line.trim().is_empty()) {
-            self.push_stderr(line);
-        }
+        let failed = Notice::new(NoticeMark::Error, format!("{hook} hook {how}"));
+        self.show_notice(failed.quoting(stderr));
     }
 
-    /// Shows what Claude Code tells the user at `level`: in the full view only when it is
-    /// `Info`, dim when it is a `Notice`, and else in orange, after the level's name.
-    pub fn show_notice(&mut self, text: &str, level: Level) {
-        let lines: Vec<Line> = match level {
+    /// Shows what Claude Code tells the user at `level`, under a header that says it is Claude
+    /// Code's: in the full view only when it is `Info`, as a warning when it is a `Warning`, and
+    /// else noted, since a suggestion, like `Session resumed`, needs nothing of the user.
+    pub fn show_claude_code_notice(&mut self, text: &str, level: Level) {
+        let notice = match level {
             Level::Info => {
                 for line in text.lines() {
                     self.write_full_view_line(&Line::from(line));
                 }
                 return;
             }
-            Level::Notice => text
-                .lines()
-                .map(|line| Line::from(Span::new(line, SUBDUED)))
-                .collect(),
-            Level::Suggestion | Level::Warning => {
-                let name = if level == Level::Warning {
-                    "warning"
-                } else {
-                    "suggestion"
-                };
-                text.lines()
-                    .enumerate()
-                    .map(|(index, line)| match index {
-                        0 => Line::from(Span::new(format!("{name}: {line}"), ATTENTION)),
-                        _ => Line::from(Span::new(line, ATTENTION)),
-                    })
-                    .collect()
+            Level::Notice | Level::Suggestion => {
+                Notice::new(NoticeMark::Noted, "Claude Code notes")
             }
+            Level::Warning => Notice::new(NoticeMark::Warning, "Claude Code warns"),
         };
-        self.begin(Section::Notice);
-        for line in lines {
-            self.push_detail(line);
-        }
+        self.show_notice(notice.quoting(text));
     }
 
+    /// Shows an error of claudio's, which it words itself.
     pub fn show_error(&mut self, error: &str) {
+        self.show_notice(Notice::new(NoticeMark::Error, error));
+    }
+
+    /// Shows the error of a request to the API, which Claude Code words.
+    pub fn show_api_error(&mut self, text: &str) {
+        self.show_notice(Notice::new(NoticeMark::Error, "the API request failed").quoting(text));
+    }
+
+    /// Shows `notice` in a section of its own.
+    fn show_notice(&mut self, notice: Notice) {
         self.begin(Section::Notice);
-        self.push_detail(Line::from(Span::new(error, FAILED_OR_REMOVED)));
+        for line in notice.lines() {
+            self.push_detail(line);
+        }
     }
 
     /// Shows a line of Claude Code's error output. Claude's text has nothing that names it, so
@@ -731,12 +739,14 @@ impl Output {
     /// Seen with Claude Code 2.1.322: it writes to its error output only on failure, like the
     /// tag of an API error, so each line is red, as a failure.
     fn push_stderr(&mut self, line: &str) {
-        self.begin(Section::Notice);
-        self.push_detail(Line::from([
-            Span::new("stderr │", SUBDUED),
-            " ".into(),
-            Span::new(line, FAILED_OR_REMOVED),
-        ]));
+        // A line right after the last one, with nothing written in between, goes on its block
+        if self.stderr_end == Some(self.full_view_lines) {
+            self.push_detail(Notice::more(NoticeMark::Error, line));
+        } else {
+            let output = Notice::new(NoticeMark::Error, "Claude Code's error output").quoting(line);
+            self.show_notice(output);
+        }
+        self.stderr_end = Some(self.full_view_lines);
     }
 
     /// Sets what Claude does. Once Claude stops writing, the lines of error output that waited
@@ -863,23 +873,6 @@ impl Output {
     }
 }
 
-/// A line of what the user did, like a command or a clear, on the bar, where the user's lines
-/// are, in the style of the label row's state. Only the user's lines are on the bar.
-pub fn user_line(what: &str) -> Row {
-    Line::from([marks(), Span::new(format!(" {what}"), SUBDUED_ON_BAR)]).on(YOURS)
-}
-
-/// The marks in front of a message, on a row of their own.
-pub fn marks() -> Span {
-    Span::new("››", MARK)
-}
-
-/// The marks in front of what Claude writes, on a row of their own, in the color of the user's
-/// marks, since both say who starts.
-fn reply_mark() -> Line {
-    Line::from(Span::new("‹‹", MARK))
-}
-
 /// The lines of Markdown, highlighted.
 pub fn markdown_lines(markdown: &str) -> Vec<Line> {
     let mut highlighter = Highlighter::new();
@@ -911,16 +904,6 @@ pub fn question_lines(question: &Question) -> Vec<Line> {
         }
     }
     lines
-}
-
-/// The question in front of an answer.
-pub fn answer_label(question: &str) -> Line {
-    Line::from([
-        Span::new(question, STRONG),
-        " ".into(),
-        Span::new("›", MARK),
-        " ".into(),
-    ])
 }
 
 /// What sums up a call on its line.
@@ -980,7 +963,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::protocol::Task;
-    use crate::style::{CODE, PLAIN, Style};
+    use crate::style::{CODE, PLAIN};
     use crate::work::Place;
 
     /// The start of a call's line, before its summary, like `○ #00 Read: `.
@@ -997,10 +980,6 @@ mod tests {
     /// A line of `text` after `outcome`, like a result's or a task's end.
     fn outcome_line(outcome: &str, text: &str) -> Line {
         Line::styled([(&format!("{outcome} "), PLAIN), (text, SUBDUED)])
-    }
-
-    fn styled(text: &str, style: Style) -> Line {
-        Line::from(Span::new(text, style))
     }
 
     /// The output with the work it draws, side by side as the session holds them, which takes
@@ -1084,13 +1063,28 @@ mod tests {
                 Line::from("Two.")
             ]
         );
+        let output = Notice::new(NoticeMark::Error, "Claude Code's error output").quoting("Failed");
+        assert_eq!(lines[5..], output.lines());
+    }
+
+    #[test]
+    fn lines_of_error_output_in_a_row_make_one_block() {
+        let mut output = output_after_message();
+        output.show_stderr("one");
+        output.show_stderr("two");
+        output.show_compacted(2, None);
+        output.show_stderr("three");
+        let text: Vec<String> = output.take_lines().iter().map(Line::text).collect();
         assert_eq!(
-            lines[5],
-            Line::styled([
-                ("stderr │", SUBDUED),
-                (" ", PLAIN),
-                ("Failed", FAILED_OR_REMOVED)
-            ])
+            text[1..],
+            [
+                "! Claude Code's error output",
+                "one",
+                "two",
+                "- compacted from 2 tokens",
+                "! Claude Code's error output",
+                "three"
+            ]
         );
     }
 
@@ -1115,7 +1109,7 @@ mod tests {
                 reply_mark(),
                 Line::from("Hel"),
                 Line::default(),
-                styled("Failed", FAILED_OR_REMOVED)
+                Notice::new(NoticeMark::Error, "Failed").lines()[0].clone()
             ]
         );
     }
@@ -1378,7 +1372,10 @@ mod tests {
         output.show_error(&long);
         output.show_answer("Q", &long);
         let lines = output.take_lines();
-        assert_eq!(lines[1], styled(&long, FAILED_OR_REMOVED));
+        assert_eq!(
+            lines[1],
+            Notice::new(NoticeMark::Error, long.clone()).lines()[0]
+        );
         assert!(lines[2].text().contains(&long));
     }
 
@@ -1812,7 +1809,9 @@ mod tests {
             [
                 user_line("/compact"),
                 reply_mark().into(),
-                styled("compacted from 19,812 to 6,578 tokens", SUBDUED).into()
+                Notice::new(NoticeMark::Noted, "compacted from 19,812 to 6,578 tokens").lines()[0]
+                    .clone()
+                    .into()
             ]
         );
     }
@@ -1849,25 +1848,31 @@ mod tests {
         output.show_hook_failure("Stop", Some(1), "no tmux server\n", false);
         let lines = output.take_lines();
         assert_eq!(
-            lines[1],
-            styled("Stop hook failed with exit code 1", FAILED_OR_REMOVED)
+            lines[1..],
+            Notice::new(NoticeMark::Error, "Stop hook failed with exit code 1")
+                .quoting("no tmux server\n")
+                .lines()
         );
-        let stderr = lines[2].text();
-        assert!(stderr.contains("stderr │") && stderr.contains("no tmux server"));
-        assert_eq!(lines.len(), 3);
     }
 
     #[test]
-    fn a_notice_shows_by_its_level() {
+    fn a_claude_code_notice_shows_by_its_level_under_a_header_of_claudio_s() {
         let mut output = output_after_message();
-        output.show_notice("in the full view only", Level::Info);
-        output.show_notice("quiet", Level::Notice);
-        output.show_notice("loud", Level::Warning);
+        output.show_claude_code_notice("in the full view only", Level::Info);
+        output.show_claude_code_notice("quiet", Level::Notice);
+        output.show_claude_code_notice("Session resumed", Level::Suggestion);
+        output.show_claude_code_notice("loud", Level::Warning);
         let lines = output.take_lines();
-        let text: Vec<String> = lines.iter().map(Line::text).collect();
-        assert!(!text.join("").contains("in the full view only"));
-        assert_eq!(lines[1], styled("quiet", SUBDUED));
-        assert_eq!(lines[2], styled("warning: loud", ATTENTION));
+        let notes = Notice::new(NoticeMark::Noted, "Claude Code notes");
+        let warns = Notice::new(NoticeMark::Warning, "Claude Code warns");
+        let expected = [
+            notes.quoting("quiet").lines(),
+            Notice::new(NoticeMark::Noted, "Claude Code notes")
+                .quoting("Session resumed")
+                .lines(),
+            warns.quoting("loud").lines(),
+        ];
+        assert_eq!(lines[1..], expected.concat());
     }
 
     #[test]

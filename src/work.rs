@@ -125,6 +125,13 @@ pub struct Call {
     pub task: Option<String>,
 }
 
+impl Call {
+    /// The call as the subject of a line: its tag and tool, like `#00 Bash`.
+    pub fn subject(&self) -> String {
+        format!("{} {}", self.tag, self.tool)
+    }
+}
+
 /// What a task is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind {

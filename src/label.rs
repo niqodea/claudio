@@ -11,6 +11,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::cut::{ScreenRow, cut};
 use crate::style::SUBDUED_ON_BAR;
 use crate::text::{Line, Span};
+use crate::wording::GROUP;
 
 /// The columns kept for the keys of a half-typed vi command, which most commands fit, like `d2`
 /// or `ci`. A longer one keeps its newest keys.
@@ -177,7 +178,7 @@ impl QuestionLabel {
         if self.keeps(Part::Requests) {
             // The bar sets the requests apart from the questions, when both show
             let gap = if self.keeps(Part::Questions) && progress.questions.is_some() {
-                " │ "
+                GROUP
             } else {
                 "   "
             };
@@ -187,7 +188,7 @@ impl QuestionLabel {
         }
         // A `│` sets where the keys go apart, as between the other groups
         if self.keeps(Part::KeyState) {
-            let mut part = Line::from(Span::new(" │ ", SUBDUED_ON_BAR));
+            let mut part = Line::from(Span::new(GROUP, SUBDUED_ON_BAR));
             part.append((progress.key_state.as_ref()).map_or_else(Line::default, KeyState::fill));
             row.append(fill(&part, Part::KeyState.columns()));
         }

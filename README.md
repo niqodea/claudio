@@ -53,7 +53,7 @@ claudio puts each kind of message Claude Code sends in one of three classes:
 
 - it shows the kind, when it matters to you, like Claude's text, a tool call or a compaction
 - it skips the kind on purpose, when it does not, like `tool_progress`, Claude Code's progress on a long tool call
-- it flags a kind it knows nothing of, like one a newer Claude Code adds, with a line in orange, once per session, and Ctrl+O shows what carried it
+- it flags a kind it knows nothing of, like one a newer Claude Code adds, with a `!` line in orange, once per session, and Ctrl+O shows what carried it
 
 A kind can take one class or another by what it holds, like a hook's response, shown only when the hook failed.
 `Class` in `src/protocol.rs` gives each kind its class, and each skip its reason.
@@ -140,9 +140,10 @@ Ctrl+D waits for them to end, and names them on the label row meanwhile, and Ctr
 
 Ctrl+L starts a new session, as Claude Code's `/clear` does, and keeps your text in the box, ready to be the new session's first message.
 That is why claudio clears rather than leaving it to a restart: you often decide on a fresh context with the message already written, and Ctrl+L sends it there without retyping it.
-While tasks run in the background, it waits for them to end before it clears, so their ends, and what Claude does with them, stay in the session that started them, and the label row says so, like `clear waits for 2 background tasks, Ctrl+K stops them`.
+While tasks run in the background, it waits for them to end before it clears, so their ends, and what Claude does with them, stay in the session that started them, and the label row says so, like `clear waits for 2 tasks · Ctrl+K stops`.
 Meanwhile Enter and Ctrl+L wait too, and Ctrl+K stops the tasks, after which the clear goes through.
-The conversation marks the new start with a line like `›› cleared │ session <id>`, which names the session it ended, and `claude --resume <id>` goes back to.
+The session that ended closes with `- resume with claudio --resume <id>`, which goes back to it, and a boundary, `─── cleared ───`, starts the new one.
+When claudio ends, the session closes the same way, with `─── ended ───`.
 Text you send that starts with `/` reaches Claude as written, so a `/clear` you type is a message like any other.
 
 ## Commands
@@ -339,11 +340,11 @@ Each color means one thing, and a character on the line says it too, as [Design]
 | ----- | ----- |
 | The default color | what you and Claude write |
 | Bold | headings, strong text, code, tool names, question names and the option under the cursor |
-| Dim, or grey on the bar | what stays in the background, like a call's result |
+| Dim, or grey on the bar | what stays in the background, like a call's result, whether the call succeeded or failed |
 | The bar's background | what is yours: your lines and the input box |
-| Cyan | the conversation's marks: `››`, `‹‹`, the cursor `❯` among options and the command line's `command:` |
-| Orange | what needs your attention: a warning, a key that waits for a second press, questions that wait, a cache that turns cold, a limit near its end |
-| Red | what failed or was removed: an error, Claude Code's error output, a limit reached, the lines a diff removes |
+| Cyan | the conversation's marks: `››`, `‹‹`, the rules of a boundary `─── cleared ───`, the cursor `❯` among options and the command line's `command:` |
+| Orange | what needs your attention: a warning, after `!`, a key that waits for a second press, questions that wait, a cache that turns cold, a limit near its end |
+| Red | what failed or was removed: an error that needs you, after `!`, like Claude Code's error output, a limit reached, the lines a diff removes |
 | Green | what is done or added: a submitted answer, the lines a diff adds |
 
 Code in a language shows in the colors of its grammar, which your terminal's palette sets.

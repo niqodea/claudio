@@ -33,6 +33,7 @@ mod table;
 mod terminal;
 mod text;
 mod vi;
+mod wording;
 mod work;
 mod wrap;
 
@@ -48,13 +49,14 @@ use std::time::Instant;
 
 use config::Config;
 use context::Context;
-use input_line::{InputLine, final_line};
+use input_line::InputLine;
 use keys::{Phase, Writing};
 use limits::Limits;
 use protocol::{Event, read_events, repeats_a_message};
 use render::Output;
 use session::{Conversation, Ending, Input};
 use terminal::QuietTerminal;
+use wording::SessionEnd;
 use work::Work;
 
 /// What the threads share, behind one lock, so that no lock waits on another.
@@ -125,7 +127,7 @@ impl Shared {
             Event::Unknown { part, name, line } => {
                 self.output.show_unknown(part, &name, &line);
             }
-            Event::ApiError(text) => self.output.show_error(&text),
+            Event::ApiError(text) => self.output.show_api_error(&text),
             Event::HookFailed {
                 hook,
                 exit_code,
@@ -134,7 +136,7 @@ impl Shared {
             } => self
                 .output
                 .show_hook_failure(&hook, exit_code, &stderr, is_cancelled),
-            Event::Notice { text, level } => self.output.show_notice(&text, level),
+            Event::Notice { text, level } => self.output.show_claude_code_notice(&text, level),
             Event::ToolUse(tool_use) => self.output.show_tool_use(&mut self.work, &tool_use),
             Event::ToolResult(result) => {
                 self.output.show_tool_result(&mut self.work, &result);
@@ -368,6 +370,7 @@ fn end(
         .map_err(|error| format!("cannot wait for claude: {error}"))?;
     join(readers);
     let shared = &mut lock(shared);
+    let session = shared.session_id.clone();
     let output = &mut shared.output;
     let code = match result {
         Ok(()) => exit_code(status),
@@ -377,9 +380,9 @@ fn end(
         }
     };
     output.show_end(describe_exit(status).as_deref());
+    output.show_session_end(SessionEnd::Ended, session.as_deref());
     // The text ends with a line break, since the end ended every line
     print!("{}", output.take_text().to_terminal("\n"));
-    println!("{}", final_line(shared.session_id.as_deref()).to_terminal());
     Ok(code)
 }
 

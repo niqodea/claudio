@@ -14,6 +14,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::keys::{Field, Mark, Tone};
 use crate::style::Style;
 use crate::text::{Line, Row, Span};
+use crate::wording::{Hint, with_hint};
 
 /// A view that shows whole what a cut hides, which the cut's sign names.
 #[derive(Clone, Copy)]
@@ -65,7 +66,8 @@ impl ScreenRow {
 /// The row that counts `count` lines a cut hides of a text, which `whole` shows whole.
 pub fn more_lines(count: usize, whole: Whole) -> String {
     let lines = if count == 1 { "line" } else { "lines" };
-    format!("… {count} more {lines} · {} shows it whole", whole.key())
+    let show = Hint::new(whole.key(), "shows it whole");
+    with_hint(&format!("… {count} more {lines}"), &show)
 }
 
 /// The row that counts `count` fields of a call a cut hides, which `whole` shows whole.
@@ -75,13 +77,16 @@ pub fn more_fields(count: usize, whole: Whole) -> String {
     } else {
         ("fields", "them")
     };
-    format!("… {count} more {fields} · {} shows {them}", whole.key())
+    let does = format!("shows {them}");
+    let show = Hint::new(whole.key(), &does);
+    with_hint(&format!("… {count} more {fields}"), &show)
 }
 
 /// The row that swallows parts that are not all a call's fields, like a question's text, its
 /// preview or the title, which it names as the request, which `whole` shows whole.
 pub fn the_request(whole: Whole) -> String {
-    format!("… {} shows the request", whole.key())
+    let show = Hint::new(whole.key(), "shows the request");
+    format!("… {show}")
 }
 
 /// `line` cut at its end to take at most `columns` columns on screen, with `…` where it is cut.

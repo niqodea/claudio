@@ -45,6 +45,7 @@ fn main() {
         sends_states: env::var_os("CLAUDE_CODE_SDK_READS_SESSION_STATE").is_some(),
         on_interrupt: Vec::new(),
         on_background: Vec::new(),
+        on_stop: Vec::new(),
         asks_waiting: 0,
     };
     for line in io::stdin().lock().lines().map_while(Result::ok) {
@@ -66,6 +67,8 @@ struct Fake {
     on_interrupt: Vec<String>,
     /// The lines of a turn that waits for a move of its call to the background, which ends it.
     on_background: Vec<String>,
+    /// The lines of the end of a task that runs in the background until it is stopped.
+    on_stop: Vec<String>,
     /// How many requests of the turn that asks wait for their answers.
     asks_waiting: usize,
 }
@@ -84,6 +87,13 @@ impl Fake {
                 }
                 self.end_turn();
                 return true;
+            }
+            // A task that ended, or that never ran, stops all the same
+            Some("stop_task") => {
+                for line in std::mem::take(&mut self.on_stop) {
+                    send(&line);
+                }
+                respond(message, &json!({}));
             }
             Some("background_tasks") if !self.on_background.is_empty() => {
                 let lines = std::mem::take(&mut self.on_background);
@@ -151,7 +161,10 @@ impl Fake {
                 return self.send_task(&contract::background_task("failed"), 4);
             }
             contract::LONG_BACKGROUND_TASK_MESSAGE => {
-                return self.send_turn(&contract::stopped_background_task()[..4]);
+                let lines = contract::stopped_background_task();
+                // The task's end, without the call of TaskStop around it
+                self.on_stop = lines[5..7].to_vec();
+                return self.send_turn(&lines[..4]);
             }
             contract::REPLY_OK_MESSAGE => return self.send_turn(&[text_line("ok")]),
             LONG_LINE_MESSAGE => return self.send_long_line(),
@@ -165,6 +178,7 @@ impl Fake {
                 return self.wait_for_interrupt(&contract::stopped_call());
             }
             text if text.starts_with("Stop ") && text.ends_with(" with TaskStop") => {
+                self.on_stop.clear();
                 return self.send_turn(&contract::stopped_background_task()[4..]);
             }
             _ => {}

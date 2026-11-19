@@ -191,6 +191,9 @@ pub struct View {
 pub enum SessionKey {
     /// Ctrl+C: stops Claude's turn, refusing what Claude asks.
     Stop,
+    /// Ctrl+K: stops everything that runs: Claude's turn, as `Stop` does, and every task in the
+    /// background, as `k` kills a process in htop and Ctrl+K a pod in k9s.
+    Kill,
     /// Ctrl+D: ends the session, refusing what Claude asks.
     End,
     /// Ctrl+L: clears the context, refusing what Claude asks and stopping Claude's turn, and
@@ -223,6 +226,7 @@ impl SessionKey {
         }
         match key.code {
             KeyCode::Char('c') => Some(SessionKey::Stop),
+            KeyCode::Char('k') => Some(SessionKey::Kill),
             KeyCode::Char('d') => Some(SessionKey::End),
             KeyCode::Char('l') => Some(SessionKey::Clear),
             KeyCode::Char('e') => Some(SessionKey::Edit),
@@ -257,6 +261,8 @@ pub struct Stakes<'a> {
     pub held: Held,
     /// Whether Claude works on a turn.
     pub is_working: bool,
+    /// The ids of the tasks that run in the background.
+    pub background: &'a [String],
 }
 
 /// What a key does to the session, decided once, from the state the key is judged against. It
@@ -287,6 +293,12 @@ pub enum OnMessage {
     Run(Sending),
     /// Stops Claude's turn, with one press when it refuses no question.
     Stop(TurnStop),
+    /// Stops everything that runs: the turn that runs, if any, as `stop` says, and the tasks
+    /// that run in the background, by their ids, never none, since with none it is a `Stop`.
+    Kill {
+        stop: Option<TurnStop>,
+        tasks: Vec<String>,
+    },
     /// Clears the context, which holds something, after stopping the turn that runs, if any.
     Clear(Option<TurnStop>),
     /// Ends the session's input.
@@ -346,6 +358,22 @@ impl Effect for OnMessage {
                 Some(format!("refuses {}", questions(*count)))
             }
             OnMessage::Stop(TurnStop::Interrupt) => None,
+            // A task that ends in the background leaves its work undone, which no message brings
+            // back the way it brings back a turn
+            OnMessage::Kill { stop, tasks } => {
+                let stop = match stop {
+                    Some(TurnStop::Refuse(count)) => {
+                        format!("refuses {} and stops ", questions(*count))
+                    }
+                    Some(TurnStop::Interrupt) => "stops claude and ".to_string(),
+                    None => "stops ".to_string(),
+                };
+                let tasks = match tasks.len() {
+                    1 => "1 background task".to_string(),
+                    count => format!("{count} background tasks"),
+                };
+                Some(format!("{stop}{tasks}"))
+            }
             // The session goes on in a new one, but the clear loses the cache, and what the turn
             // that runs would have done
             OnMessage::Clear(stop) => {
@@ -428,6 +456,13 @@ impl Reading for Writing {
         });
         match action {
             Action::Session(SessionKey::Stop) => turn_stop.map(OnMessage::Stop),
+            Action::Session(SessionKey::Kill) if stakes.background.is_empty() => {
+                turn_stop.map(OnMessage::Stop)
+            }
+            Action::Session(SessionKey::Kill) => Some(OnMessage::Kill {
+                stop: turn_stop,
+                tasks: stakes.background.to_vec(),
+            }),
             Action::Session(SessionKey::End) => Some(OnMessage::End),
             // A context that holds nothing yet has nothing to clear
             Action::Session(SessionKey::Clear) => {
@@ -466,8 +501,11 @@ impl Reading for Answering {
                 refusal: self.view.refusal.clone(),
             }),
             Action::Session(SessionKey::End) => Some(OnQuestion::End),
+            // The question view shows one request, which Ctrl+C refuses, and the message's line
+            // shows the rest of what runs, which Ctrl+K stops there
             Action::Session(
-                SessionKey::Clear
+                SessionKey::Kill
+                | SessionKey::Clear
                 | SessionKey::Edit
                 | SessionKey::ShowFullView
                 | SessionKey::ShowStatus
@@ -492,10 +530,11 @@ impl Reading for Ending {
         Phase::Ending(self.clone())
     }
 
-    /// Only Ctrl+C acts.
+    /// Only Ctrl+C and Ctrl+K act, both stopping everything, since stopping the turn alone would
+    /// leave Claude Code waiting on its background tasks still.
     fn effect(&self, action: Action, _: Stakes) -> Option<OnEnding> {
         match action {
-            Action::Session(SessionKey::Stop) => Some(OnEnding::StopClaudeCode),
+            Action::Session(SessionKey::Stop | SessionKey::Kill) => Some(OnEnding::StopClaudeCode),
             Action::Session(
                 SessionKey::End
                 | SessionKey::Clear
@@ -653,7 +692,9 @@ pub enum Action {
 /// as the end of input only on an empty line
 pub fn action(phase: &Phase, key: &KeyEvent, input: Input) -> Action {
     match (phase, SessionKey::of(key)) {
-        (Phase::Ending(_), Some(SessionKey::Stop)) => Action::Session(SessionKey::Stop),
+        (Phase::Ending(_), Some(session_key @ (SessionKey::Stop | SessionKey::Kill))) => {
+            Action::Session(session_key)
+        }
         (Phase::Ending(_), _)
         | (Phase::Answering(_), Some(SessionKey::Clear))
         | (Phase::Writing(Writing { waiting: 0 }), Some(SessionKey::Questions))
@@ -834,6 +875,7 @@ mod tests {
         text: "hi",
         held: Held::Warm,
         is_working: false,
+        background: &[],
     };
 
     const COLD: Stakes = Stakes {
@@ -925,6 +967,57 @@ mod tests {
                 ),
                 (writing(0), empty, None),
             ],
+        );
+    }
+
+    #[test]
+    fn a_kill_names_the_turn_and_the_background_tasks_it_stops() {
+        let tasks = ["a".to_string(), "b".to_string()];
+        let background = Stakes {
+            background: &tasks,
+            ..WARM
+        };
+        let working = Stakes {
+            is_working: true,
+            ..background
+        };
+        let alone = Stakes {
+            is_working: true,
+            ..WARM
+        };
+        assert_losses(
+            Action::Session(SessionKey::Kill),
+            vec![
+                (writing(0), background, Some("stops 2 background tasks")),
+                (
+                    writing(0),
+                    working,
+                    Some("stops claude and 2 background tasks"),
+                ),
+                (
+                    writing(2),
+                    working,
+                    Some("refuses 2 questions and stops 2 background tasks"),
+                ),
+                // With nothing in the background, it stops the turn as Ctrl+C does
+                (writing(0), alone, None),
+                (writing(2), alone, Some("refuses 2 questions")),
+            ],
+        );
+        assert_eq!(
+            Writing { waiting: 0 }.effect(Action::Session(SessionKey::Kill), background),
+            Some(OnMessage::Kill {
+                stop: None,
+                tasks: tasks.to_vec()
+            })
+        );
+        assert_eq!(
+            Writing { waiting: 0 }.effect(Action::Session(SessionKey::Kill), WARM),
+            None
+        );
+        assert_eq!(
+            action(&Phase::Ending(Ending), &control('k'), input(true)),
+            Action::Session(SessionKey::Kill)
         );
     }
 

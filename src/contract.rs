@@ -42,7 +42,7 @@ pub struct Check {
     pub run: fn(&Path) -> Result<(), String>,
 }
 
-pub const CHECKS: [Check; 16] = [
+pub const CHECKS: [Check; 17] = [
     Check {
         name: "session state comes with its variable",
         is_paid: false,
@@ -102,6 +102,11 @@ pub const CHECKS: [Check; 16] = [
         name: "a stopped call gets its result",
         is_paid: false,
         run: a_stopped_call_gets_its_result,
+    },
+    Check {
+        name: "a stop of a task that ended succeeds",
+        is_paid: false,
+        run: a_stop_of_a_task_that_ended_succeeds,
     },
     Check {
         name: "a rate limit event has every window",
@@ -783,6 +788,34 @@ pub(crate) fn a_stopped_call_gets_its_result(program: &Path) -> Result<(), Strin
         Ok(lines)
     })?;
     compare(&["tool use", "tool result"], &lines, &stopped_call())
+}
+
+/// Seen with Claude Code 2.1.322: `stop_task` succeeds for a task that ended already, as for one
+/// that runs, so a stop sent as the task ends never fails.
+pub(crate) fn a_stop_of_a_task_that_ended_succeeds(program: &Path) -> Result<(), String> {
+    let lines = on_fake(program, Duration::ZERO, |run| {
+        run.send_message(BACKGROUND_TASK_MESSAGE)?;
+        let lines = run.read_until(FREE_TIMEOUT, is_no_background_task)?;
+        let task_id = (lines.iter())
+            .find(|line| line["subtype"] == "task_started")
+            .map_or("", |line| line["task_id"].as_str().unwrap_or(""));
+        run.send(&protocol::Command::StopTask {
+            request_id: "claudio-check-stop".to_string(),
+            task_id,
+        })?;
+        run.read_until(FREE_TIMEOUT, |line| {
+            line["type"] == "control_response"
+                && line["response"]["request_id"] == "claudio-check-stop"
+        })
+    })?;
+    let reply = (lines.iter().rev())
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|line| line["response"]["request_id"] == "claudio-check-stop")
+        .map(|line| line["response"].clone());
+    match reply {
+        Some(reply) if reply["subtype"] == "success" => Ok(()),
+        reply => Err(format!("the stop got {reply:?}")),
+    }
 }
 
 /// The kinds of event that the checks of tasks compare.

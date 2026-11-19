@@ -149,6 +149,18 @@ impl<'a> Conversation<'a> {
                 self.send(&Command::Run { command })?;
             }
             OnMessage::Stop(stop) => self.stop_turn(*stop, questions)?,
+            OnMessage::Kill { stop, tasks } => {
+                if let Some(stop) = stop {
+                    self.stop_turn(*stop, questions)?;
+                }
+                for task_id in tasks {
+                    let request_id = self.next_request_id();
+                    self.send(&Command::StopTask {
+                        request_id,
+                        task_id,
+                    })?;
+                }
+            }
             // The conversation marks the clear once Claude Code tells it
             OnMessage::Clear(stop) => {
                 if let Some(stop) = stop {

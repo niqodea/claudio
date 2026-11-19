@@ -108,6 +108,7 @@ Keys come in two kinds.
 | Key    | Action                                                   |
 | ------ | -------------------------------------------------------- |
 | Ctrl+C | stops Claude's turn, or refuses what Claude asks         |
+| Ctrl+K | stops everything that runs, in the background too        |
 | Ctrl+D | ends the session, when the input is empty                |
 | Ctrl+L | clears the context with a new session, keeping your text |
 | Ctrl+E | opens your text in `$EDITOR`, or vi when it is unset     |
@@ -125,6 +126,7 @@ These keys are:
 - Ctrl+D
 - Ctrl+L, once the session had a call, which also refuses the questions that wait, or else stops Claude's turn
 - Ctrl+C on questions, and while the session ends, where it stops Claude's background tasks too
+- Ctrl+K, while tasks run in the background
 - Enter on a message or a command while questions wait, which refuses them, or when the cache may be cold, where the call writes the whole context to the cache again, at a price above that of new input: once its time to live passed, and while its age is unknown, as in a resumed session, or before Claude Code tells at startup whether the session is new
 - a key that answers a question and leaves out your own text
 
@@ -133,7 +135,7 @@ Any other key, or a paste, cancels the wait, however long it lasted, and a loss 
 
 `B` on the label row counts the tasks Claude runs in the background, like a shell, up to 9 and then `+`.
 `A` after it counts the subagents that run, in the foreground or in the background, the same way.
-Ctrl+C stops Claude's turn and leaves what runs in the background running.
+Ctrl+C stops Claude's turn and leaves what runs in the background running, and Ctrl+K stops it all: the turn and every task in the background, while the session goes on.
 Ctrl+D waits for them to end, and names them on the label row meanwhile, and Ctrl+C there stops them.
 
 Ctrl+L starts a new session, as Claude Code's `/clear` does, and keeps your text in the box, ready to be the new session's first message.

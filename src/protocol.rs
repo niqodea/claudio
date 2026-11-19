@@ -363,6 +363,16 @@ pub enum Command<'a> {
         request_id: String,
         message_id: &'a str,
     },
+    /// Stops the task with this id, which runs in the background, which then ends as
+    /// `stopped`, as `SDKControlStopTaskRequest` in `sdk.d.ts` types it:
+    /// <https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.325/sdk.d.ts>.
+    ///
+    /// Undocumented: [`crate::contract::a_stop_of_a_task_that_ended_succeeds`], for a task that
+    /// ends before the stop reaches Claude Code
+    StopTask {
+        request_id: String,
+        task_id: &'a str,
+    },
     /// Starts the session. Claude Code answers with the account that pays for it. It declares
     /// that the user stops each background task on its own, `perTaskStopAffordance`, so an
     /// interrupt stops the turn alone, and the background tasks go on until they end or are
@@ -437,48 +447,46 @@ impl Command<'_> {
                     "response": {"subtype": "success", "request_id": ask.request_id, "response": result},
                 })
             }
-            Command::Interrupt { request_id } => json!({
-                "type": "control_request",
-                "request_id": request_id,
-                "request": {"subtype": "interrupt"},
-            }),
+            Command::Interrupt { request_id } => {
+                control_request(request_id, &json!({"subtype": "interrupt"}))
+            }
             Command::Background {
                 request_id,
                 tool_use_id,
-            } => json!({
-                "type": "control_request",
-                "request_id": request_id,
-                "request": {"subtype": "background_tasks", "tool_use_id": tool_use_id},
-            }),
+            } => control_request(
+                request_id,
+                &json!({"subtype": "background_tasks", "tool_use_id": tool_use_id}),
+            ),
             Command::SendNow {
                 request_id,
                 message_id,
-            } => json!({
-                "type": "control_request",
-                "request_id": request_id,
-                "request": {"subtype": "interrupt", "send_now": true, "message_uuid": message_id},
-            }),
-            Command::Initialize => json!({
-                "type": "control_request",
-                "request_id": INITIALIZE_REQUEST_ID,
-                "request": {"subtype": "initialize", "perTaskStopAffordance": true},
-            }),
-            Command::GetSettings => json!({
-                "type": "control_request",
-                "request_id": SETTINGS_REQUEST_ID,
-                "request": {"subtype": "get_settings"},
-            }),
-            Command::GetContext => json!({
-                "type": "control_request",
-                "request_id": CONTEXT_REQUEST_ID,
-                "request": {"subtype": "get_context_usage", "detail": "summary"},
-            }),
+            } => control_request(
+                request_id,
+                &json!({"subtype": "interrupt", "send_now": true, "message_uuid": message_id}),
+            ),
+            Command::StopTask {
+                request_id,
+                task_id,
+            } => control_request(
+                request_id,
+                &json!({"subtype": "stop_task", "task_id": task_id}),
+            ),
+            Command::Initialize => control_request(
+                INITIALIZE_REQUEST_ID,
+                &json!({"subtype": "initialize", "perTaskStopAffordance": true}),
+            ),
+            Command::GetSettings => {
+                control_request(SETTINGS_REQUEST_ID, &json!({"subtype": "get_settings"}))
+            }
+            Command::GetContext => control_request(
+                CONTEXT_REQUEST_ID,
+                &json!({"subtype": "get_context_usage", "detail": "summary"}),
+            ),
             // Without the scan of the week's transcripts, which tells nothing of the limits
-            Command::GetUsage => json!({
-                "type": "control_request",
-                "request_id": USAGE_REQUEST_ID,
-                "request": {"subtype": "get_usage", "skip_behaviors": true},
-            }),
+            Command::GetUsage => control_request(
+                USAGE_REQUEST_ID,
+                &json!({"subtype": "get_usage", "skip_behaviors": true}),
+            ),
             Command::Refuse {
                 request_id,
                 subtype,
@@ -843,6 +851,11 @@ fn read_limits(info: RateLimitInfo) -> Event {
 }
 
 /// The events in the response to one of the requests sent before the first message.
+/// A request of claudio's to Claude Code, `request`, whose reply carries `request_id` back.
+fn control_request(request_id: &str, request: &Value) -> Value {
+    json!({"type": "control_request", "request_id": request_id, "request": request})
+}
+
 fn read_response(request_id: &str, response: Option<Value>) -> Result<Vec<Event>, String> {
     match request_id {
         INITIALIZE_REQUEST_ID => read_initialize(response),
@@ -852,8 +865,8 @@ fn read_response(request_id: &str, response: Option<Value>) -> Result<Vec<Event>
                 .unwrap_or_else(|error| vec![Event::Incompatible(error)]))
         }
         USAGE_REQUEST_ID => read_plan_usage(response),
-        // The other requests sent are interrupts and moves to the background, whose success
-        // needs no word
+        // The other requests sent are interrupts, moves to the background and stops of tasks,
+        // whose success needs no word
         _ => Ok(vec![]),
     }
 }

@@ -419,7 +419,8 @@ impl InputLine {
         action: Action,
     ) -> Result<Option<Outcome<(), R::Effect>>, String> {
         let text = self.sent_text();
-        let effect = reading.effect(action, self.stakes(&text));
+        let background = self.background();
+        let effect = reading.effect(action, self.stakes(&text, &background));
         self.pass(key, action, effect)
     }
 
@@ -486,6 +487,7 @@ impl InputLine {
             // box, does nothing
             Action::Session(
                 SessionKey::Stop
+                | SessionKey::Kill
                 | SessionKey::End
                 | SessionKey::Clear
                 | SessionKey::Down
@@ -543,13 +545,21 @@ impl InputLine {
     }
 
     /// What the session holds that a press can lose, with `text` that Enter sends.
-    fn stakes<'a>(&self, text: &'a str) -> keys::Stakes<'a> {
+    fn stakes<'a>(&self, text: &'a str, background: &'a [String]) -> keys::Stakes<'a> {
         let shared = lock(&self.shared);
         keys::Stakes {
             text,
             held: shared.context.held(Instant::now()),
             is_working: shared.output.status() != Status::Idle,
+            background,
         }
+    }
+
+    /// The ids of the tasks that run in the background, as Claude Code last listed them.
+    fn background(&self) -> Vec<String> {
+        let shared = lock(&self.shared);
+        let tasks = shared.output.background_tasks();
+        tasks.iter().map(|task| task.id.clone()).collect()
     }
 
     /// Ends the wait of a key whose loss went away, so the label row never asks for a press
@@ -557,7 +567,8 @@ impl InputLine {
     fn drop_lost_confirmation(&mut self) {
         let phase = lock(&self.shared).phase.clone();
         let text = self.sent_text();
-        let stakes = self.stakes(&text);
+        let background = self.background();
+        let stakes = self.stakes(&text, &background);
         self.gate.drop_lost(&phase, stakes);
     }
 

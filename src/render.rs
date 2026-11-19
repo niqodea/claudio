@@ -20,7 +20,7 @@ use crate::protocol::{
     Ask, AskKind, Level, Question, SettingsError, State, TaskStatus, ToolResult, ToolUse,
 };
 use crate::status::grouped;
-use crate::work::{Call, End, Resulted, Tag, Work};
+use crate::work::{Call, End, Resulted, Work};
 
 use crate::style::{
     ATTENTION, DONE_OR_ADDED, FAILED_OR_REMOVED, MARK, STRONG, SUBDUED, SUBDUED_ON_BAR, Style,
@@ -210,11 +210,11 @@ impl Output {
         });
         let what = format!("{} {}: {how}{calls}", call.tag, call.tool);
         let line = Line::from([format!("{outcome} ").into(), Span::new(what, SUBDUED)]);
-        if matches!(call.tag, Tag::Subagent(..)) {
-            self.write_full_view_line(&line);
-        } else {
+        if call.tag.is_claude() {
             self.begin(Section::Tools);
             self.push_detail(line);
+        } else {
+            self.write_full_view_line(&line);
         }
         for line in end.summary.lines() {
             self.write_full_view_line(&Line::from(format!("  {line}")));
@@ -421,7 +421,7 @@ impl Output {
         // call that first started the subagent
         let target = (work.task_tag(read_field(&tool_use.input, "task_id"))).or_else(|| {
             let subagent = work.subagent(read_field(&tool_use.input, "to"))?;
-            subagent.start.map(Tag::Claude)
+            subagent.start.clone()
         });
         let mut line = Line::from([
             Span::new("○", STRONG),

@@ -269,7 +269,7 @@ Each tool call's line starts with its tag, like `#0a`, which its result line rep
 A subagent shows as the call of Claude's that starts it, named by that call's tag, and a line as it ends, which counts its calls, like `✓ #0a Agent: completed · 12 calls`, or `✗` with `failed` or `stopped`.
 The call names the subagent's type too when it is not the default `general-purpose`, like `○ #0a Agent: code-reviewer · Review the diff`, since such a subagent runs with a prompt and tools of its own.
 Whether a subagent runs in the foreground is Claude Code's choice: the checks saw claudio's Claude Code keep one there when Claude asks for it, while Claude Code's interactive mode sends every subagent to the background.
-Its calls and their results show only in the full view, tagged like `#0a#03`, since what it did shows in what it reports back to Claude, as in Claude Code, so a search there for `#0a` finds all it did.
+Its calls and their results show only in the full view, tagged like `#0a#03`, and those of a subagent it starts in turn like `#0a#03#00`, at any depth, since what it did shows in what it reports back to Claude, as in Claude Code, so a search there for `#0a` finds all it did.
 Its text stays out, as Claude Code leaves it out unless asked with `--forward-subagent-text`.
 A subagent that Claude resumes, with SendMessage, keeps its tag: the call names it, like `○ #0f SendMessage: #0a`, and the line of the resumed run's end is that call's, like `✓ #0f SendMessage: completed · 3 calls`.
 claudio knows a subagent by its id alone, which Claude Code puts on all it tells of the subagent, and shows it by its tag everywhere, so a line never names the wrong one.

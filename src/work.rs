@@ -38,29 +38,53 @@ use std::fmt::{self, Display, Formatter};
 
 use crate::protocol::{TaskStatus, ToolUse};
 
-/// What names a call and ties the result's line to the call's line: the call's count among
-/// Claude's calls, like `#0a`, or, for a subagent's call, which shows only in the full view,
-/// the tag of the call that started the subagent, then the call's count among the subagent's,
-/// like `#0a#03`, so a search for `#0a` finds the subagent's calls too. A tag is one word, which
-/// a search finds whole, of two hexadecimal digits each, which keep the columns of a line in
-/// place. Counts wrap from ff to 00, on the assumption that a call's result arrives before 255
-/// more calls of its agent start. A call that waits longer shares its tag with a newer one.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Tag {
-    Claude(u8),
-    /// A subagent's call, after the count of the call that started the subagent, unknown for a
-    /// call that comes before the subagent's task. Claude Code tells the task first, as the
-    /// checks of subagents saw, and a call that came before would show `#??`.
-    Subagent(Option<u8>, u8),
+/// What names a call and ties the result's line to the call's line: the counts of the calls
+/// that lead to it, from Claude's own down, each among the calls of its agent. Claude's call is
+/// like `#0a`, a call of the subagent it started like `#0a#03`, and one of a subagent that
+/// subagent started like `#0a#03#00`, at any depth, so a search for a tag finds every call under
+/// it too. A tag is one word, which a search finds whole, of two hexadecimal digits a count,
+/// which keep the columns of a line in place. Counts wrap from ff to 00, on the assumption that
+/// a call's result arrives before 255 more calls of its agent start. A call that waits longer
+/// shares its tag with a newer one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tag(
+    /// The counts, of which the first is unknown, `??`, for a subagent's call that comes before
+    /// the subagent's task, which names the call that started it. That never happens in
+    /// practice: Claude Code 2.1.322 tells the task first, as
+    /// [`crate::contract::a_subagent_is_told_from_start_to_end`] checks. The SDK's types promise
+    /// no order, though, so a call can come first, and its tag then says what is unknown rather
+    /// than guess it.
+    Vec<Option<u8>>,
+);
+
+impl Tag {
+    /// The tag of Claude's own call of count `count`.
+    pub fn claude(count: u8) -> Self {
+        Tag(vec![Some(count)])
+    }
+
+    /// The tag of the call of count `count` of a subagent, which the call tagged `start` started.
+    fn under(start: Option<&Tag>, count: u8) -> Self {
+        let mut counts = start.map_or_else(|| vec![None], |start| start.0.clone());
+        counts.push(Some(count));
+        Tag(counts)
+    }
+
+    /// Whether Claude made the call itself, rather than one of its subagents.
+    pub fn is_claude(&self) -> bool {
+        self.0.len() == 1
+    }
 }
 
 impl Display for Tag {
     fn fmt(&self, formatter: &mut Formatter) -> fmt::Result {
-        match self {
-            Tag::Claude(call) => write!(formatter, "#{call:02x}"),
-            Tag::Subagent(Some(start), call) => write!(formatter, "#{start:02x}#{call:02x}"),
-            Tag::Subagent(None, call) => write!(formatter, "#??#{call:02x}"),
+        for count in &self.0 {
+            match count {
+                Some(count) => write!(formatter, "#{count:02x}")?,
+                None => formatter.write_str("#??")?,
+            }
         }
+        Ok(())
     }
 }
 
@@ -150,8 +174,8 @@ enum Origin {
 /// each run.
 #[derive(Default)]
 pub struct Subagent {
-    /// The count of the `Agent` call that first started it.
-    pub start: Option<u8>,
+    /// The tag of the `Agent` call that first started it, at whatever depth.
+    pub start: Option<Tag>,
     /// What the subagent does, as its first start describes it.
     description: Option<String>,
     /// The count of its next call in its run.
@@ -207,16 +231,16 @@ impl Work {
             let call = subagent.next_call;
             subagent.next_call = call.wrapping_add(1);
             subagent.calls += 1;
-            Tag::Subagent(subagent.start, call)
+            Tag::under(subagent.start.as_ref(), call)
         } else {
             let call = self.next_call;
             self.next_call = call.wrapping_add(1);
-            Tag::Claude(call)
+            Tag::claude(call)
         };
         let call = Call {
             id: tool_use.id.clone(),
             tool: tool_use.name.clone(),
-            tag,
+            tag: tag.clone(),
             line: 0,
             owner: tool_use.subagent.clone(),
             task: None,
@@ -252,12 +276,9 @@ impl Work {
             let subagent = (self.subagents)
                 .entry(SubagentId::new(id.clone()))
                 .or_default();
-            let start = call.as_ref().and_then(|call| match call.tag {
-                Tag::Claude(count) => Some(count),
-                Tag::Subagent(..) => None,
-            });
+            let start = call.as_ref().map(|call| call.tag.clone());
             *subagent = Subagent {
-                start: subagent.start.or(start),
+                start: subagent.start.take().or(start),
                 description: (subagent.description.take()).or_else(|| Some(description.into())),
                 ..Subagent::default()
             };
@@ -376,7 +397,7 @@ impl Work {
                 Origin::Waiting(call) => self.calls.get(call),
                 Origin::Answered(_) | Origin::Unseen => None,
             })
-            .filter(|call| matches!(call.tag, Tag::Claude(_)))
+            .filter(|call| call.tag.is_claude())
             .map(|call| call.id.clone())
             .collect()
     }
@@ -407,8 +428,8 @@ impl Work {
     /// `TaskStop`'s, names it by.
     pub fn task_tag(&self, id: &str) -> Option<Tag> {
         match &self.tasks.get(id)?.origin {
-            Origin::Waiting(call) => Some(self.calls.get(call)?.tag),
-            Origin::Answered(call) => Some(call.tag),
+            Origin::Waiting(call) => Some(self.calls.get(call)?.tag.clone()),
+            Origin::Answered(call) => Some(call.tag.clone()),
             Origin::Unseen => None,
         }
     }
@@ -422,8 +443,7 @@ impl Work {
     /// see.
     pub fn name_subagent(&self, id: &SubagentId) -> String {
         let subagent = self.subagents.get(id);
-        let tag = (subagent.and_then(|subagent| subagent.start))
-            .map(|start| Tag::Claude(start).to_string());
+        let tag = (subagent.and_then(|subagent| subagent.start.as_ref())).map(Tag::to_string);
         let description = subagent.and_then(|subagent| subagent.description.clone());
         let parts: Vec<String> = [tag, description].into_iter().flatten().collect();
         if parts.is_empty() {
@@ -499,12 +519,50 @@ mod tests {
         work.start_session();
         assert!(work.subagent("ended").is_none());
         assert!(work.subagent("running").is_some());
-        assert_eq!(work.task_tag("running"), Some(Tag::Claude(1)));
+        assert_eq!(work.task_tag("running"), Some(Tag::claude(1)));
         // Nothing runs once the subagent ends, and the count goes on
         work.end_task("running", end());
         work.start_session();
         assert!(work.subagent("running").is_none());
-        assert_eq!(work.add_call(&tool_use("c2", "Bash", None)), Tag::Claude(2));
+        assert_eq!(work.add_call(&tool_use("c2", "Bash", None)), Tag::claude(2));
+    }
+
+    #[test]
+    fn a_call_s_tag_leads_down_from_claude_s_call_at_any_depth() {
+        let mut work = Work::default();
+        let tags: Vec<String> = [
+            ("c0", "Agent", None, Some("a")),
+            ("c1", "Agent", Some("a"), Some("b")),
+            ("c2", "Agent", Some("b"), Some("c")),
+            ("c3", "Bash", Some("c"), None),
+        ]
+        .into_iter()
+        .map(|(id, tool, owner, started)| {
+            let tag = work.add_call(&tool_use(id, tool, owner));
+            if let Some(started) = started {
+                work.start_task(
+                    started.to_string(),
+                    Some(id),
+                    Kind::Subagent,
+                    Place::Foreground,
+                    "",
+                );
+            }
+            tag.to_string()
+        })
+        .collect();
+        assert_eq!(tags, ["#00", "#00#00", "#00#00#00", "#00#00#00#00"]);
+        assert!(
+            !work
+                .add_call(&tool_use("c4", "Bash", Some("c")))
+                .is_claude()
+        );
+        // A call of a subagent whose start never showed
+        assert_eq!(
+            work.add_call(&tool_use("c5", "Bash", Some("x")))
+                .to_string(),
+            "#??#00"
+        );
     }
 
     #[test]
@@ -546,7 +604,10 @@ mod tests {
             "",
         );
         let subagent = work.subagent("a").expect("the subagent stays");
-        assert_eq!((subagent.start, subagent.calls), (Some(0), 0));
+        assert_eq!(
+            (subagent.start.clone(), subagent.calls),
+            (Some(Tag::claude(0)), 0)
+        );
     }
 
     #[test]
@@ -566,7 +627,7 @@ mod tests {
             Resulted::Background(_, None)
         ));
         let (call, _) = work.end_task("t", end()).expect("the end shows now");
-        assert_eq!(call.tag, Tag::Claude(0));
+        assert_eq!(call.tag, Tag::claude(0));
         assert!(work.task_tag("t").is_none());
     }
 }

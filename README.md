@@ -142,7 +142,7 @@ Ctrl+L starts a new session, as Claude Code's `/clear` does, and keeps your text
 That is why claudio clears rather than leaving it to a restart: you often decide on a fresh context with the message already written, and Ctrl+L sends it there without retyping it.
 While tasks run in the background, it waits for them to end before it clears, so their ends, and what Claude does with them, stay in the session that started them, and the label row says so, like `clear waits for 2 tasks · Ctrl+K stops`.
 Meanwhile Enter and Ctrl+L wait too, and Ctrl+K stops the tasks, after which the clear goes through.
-The session that ended closes with `- resume with claudio --resume <id>`, which goes back to it, and a boundary, `─── cleared ───`, starts the new one.
+The session that ended closes with `- resume with claudio --resume <id>`, which goes back to it, when it holds anything to go back to, and a boundary, `─── cleared ───`, starts the new one.
 When claudio ends, the session closes the same way, with `─── ended ───`.
 Text you send that starts with `/` reaches Claude as written, so a `/clear` you type is a message like any other.
 

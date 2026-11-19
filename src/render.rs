@@ -261,13 +261,8 @@ impl Output {
         self.interruption = None;
     }
 
-    /// Marks where the context was cleared, which ended the session with `previous_session`, so
-    /// the conversation reads as a new one from there.
-    pub fn show_reset(&mut self, previous_session: &str) {
-        self.show_session_end(SessionEnd::Cleared, Some(previous_session));
-    }
-
-    /// Ends the session with `session`, when Claude Code told its id, as `end` ended it.
+    /// Ends the session, as `end` ended it, with the id that resumes it, when it has one to
+    /// resume, so the conversation reads as a new one from there.
     pub fn show_session_end(&mut self, end: SessionEnd, session: Option<&str>) {
         self.end_text();
         self.begin(Section::Notice);

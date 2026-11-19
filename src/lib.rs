@@ -117,6 +117,12 @@ impl Shared {
         releases
     }
 
+    /// `id`, the session's, unless the session is new and had no call, so it holds nothing to
+    /// resume, as the status says with `none yet`.
+    fn resumable<'a>(&self, id: Option<&'a str>) -> Option<&'a str> {
+        id.filter(|_| !self.context.is_new())
+    }
+
     /// Shows what `event` tells, notes what it changes of the work and of the session, and hands
     /// the main thread with `forward` what it has to act on.
     fn note(&mut self, event: Event, forward: &dyn Fn(Input)) {
@@ -149,7 +155,8 @@ impl Shared {
             Event::Commands(commands) => self.note_commands(commands),
             Event::Reset { previous_session } => {
                 self.work.start_session();
-                self.output.show_reset(&previous_session);
+                let resume = self.resumable(Some(&previous_session));
+                self.output.show_session_end(SessionEnd::Cleared, resume);
                 self.context.reset();
             }
             Event::State(state) => self.output.note_state(state),
@@ -370,7 +377,7 @@ fn end(
         .map_err(|error| format!("cannot wait for claude: {error}"))?;
     join(readers);
     let shared = &mut lock(shared);
-    let session = shared.session_id.clone();
+    let session = (shared.resumable(shared.session_id.as_deref())).map(str::to_string);
     let output = &mut shared.output;
     let code = match result {
         Ok(()) => exit_code(status),

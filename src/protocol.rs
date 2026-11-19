@@ -11,6 +11,8 @@ use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::{Map, Value, json};
 
+use crate::work::{Kind, Place};
+
 /// The ids of the requests sent before the first message
 pub const INITIALIZE_REQUEST_ID: &str = "initialize";
 const SETTINGS_REQUEST_ID: &str = "settings";
@@ -66,15 +68,16 @@ pub enum Event {
     },
     /// The tasks that run in the background, in the order they started.
     BackgroundTasks(Vec<Task>),
-    /// A task started for the tool use with `tool_use_id`, as a command does once it runs in the
-    /// background, or has run for a few seconds, and runs in the background when
-    /// `is_backgrounded`. A subagent's task, when `is_agent`, starts with its `Agent` call, in
-    /// the foreground too.
+    /// A task of `kind` started in `place` for the tool use with `tool_use_id`, as a command does
+    /// once it runs in the background, or has run for a few seconds. A subagent's task starts
+    /// with its `Agent` call, in the foreground too.
     TaskStarted {
         task_id: String,
         tool_use_id: Option<String>,
-        is_backgrounded: bool,
-        is_agent: bool,
+        kind: Kind,
+        place: Place,
+        /// What the task does, as the call that started it describes it.
+        description: String,
     },
     /// A task that started in the foreground moved to the background.
     TaskBackgrounded {
@@ -141,18 +144,27 @@ pub struct Task {
     /// What the task does, as the call that started it describes it.
     pub description: String,
     #[serde(rename = "task_type")]
-    pub(crate) kind: String,
+    pub(crate) type_name: String,
 }
 
 impl Task {
-    /// Whether the task is a subagent's, rather than a command's or another kind's.
-    pub fn is_agent(&self) -> bool {
-        self.kind == AGENT_TASK
+    pub fn kind(&self) -> Kind {
+        task_kind(Some(&self.type_name))
     }
 }
 
 /// The type of a subagent's task, as `SDKTaskStartedMessage` in `sdk.d.ts` names it.
 const AGENT_TASK: &str = "local_agent";
+
+/// The kind of a task of `task_type`: a subagent's, and else a command's, as claudio counts
+/// every other type `SDKTaskStartedMessage` names.
+fn task_kind(task_type: Option<&str>) -> Kind {
+    if task_type == Some(AGENT_TASK) {
+        Kind::Subagent
+    } else {
+        Kind::Command
+    }
+}
 
 /// How a task ended.
 ///
@@ -761,11 +773,17 @@ fn read_system(system: System, line: &str) -> Class {
             tool_use_id,
             is_backgrounded,
             task_type,
+            description,
         } => Shown(vec![Event::TaskStarted {
             task_id,
             tool_use_id,
-            is_backgrounded,
-            is_agent: task_type.as_deref() == Some(AGENT_TASK),
+            description,
+            kind: task_kind(task_type.as_deref()),
+            place: if is_backgrounded {
+                Place::Background
+            } else {
+                Place::Foreground
+            },
         }]),
         System::TaskUpdated {
             task_id,
@@ -1156,6 +1174,8 @@ enum System {
         tool_use_id: Option<String>,
         is_backgrounded: bool,
         task_type: Option<String>,
+        #[serde(default)]
+        description: String,
     },
     /// Sent as a task changes, like as it ends, or as it moves to the background, before the
     /// result of the call that started it.
@@ -1638,16 +1658,14 @@ mod tests {
         let started = read_events(&lines[2]).expect("a readable line");
         let [
             Event::TaskStarted {
-                tool_use_id,
-                is_backgrounded,
-                ..
+                tool_use_id, place, ..
             },
         ] = started.as_slice()
         else {
             panic!("a task's start");
         };
         assert_eq!(tool_use_id.as_deref(), Some("toolu_background"));
-        assert!(is_backgrounded);
+        assert_eq!(*place, Place::Background);
         let ended = read_events(&lines[4]).expect("a readable line");
         let [Event::TaskEnded { status, .. }] = ended.as_slice() else {
             panic!("a task's end");

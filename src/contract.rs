@@ -1303,8 +1303,9 @@ fn summary(kinds: &[&str], events: &[Event]) -> Vec<String> {
                 Event::TaskStarted {
                     task_id,
                     tool_use_id,
-                    is_backgrounded,
-                    is_agent,
+                    kind,
+                    place,
+                    description: _,
                 } => (
                     "task started",
                     [Some(task_id), tool_use_id.as_ref()]
@@ -1312,11 +1313,7 @@ fn summary(kinds: &[&str], events: &[Event]) -> Vec<String> {
                         .flatten()
                         .map(String::as_str)
                         .collect(),
-                    [(*is_agent, "agent"), (*is_backgrounded, "backgrounded")]
-                        .into_iter()
-                        .filter_map(|(is, word)| is.then_some(word))
-                        .collect::<Vec<_>>()
-                        .join(" "),
+                    format!("{kind:?} {place:?}"),
                 ),
                 Event::TaskBackgrounded { task_id } => {
                     ("task backgrounded", vec![task_id], String::new())

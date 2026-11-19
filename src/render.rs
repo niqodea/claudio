@@ -6,8 +6,8 @@
 //! ended. Claude's prose reaches it as it streams in, as far as its colors are settled, and the
 //! rest of the conversation a whole line at a time.
 
-use std::collections::{HashMap, HashSet};
-use std::fmt::{self, Display, Formatter};
+use std::collections::HashSet;
+
 use std::fs::File;
 use std::io::Write;
 use std::num::NonZeroUsize;
@@ -17,10 +17,10 @@ use serde_json::{Map, Value};
 use crate::cut::cut;
 use crate::markdown::{Highlighter, code_span};
 use crate::protocol::{
-    Ask, AskKind, Level, Question, SettingsError, State, Task, TaskStatus, ToolResult, ToolUse,
+    Ask, AskKind, Level, Question, SettingsError, State, TaskStatus, ToolResult, ToolUse,
 };
 use crate::status::grouped;
-use crate::subagents::Subagents;
+use crate::work::{Call, End, Resulted, Tag, Work};
 
 use crate::style::{
     ATTENTION, DONE_OR_ADDED, FAILED_OR_REMOVED, MARK, STRONG, SUBDUED, SUBDUED_ON_BAR, Style,
@@ -82,96 +82,14 @@ pub struct Output {
     status: Status,
     /// The tool uses whose result repeats what the screen already shows.
     hidden_results: HashSet<String>,
-    /// Each tool use that waits for its result. Claude can run several tools at once, so a
-    /// result can come after a line of another tool. Every call gets its result, however its
-    /// turn ends, and the result removes the call.
-    ///
-    /// Undocumented: [`crate::contract::a_stopped_call_gets_its_result`]
-    pending_calls: HashMap<String, PendingCall>,
-    /// The task that each tool use started, by the tool use's id, until the call's result.
-    call_tasks: HashMap<String, CallTask>,
-    /// Each call whose task goes on in the background once its result came, by the task's id,
-    /// so that the task's end repeats the call's tag.
-    background_calls: HashMap<String, BackgroundCall>,
     /// The columns a noisy line takes at most on screen.
     max_noisy_line_columns: NonZeroUsize,
-    /// The count of Claude's next call.
-    next_call: u8,
-    subagents: Subagents,
     /// How the user stopped the turn that runs, if they did.
     interruption: Option<Interruption>,
     highlighter: Highlighter,
     /// The lines of Claude Code's error output that wait for Claude to finish the text it
     /// writes.
     waiting_stderr: Vec<String>,
-    /// The tasks that run in the background, as Claude Code last told them.
-    background_tasks: Vec<Task>,
-    /// The description of each `Agent` call, by its id, until its result, which names the
-    /// subagent it started.
-    agents: HashMap<String, String>,
-    /// The `Agent` call that started the subagent making each call, by the call's id, until its
-    /// result.
-    call_agents: HashMap<String, String>,
-}
-
-/// The task a tool use started, until the call's result.
-struct CallTask {
-    id: String,
-    is_backgrounded: bool,
-    /// How the task ended, when it ended before the call's result.
-    end: Option<TaskEnd>,
-}
-
-struct TaskEnd {
-    status: TaskStatus,
-    /// Claude Code's summary of the end for Claude.
-    summary: String,
-}
-
-/// A call whose task runs in the background.
-struct BackgroundCall {
-    call: PendingCall,
-    /// Whether Claude Code listed the task among those that run in the background.
-    was_listed: bool,
-}
-
-/// A tool use that waits for its result, whose line names the tool and repeats the tag.
-#[derive(Clone)]
-struct PendingCall {
-    name: String,
-    tag: Tag,
-    /// The full view's line, from 1, that the call's own line is on, where a request to allow
-    /// the call opens the full view.
-    line: usize,
-    /// The subagent that the call started, by its id, for an `Agent` call whose subagent's task
-    /// started.
-    agent: Option<String>,
-}
-
-/// What names a call and ties the result's line to the call's line: the call's count among
-/// Claude's calls, like `#0a`, or, for a subagent's call, which shows only in the full view,
-/// the tag of the call that started the subagent, then the call's count among the subagent's,
-/// like `#0a#03`, so a search for `#0a` finds the subagent's calls too. A tag is one word, which
-/// a search finds whole, of two hexadecimal digits each, which keep the columns of a line in
-/// place. Counts wrap from ff to 00, on the assumption that a call's result arrives before 255
-/// more calls of its agent start. A call that waits longer shares its tag with a newer one.
-#[derive(Clone, Copy)]
-enum Tag {
-    Claude(u8),
-    /// A subagent's call, after the count of the call that started the subagent, unknown for a
-    /// call that comes before the subagent's task. Claude Code tells the task first, as the
-    /// checks of subagents saw, and a call that came before would show `#??`.
-    Subagent(Option<u8>, u8),
-}
-
-impl Display for Tag {
-    fn fmt(&self, formatter: &mut Formatter) -> fmt::Result {
-        match self {
-            Tag::Claude(call) => write!(formatter, "#{call:02x}"),
-            Tag::Subagent(Some(start), call) => write!(formatter, "#{start:02x}#{call:02x}"),
-            Tag::Subagent(None, call) => write!(formatter, "#??#{call:02x}"),
-        }
-    }
 }
 
 /// What Claude does, which the marker in front of the input line shows.
@@ -247,18 +165,10 @@ impl Output {
             unknown_kinds: HashSet::new(),
             status: Status::Idle,
             hidden_results: HashSet::new(),
-            pending_calls: HashMap::new(),
-            call_tasks: HashMap::new(),
-            background_calls: HashMap::new(),
             max_noisy_line_columns,
-            next_call: 0,
-            subagents: Subagents::default(),
             interruption: None,
             highlighter: Highlighter::new(),
             waiting_stderr: Vec::new(),
-            background_tasks: Vec::new(),
-            agents: HashMap::new(),
-            call_agents: HashMap::new(),
         }
     }
 
@@ -266,145 +176,46 @@ impl Output {
         self.status.clone()
     }
 
-    pub fn background_tasks(&self) -> &[Task] {
-        &self.background_tasks
-    }
-
-    /// The calls of Claude's own whose tasks run in the foreground, which Claude waits on, by
-    /// their tool uses' ids. A subagent's calls belong to the subagent's run.
-    pub fn foreground_calls(&self) -> Vec<String> {
-        (self.call_tasks.iter())
-            .filter(|(call, task)| {
-                !task.is_backgrounded
-                    && task.end.is_none()
-                    && (self.pending_calls.get(*call))
-                        .is_some_and(|call| matches!(call.tag, Tag::Claude(_)))
-            })
-            .map(|(call, _)| call.clone())
-            .collect()
-    }
-
-    /// The subagents that run, in the foreground or in the background.
-    pub fn running_agents(&self) -> usize {
-        self.subagents.running()
-    }
-
-    /// The call `call` of the tool `tool`, as the label row names it: by its tool and its tag,
-    /// like `Bash #03`, and for a call whose subagent runs in the foreground, with how many
-    /// others run in the foreground beside it, like `Agent #01 +2`, and `+N` for 10 or more.
-    pub fn name_call(&self, tool: &str, call: &str) -> String {
-        let Some(call) = self.pending_calls.get(call) else {
-            return tool.to_string();
-        };
-        let others = match call.agent {
-            Some(_) => self.subagents.foreground().saturating_sub(1),
-            None => 0,
-        };
-        let others = match others {
-            0 => String::new(),
-            1..10 => format!(" +{others}"),
-            _ => " +N".to_string(),
-        };
-        format!("{tool} {}{others}", call.tag)
-    }
-
-    /// Notes the tasks that run in the background. A task that an earlier list held and this one
-    /// does not has ended, so its call is forgotten, even if its end never came. A task that no
-    /// list held yet stays, since it may join a later list.
-    pub fn note_background_tasks(&mut self, tasks: Vec<Task>) {
-        self.background_calls.retain(|task_id, background| {
-            let is_listed = tasks.iter().any(|task| task.id == *task_id);
-            let has_left = background.was_listed && !is_listed;
-            background.was_listed |= is_listed;
-            !has_left
-        });
-        self.background_tasks = tasks;
-    }
-
-    /// Notes that the tool use with `tool_use_id` started the task `task_id`, which runs in the
-    /// background when `is_backgrounded`, and is a subagent's, whose id it is, when `is_agent`.
-    pub fn note_task_started(
-        &mut self,
-        task_id: String,
-        tool_use_id: Option<String>,
-        is_backgrounded: bool,
-        is_agent: bool,
-    ) {
-        if is_agent {
-            let call = (tool_use_id.as_ref()).and_then(|id| self.pending_calls.get_mut(id));
-            let start = call.map(|call| {
-                call.agent = Some(task_id.clone());
-                call.tag
-            });
-            let start = match start {
-                Some(Tag::Claude(start)) => Some(start),
-                _ => None,
-            };
-            self.subagents
-                .note_started(&task_id, start, is_backgrounded);
-        }
-        if let Some(tool_use_id) = tool_use_id {
-            let task = CallTask {
-                id: task_id,
-                is_backgrounded,
-                end: None,
-            };
-            self.call_tasks.insert(tool_use_id, task);
-        }
-    }
-
-    /// Notes that the task `task_id` moved to the background.
-    pub fn note_task_backgrounded(&mut self, task_id: &str) {
-        self.subagents.note_backgrounded(task_id);
-        if let Some(task) = self.call_task(task_id) {
-            task.is_backgrounded = true;
-        }
-    }
-
     /// Shows how the task `task_id` ended in the background, under the tag of the call that
-    /// started it, or keeps the end for the call's result, when it comes first. A task that ends
-    /// in the foreground shows as its call's result.
-    ///
-    /// Undocumented: [`crate::contract::a_subagent_is_told_from_start_to_end`], for a subagent,
-    /// which counts as running until then
-    pub fn show_task_end(&mut self, task_id: &str, status: TaskStatus, summary: &str) {
-        self.subagents.note_ended(task_id);
-        let end = TaskEnd {
+    /// started it, once the call's result came, which otherwise shows the end.
+    pub fn show_task_end(
+        &mut self,
+        work: &mut Work,
+        task_id: &str,
+        status: TaskStatus,
+        summary: &str,
+    ) {
+        let end = End {
             status,
             summary: summary.to_string(),
         };
-        if let Some(background) = self.background_calls.remove(task_id) {
-            self.begin(Section::Tools);
-            self.push_task_end(&background.call, &end);
-        } else if let Some(task) = self.call_task(task_id) {
-            task.end = Some(end);
+        if let Some((call, end)) = work.end_task(task_id, end) {
+            self.push_task_end(work, &call, &end);
         }
     }
 
-    /// The task `task_id` of a call whose result has not come yet.
-    fn call_task(&mut self, task_id: &str) -> Option<&mut CallTask> {
-        self.call_tasks.values_mut().find(|task| task.id == task_id)
-    }
-
     /// Adds the line of how the task of `call` ended, with Claude Code's summary for Claude in
-    /// the full view. The line of a subagent's end counts its calls, which show only in the
-    /// full view.
-    fn push_task_end(&mut self, call: &PendingCall, end: &TaskEnd) {
-        let (outcome, word) = match end.status {
+    /// the full view, and only there for a subagent's own call, as its other lines. The line of
+    /// a subagent's end counts its calls, which show only in the full view.
+    fn push_task_end(&mut self, work: &Work, call: &Call, end: &End) {
+        let (outcome, how) = match end.status {
             TaskStatus::Completed => ("✓", "completed"),
             TaskStatus::Failed => ("✗", "failed"),
             TaskStatus::Stopped => ("✗", "stopped"),
         };
-        let subagent = (call.agent.as_ref()).and_then(|agent| self.subagents.get(agent));
+        let subagent = (call.task.as_ref()).and_then(|task| work.subagent(task));
         let calls = subagent.map_or_else(String::new, |subagent| match subagent.calls {
             1 => " · 1 call".to_string(),
             calls => format!(" · {calls} calls"),
         });
-        let what = format!("{} {}: {word}{calls}", call.tag, call.name);
-        self.push_detail(Line::from([
-            format!("{outcome} ").into(),
-            Span::new(what, SUBDUED),
-        ]));
+        let what = format!("{} {}: {how}{calls}", call.tag, call.tool);
+        let line = Line::from([format!("{outcome} ").into(), Span::new(what, SUBDUED)]);
+        if matches!(call.tag, Tag::Subagent(..)) {
+            self.write_full_view_line(&line);
+        } else {
+            self.begin(Section::Tools);
+            self.push_detail(line);
+        }
         for line in end.summary.lines() {
             self.write_full_view_line(&Line::from(format!("  {line}")));
         }
@@ -444,10 +255,8 @@ impl Output {
     }
 
     /// Marks where the context was cleared, which ended the session with `previous_session`, so
-    /// the conversation reads as a new one from there, and forgets the subagents that ended,
-    /// which the new session cannot resume.
+    /// the conversation reads as a new one from there.
     pub fn show_reset(&mut self, previous_session: &str) {
-        self.subagents.forget_ended();
         self.show_user_line(&format!("cleared │ session {previous_session}"));
     }
 
@@ -492,21 +301,13 @@ impl Output {
         self.push(answer_label(question).with(text).on(YOURS));
     }
 
-    /// The subagent that makes the tool use with `tool_use_id`, as the description of the
-    /// `Agent` call that started it, none for Claude itself or a subagent whose call claudio did
-    /// not see.
-    pub fn agent_of(&self, tool_use_id: &str) -> Option<String> {
-        let agent_call = self.call_agents.get(tool_use_id)?;
-        self.agents.get(agent_call).cloned()
-    }
-
     /// Shows the user's decision on a tool use that Claude Code asked about, like `allowed #01
     /// Bash: Run the tests`, which names the call by its tag, and by its summary, since the call's
     /// line can be far above. The user's `reason`
     /// follows, when they gave one.
-    pub fn show_decision(&mut self, ask: &Ask, decision: &str, reason: Option<&str>) {
-        let tag = (self.pending_calls.get(&ask.tool_use_id))
-            .map_or_else(String::new, |call| format!("{} ", call.tag));
+    pub fn show_decision(&mut self, work: &Work, ask: &Ask, decision: &str, reason: Option<&str>) {
+        let tag =
+            (work.call(&ask.tool_use_id)).map_or_else(String::new, |call| format!("{} ", call.tag));
         let summary = summarize(&ask.tool_name, &ask.input);
         let first = summary.text.lines().next().unwrap_or_default();
         let line = format!("{decision} {tag}{}: {first}", ask.tool_name);
@@ -601,14 +402,7 @@ impl Output {
     ///
     /// Undocumented: [`crate::contract::a_message_to_a_subagent_resumes_it`], for a call that
     /// names a subagent by its id, in `to`
-    pub fn show_tool_use(&mut self, tool_use: &ToolUse) {
-        if tool_use.name == "Agent" {
-            let description = read_field(&tool_use.input, "description");
-            (self.agents).insert(tool_use.id.clone(), description.to_string());
-        }
-        if let Some(agent_call) = &tool_use.agent_call {
-            (self.call_agents).insert(tool_use.id.clone(), agent_call.clone());
-        }
+    pub fn show_tool_use(&mut self, work: &mut Work, tool_use: &ToolUse) {
         if !tool_use.is_subagent() {
             self.set_status(Status::Running {
                 tool: tool_use.name.clone(),
@@ -620,22 +414,13 @@ impl Output {
             self.hidden_results.insert(tool_use.id.clone());
             return;
         }
-        let tag = if let Some(agent) = &tool_use.agent {
-            let subagent = self.subagents.get_or_add(agent);
-            let start = subagent.start;
-            Tag::Subagent(start, subagent.next_call())
-        } else {
-            let call = self.next_call;
-            self.next_call = call.wrapping_add(1);
-            Tag::Claude(call)
-        };
+        let tag = work.add_call(tool_use);
         // One line per call keeps the tool calls out of the way of the conversation. A call that
         // names a task, like TaskStop's, names it by the tag of the call that started it, and
         // one that names a subagent, like SendMessage's, which resumes it, by the tag of the
         // call that first started the subagent
-        let task_call = (self.background_calls).get(read_field(&tool_use.input, "task_id"));
-        let target = task_call.map(|background| background.call.tag).or_else(|| {
-            let subagent = self.subagents.get(read_field(&tool_use.input, "to"))?;
+        let target = (work.task_tag(read_field(&tool_use.input, "task_id"))).or_else(|| {
+            let subagent = work.subagent(read_field(&tool_use.input, "to"))?;
             subagent.start.map(Tag::Claude)
         });
         let mut line = Line::from([
@@ -687,15 +472,7 @@ impl Output {
             self.push_detail(line);
         }
         // The call's line ends the full view now
-        self.pending_calls.insert(
-            tool_use.id.clone(),
-            PendingCall {
-                name: tool_use.name.clone(),
-                tag,
-                line: self.full_view_lines,
-                agent: None,
-            },
-        );
+        work.set_line(&tool_use.id, self.full_view_lines);
         for (field, value) in &tool_use.input {
             let name = Line::from(["  ".into(), Span::new(format!("{field}:"), SUBDUED)]);
             if let Value::String(text) = value {
@@ -709,14 +486,11 @@ impl Output {
         }
     }
 
-    pub fn show_tool_result(&mut self, result: &ToolResult) {
+    pub fn show_tool_result(&mut self, work: &mut Work, result: &ToolResult) {
         if !result.is_subagent() {
             self.set_status(Status::Working);
         }
-        self.agents.remove(&result.tool_use_id);
-        self.call_agents.remove(&result.tool_use_id);
-        let call = self.pending_calls.remove(&result.tool_use_id);
-        let mut task = self.call_tasks.remove(&result.tool_use_id);
+        let resulted = work.take_result(&result.tool_use_id);
         let text = result.text.as_deref().map_or("(no text)", str::trim);
         // The outcome is all the line adds to the call's line, so the rest stays in the back
         let outcome = if result.is_error { "✗" } else { "✓" };
@@ -725,9 +499,12 @@ impl Output {
             0 => String::new(),
             count => format!(" (+{count} lines)"),
         };
+        let call = match &resulted {
+            Resulted::Done(call) => call.as_ref(),
+            Resulted::Background(call, _) | Resulted::Subagent(call, _) => Some(call),
+        };
         // Other lines can come between a call and its result, so the result stands on its own
-        let label = (call.as_ref())
-            .map_or_else(String::new, |call| format!("{} {}: ", call.tag, call.name));
+        let label = call.map_or_else(String::new, |call| format!("{} {}: ", call.tag, call.tool));
         let line = Line::from([
             format!("{outcome} ").into(),
             Span::new(format!("{label}{first}{more}"), SUBDUED),
@@ -747,58 +524,47 @@ impl Output {
             return;
         }
         self.begin(Section::Tools);
-        // A call whose task goes on in the background has only started, and its result is
-        // Claude Code's note to Claude with the task's id and output file, so the line says that
-        // the task runs, and the task's end shows the outcome
-        if let Some(call) = &call
-            && let Some(task) = task.take_if(|task| task.is_backgrounded)
-        {
-            let running = format!("{} {}: running in background", call.tag, call.name);
-            self.push_detail(Line::from(["◌ ".into(), Span::new(running, SUBDUED)]));
-            for line in text.lines() {
-                self.write_full_view_line(&Line::from(format!("  {line}")));
+        match resulted {
+            // A call whose task goes on in the background has only started, and its result is
+            // Claude Code's note to Claude with the task's id and output file, so the line says
+            // that the task runs, and the task's end shows the outcome
+            Resulted::Background(call, end) => {
+                let running = format!("{} {}: running in background", call.tag, call.tool);
+                self.push_detail(Line::from(["◌ ".into(), Span::new(running, SUBDUED)]));
+                for line in text.lines() {
+                    self.write_full_view_line(&Line::from(format!("  {line}")));
+                }
+                if let Some(end) = end {
+                    self.push_task_end(work, &call, &end);
+                }
             }
-            if let Some(end) = task.end {
-                self.push_task_end(call, &end);
-            } else {
-                let was_listed = self.background_tasks.iter().any(|old| old.id == task.id);
-                let background = BackgroundCall {
-                    call: call.clone(),
-                    was_listed,
+            // The result of a call that started a subagent in the foreground is the subagent's
+            // report, which the full view holds, under the line of how the subagent ended, which
+            // its task told before the result, or else the result tells
+            Resulted::Subagent(call, end) => {
+                let failed = if result.is_error {
+                    TaskStatus::Failed
+                } else {
+                    TaskStatus::Completed
                 };
-                self.background_calls.insert(task.id, background);
+                let end = End {
+                    status: end.map_or(failed, |end| end.status),
+                    summary: text.to_string(),
+                };
+                self.push_task_end(work, &call, &end);
             }
-            return;
-        }
-        // The result of a call that started a subagent in the foreground is the subagent's
-        // report, which the full view holds, under the line of how the subagent ended, which its
-        // task told before the result, or else the result tells
-        if let Some(call) = &call
-            && call.agent.is_some()
-        {
-            let failed = if result.is_error {
-                TaskStatus::Failed
-            } else {
-                TaskStatus::Completed
-            };
-            let end = TaskEnd {
-                status: task
-                    .and_then(|task| task.end)
-                    .map_or(failed, |end| end.status),
-                summary: text.to_string(),
-            };
-            self.push_task_end(call, &end);
-            return;
-        }
-        self.push_noisy(&line, None);
-        for line in text.lines().skip(1) {
-            self.write_full_view_line(&Line::from(format!("  {line}")));
+            Resulted::Done(_) => {
+                self.push_noisy(&line, None);
+                for line in text.lines().skip(1) {
+                    self.write_full_view_line(&Line::from(format!("  {line}")));
+                }
+            }
         }
     }
 
     /// Shows what `ask` asks, and gives the line of the full view, from 1, that each of its
     /// questions starts on.
-    pub fn show_ask(&mut self, ask: &Ask) -> Vec<usize> {
+    pub fn show_ask(&mut self, work: &Work, ask: &Ask) -> Vec<usize> {
         self.begin(Section::Tools);
         match &ask.kind {
             // The call's line shows what it asks to run, and the full view shows its input whole
@@ -807,7 +573,7 @@ impl Output {
             // under the call when nothing came between. Claude Code shows a call before it asks
             // to allow it, so only a call it never showed opens at the end
             AskKind::Permission(permission) => {
-                let line = (self.pending_calls.get(&ask.tool_use_id))
+                let line = (work.call(&ask.tool_use_id))
                     .map_or(self.full_view_lines.max(1), |call| call.line);
                 if let Some(reason) = &permission.reason {
                     let name = Line::from(["  ".into(), Span::new("reason:", SUBDUED)]);
@@ -1213,7 +979,9 @@ mod tests {
 
     use super::*;
     use crate::config::Config;
+    use crate::protocol::Task;
     use crate::style::{CODE, PLAIN, Style};
+    use crate::work::Place;
 
     /// The start of a call's line, before its summary, like `○ #00 Read: `.
     fn call_line(tag: &str, tool: &str) -> Line {
@@ -1235,14 +1003,57 @@ mod tests {
         Line::from(Span::new(text, style))
     }
 
-    fn new_output() -> Output {
-        Output::new(
-            tempfile::tempfile().expect("the temporary directory takes a file"),
-            Config::default().max_noisy_line_columns,
-        )
+    /// The output with the work it draws, side by side as the session holds them, which takes
+    /// the events that draw the work.
+    struct Shown {
+        output: Output,
+        work: Work,
     }
 
-    fn output_after_message() -> Output {
+    impl Shown {
+        fn new(full_view: File) -> Self {
+            Shown {
+                output: Output::new(full_view, Config::default().max_noisy_line_columns),
+                work: Work::default(),
+            }
+        }
+
+        fn show_tool_use(&mut self, tool_use: &ToolUse) {
+            self.output.show_tool_use(&mut self.work, tool_use);
+        }
+
+        fn show_tool_result(&mut self, result: &ToolResult) {
+            self.output.show_tool_result(&mut self.work, result);
+        }
+
+        fn show_task_end(&mut self, task_id: &str, status: TaskStatus, summary: &str) {
+            (self.output).show_task_end(&mut self.work, task_id, status, summary);
+        }
+
+        fn show_ask(&mut self, ask: &Ask) -> Vec<usize> {
+            self.output.show_ask(&self.work, ask)
+        }
+    }
+
+    impl std::ops::Deref for Shown {
+        type Target = Output;
+
+        fn deref(&self) -> &Output {
+            &self.output
+        }
+    }
+
+    impl std::ops::DerefMut for Shown {
+        fn deref_mut(&mut self) -> &mut Output {
+            &mut self.output
+        }
+    }
+
+    fn new_output() -> Shown {
+        Shown::new(tempfile::tempfile().expect("the temporary directory takes a file"))
+    }
+
+    fn output_after_message() -> Shown {
         let mut output = new_output();
         output.show_message("Hi");
         output.take_lines();
@@ -1404,12 +1215,9 @@ mod tests {
     }
 
     /// Reads back what the output wrote to the full view, after the user's first message.
-    fn full_view_after(show: impl FnOnce(&mut Output)) -> Vec<String> {
+    fn full_view_after(show: impl FnOnce(&mut Shown)) -> Vec<String> {
         let file = tempfile::NamedTempFile::new().expect("the temporary directory takes a file");
-        let mut output = Output::new(
-            file.reopen().expect("the file opens again"),
-            Config::default().max_noisy_line_columns,
-        );
+        let mut output = Shown::new(file.reopen().expect("the file opens again"));
         output.show_message("Hi");
         show(&mut output);
         let text = std::fs::read_to_string(file.path()).expect("the full view reads back");
@@ -1419,10 +1227,7 @@ mod tests {
     #[test]
     fn each_question_starts_on_the_full_view_line_its_ask_gives() {
         let file = tempfile::NamedTempFile::new().expect("the temporary directory takes a file");
-        let mut output = Output::new(
-            file.reopen().expect("the file opens again"),
-            Config::default().max_noisy_line_columns,
-        );
+        let mut output = Shown::new(file.reopen().expect("the file opens again"));
         output.show_message("Hi");
         output.show_text("Two questions:");
         let request = json!({
@@ -1457,10 +1262,7 @@ mod tests {
     #[test]
     fn a_request_to_allow_a_call_opens_on_the_calls_line() {
         let file = tempfile::NamedTempFile::new().expect("the temporary directory takes a file");
-        let mut output = Output::new(
-            file.reopen().expect("the file opens again"),
-            Config::default().max_noisy_line_columns,
-        );
+        let mut output = Shown::new(file.reopen().expect("the file opens again"));
         output.show_message("Hi");
         for (id, command) in [("call-a", "touch a"), ("call-b", "touch b")] {
             output.show_tool_use(&ToolUse {
@@ -1586,10 +1388,7 @@ mod tests {
     #[test]
     fn the_full_view_leaves_out_the_codes_that_fill_a_row() {
         let file = tempfile::NamedTempFile::new().expect("the temporary directory takes a file");
-        let mut output = Output::new(
-            file.reopen().expect("the file opens again"),
-            Config::default().max_noisy_line_columns,
-        );
+        let mut output = Shown::new(file.reopen().expect("the file opens again"));
         output.show_message("Hi");
         let text = std::fs::read_to_string(file.path()).expect("the full view reads back");
         assert!(!text.contains("\x1b[K"), "{text:?}");
@@ -1629,20 +1428,27 @@ mod tests {
 
     /// Shows `lines` as Claude Code wrote them, by the events that claudio reads of tasks and
     /// calls, and gives the lines that come of them.
-    fn show_lines(output: &mut Output, lines: &[String]) -> Vec<Line> {
+    fn show_lines(output: &mut Shown, lines: &[String]) -> Vec<Line> {
         for line in lines {
             for event in crate::protocol::read_events(line).expect("a readable line") {
                 match event {
                     Event::ToolUse(tool_use) => output.show_tool_use(&tool_use),
                     Event::ToolResult(result) => output.show_tool_result(&result),
-                    Event::BackgroundTasks(tasks) => output.note_background_tasks(tasks),
+                    Event::BackgroundTasks(tasks) => output.work.note_listed(tasks),
                     Event::TaskStarted {
                         task_id,
                         tool_use_id,
-                        is_backgrounded,
-                        is_agent,
-                    } => output.note_task_started(task_id, tool_use_id, is_backgrounded, is_agent),
-                    Event::TaskBackgrounded { task_id } => output.note_task_backgrounded(&task_id),
+                        kind,
+                        place,
+                        description,
+                    } => (output.work).start_task(
+                        task_id,
+                        tool_use_id.as_deref(),
+                        kind,
+                        place,
+                        &description,
+                    ),
+                    Event::TaskBackgrounded { task_id } => output.work.move_to_background(&task_id),
                     Event::TaskEnded {
                         task_id,
                         status,
@@ -1697,7 +1503,7 @@ mod tests {
                 outcome_line("✓", "#00 Bash: completed"),
             ]
         );
-        assert!(output.background_calls.is_empty());
+        assert!(output.work.task_tag("b040svj56").is_none());
     }
 
     #[test]
@@ -1709,16 +1515,17 @@ mod tests {
         let task = |id: &str| Task {
             id: id.to_string(),
             description: String::new(),
-            kind: "local_bash".to_string(),
+            type_name: "local_bash".to_string(),
         };
         // A list that does not hold the task yet keeps it
-        output.note_background_tasks(vec![task("other")]);
-        assert_eq!(output.background_calls.len(), 1);
-        output.note_background_tasks(vec![task("b040svj56")]);
-        assert_eq!(output.background_calls.len(), 1);
+        let is_kept = |output: &Shown| output.work.task_tag("b040svj56").is_some();
+        output.work.note_listed(vec![task("other")]);
+        assert!(is_kept(&output));
+        output.work.note_listed(vec![task("b040svj56")]);
+        assert!(is_kept(&output));
         // Once it left the list, it ended
-        output.note_background_tasks(Vec::new());
-        assert!(output.background_calls.is_empty());
+        output.work.note_listed(Vec::new());
+        assert!(!is_kept(&output));
     }
 
     #[test]
@@ -1739,9 +1546,9 @@ mod tests {
         let lines = contract::moved_subagent();
         // The subagent's call and start, then its own command's call and start
         show_lines(&mut output, &lines[..4]);
-        assert_eq!(output.foreground_calls(), ["toolu_agent"]);
+        assert_eq!(output.work.foreground_calls(), ["toolu_agent"]);
         show_lines(&mut output, &lines[4..]);
-        assert_eq!(output.foreground_calls(), Vec::<String>::new());
+        assert_eq!(output.work.foreground_calls(), Vec::<String>::new());
     }
 
     #[test]
@@ -1839,9 +1646,9 @@ mod tests {
         let Status::Running { call, .. } = output.status() else {
             panic!("Claude runs the Agent call");
         };
-        assert_eq!(output.name_call("Agent", &call), "Agent #00");
+        assert_eq!(output.work.name_call("Agent", &call), "Agent #00");
         show_lines(&mut output, &lines[2..]);
-        assert_eq!(output.name_call("Agent", &call), "Agent");
+        assert_eq!(output.work.name_call("Agent", &call), "Agent");
     }
 
     #[test]
@@ -1854,11 +1661,13 @@ mod tests {
                 .position(|line| line.contains("task_notification"))
                 .expect("the subagent's end");
             show_lines(&mut output, &lines[..end]);
-            assert_eq!(output.running_agents(), 1);
-            assert_eq!(output.subagents.foreground(), usize::from(!is_backgrounded));
+            let foreground =
+                |output: &Shown| output.work.running_subagents(Some(Place::Foreground));
+            assert_eq!(output.work.running_subagents(None), 1);
+            assert_eq!(foreground(&output), usize::from(!is_backgrounded));
             show_lines(&mut output, &lines[end..]);
-            assert_eq!(output.running_agents(), 0);
-            assert_eq!(output.subagents.foreground(), 0);
+            assert_eq!(output.work.running_subagents(None), 0);
+            assert_eq!(foreground(&output), 0);
         }
     }
 
@@ -1872,7 +1681,7 @@ mod tests {
         let lines = [call, started, ended, result].map(|line| line.to_string());
         let lines = show_lines(&mut output, &lines);
         assert_eq!(lines[2..], [outcome_line("✓", "#00 Bash: (no output)")]);
-        assert!(output.call_tasks.is_empty());
+        assert!(output.work.task_tag("t").is_none());
     }
 
     fn tool_use(name: &str, input: Value) -> ToolUse {

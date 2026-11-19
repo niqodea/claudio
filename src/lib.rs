@@ -29,11 +29,11 @@ mod render;
 mod session;
 mod status;
 mod style;
-mod subagents;
 mod table;
 mod terminal;
 mod text;
 mod vi;
+mod work;
 mod wrap;
 
 use std::env;
@@ -55,6 +55,7 @@ use protocol::{Event, read_events, repeats_a_message};
 use render::Output;
 use session::{Conversation, Ending, Input};
 use terminal::QuietTerminal;
+use work::Work;
 
 /// What the threads share, behind one lock, so that no lock waits on another.
 struct Shared {
@@ -71,8 +72,10 @@ struct Shared {
     claude_code_version: Option<String>,
     /// The names of the commands the session runs, in order, which the command line completes.
     commands: Vec<String>,
-    /// Whether a clear waits for the tasks that run in the background to end, so their ends
-    /// reach the session that started them.
+    /// The calls, tasks and subagents of the session, which `output` draws.
+    work: Work,
+    /// Whether a clear waits for the tasks that run in the background to end, which only
+    /// `hold_clear` and `note_background_tasks` change.
     is_clear_waiting: bool,
 }
 
@@ -89,12 +92,106 @@ impl Shared {
         self.claude_code_version = Some(version);
     }
 
-    /// Notes the tasks that run in the background, and returns whether none is left for a clear
-    /// that waits for them.
+    /// Holds a clear while tasks run in the background, so their ends, and Claude's turns on
+    /// them, stay in the session that started them, and gives whether the clear goes now, with
+    /// none running. The tasks are noted under the same lock, so the end of the last one releases
+    /// the clear, as `note_background_tasks` tells.
+    ///
+    /// Undocumented: [`crate::contract::a_clear_follows_the_turn_on_the_last_tasks_end`]
+    fn hold_clear(&mut self) -> bool {
+        if self.work.is_quiet() {
+            return true;
+        }
+        self.is_clear_waiting = true;
+        false
+    }
+
+    /// Notes the tasks that run in the background, and gives whether the clear held for them
+    /// goes now, with none left.
     fn note_background_tasks(&mut self, tasks: Vec<protocol::Task>) -> bool {
-        let is_quiet = tasks.is_empty();
-        self.output.note_background_tasks(tasks);
-        is_quiet && self.is_clear_waiting
+        self.work.note_listed(tasks);
+        let releases = self.is_clear_waiting && self.work.is_quiet();
+        self.is_clear_waiting &= !releases;
+        releases
+    }
+
+    /// Shows what `event` tells, notes what it changes of the work and of the session, and hands
+    /// the main thread with `forward` what it has to act on.
+    fn note(&mut self, event: Event, forward: &dyn Fn(Input)) {
+        match event {
+            Event::Text(text) => self.output.show_text(&text),
+            Event::TextEnd(text) => self.output.show_text_end(&text),
+            Event::Compacted { before, after } => self.output.show_compacted(before, after),
+            Event::Unknown { part, name, line } => {
+                self.output.show_unknown(part, &name, &line);
+            }
+            Event::ApiError(text) => self.output.show_error(&text),
+            Event::HookFailed {
+                hook,
+                exit_code,
+                stderr,
+                is_cancelled,
+            } => self
+                .output
+                .show_hook_failure(&hook, exit_code, &stderr, is_cancelled),
+            Event::Notice { text, level } => self.output.show_notice(&text, level),
+            Event::ToolUse(tool_use) => self.output.show_tool_use(&mut self.work, &tool_use),
+            Event::ToolResult(result) => {
+                self.output.show_tool_result(&mut self.work, &result);
+            }
+            Event::TurnEnd { failure } => self.output.show_turn_end(failure.as_deref()),
+            Event::SettingsErrors(errors) => self.output.show_settings_errors(&errors),
+            Event::PayingKey(key) => self.output.show_paying_key(&key),
+            Event::SessionId(id) => self.session_id = Some(id),
+            Event::Version(version) => self.note_version(version),
+            Event::Commands(commands) => self.note_commands(commands),
+            Event::Reset { previous_session } => {
+                self.work.forget_ended_subagents();
+                self.output.show_reset(&previous_session);
+                self.context.reset();
+            }
+            Event::State(state) => self.output.note_state(state),
+            Event::PermissionCheck {
+                tool_use_id,
+                is_checking,
+            } => self.output.note_permission_check(&tool_use_id, is_checking),
+            Event::Limits { session, week } => self.limits.note(session, week),
+            Event::BackgroundTasks(tasks) => {
+                if self.note_background_tasks(tasks) {
+                    forward(Input::HeldClear);
+                }
+            }
+            Event::TaskStarted {
+                task_id,
+                tool_use_id,
+                kind,
+                place,
+                description,
+            } => (self.work).start_task(task_id, tool_use_id.as_deref(), kind, place, &description),
+            Event::TaskBackgrounded { task_id } => {
+                self.work.move_to_background(&task_id);
+            }
+            Event::TaskEnded {
+                task_id,
+                status,
+                summary,
+            } => (self.output).show_task_end(&mut self.work, &task_id, status, &summary),
+            Event::Call(usage) => {
+                self.context.note_call(&usage, Instant::now());
+            }
+            Event::LastCall(usage) => self.context.note_last_call(usage.as_ref()),
+            Event::Model(model) => self.model = Some(model),
+            Event::Ceiling(ceiling) => self.context.note_ceiling(ceiling),
+            Event::Ask(ask) => forward(Input::Ask(ask)),
+            Event::Incompatible(error) => forward(Input::Incompatible(error)),
+            Event::Unsupported {
+                request_id,
+                subtype,
+            } => forward(Input::Unsupported {
+                request_id,
+                subtype,
+            }),
+        }
     }
 
     /// Notes the commands the session runs, in order, for the command line to complete.
@@ -178,6 +275,7 @@ fn run() -> Result<ExitCode, String> {
         model: None,
         claude_code_version: None,
         commands: Vec::new(),
+        work: Work::default(),
         is_clear_waiting: false,
     }));
     let break_signal = Arc::new(AtomicBool::new(false));
@@ -334,84 +432,7 @@ fn read_claude(from_claude: ChildStdout, shared: &Mutex<Shared>, forward: &dyn F
             }
         };
         for event in events {
-            let mut shared = lock(shared);
-            match event {
-                Event::Text(text) => shared.output.show_text(&text),
-                Event::TextEnd(text) => shared.output.show_text_end(&text),
-                Event::Compacted { before, after } => shared.output.show_compacted(before, after),
-                Event::Unknown { part, name, line } => {
-                    shared.output.show_unknown(part, &name, &line);
-                }
-                Event::ApiError(text) => shared.output.show_error(&text),
-                Event::HookFailed {
-                    hook,
-                    exit_code,
-                    stderr,
-                    is_cancelled,
-                } => shared
-                    .output
-                    .show_hook_failure(&hook, exit_code, &stderr, is_cancelled),
-                Event::Notice { text, level } => shared.output.show_notice(&text, level),
-                Event::ToolUse(tool_use) => shared.output.show_tool_use(&tool_use),
-                Event::ToolResult(result) => shared.output.show_tool_result(&result),
-                Event::TurnEnd { failure } => shared.output.show_turn_end(failure.as_deref()),
-                Event::SettingsErrors(errors) => shared.output.show_settings_errors(&errors),
-                Event::PayingKey(key) => shared.output.show_paying_key(&key),
-                Event::SessionId(id) => shared.session_id = Some(id),
-                Event::Version(version) => shared.note_version(version),
-                Event::Commands(commands) => shared.note_commands(commands),
-                Event::Reset { previous_session } => {
-                    shared.output.show_reset(&previous_session);
-                    shared.context.reset();
-                }
-                Event::State(state) => shared.output.note_state(state),
-                Event::PermissionCheck {
-                    tool_use_id,
-                    is_checking,
-                } => shared
-                    .output
-                    .note_permission_check(&tool_use_id, is_checking),
-                Event::Limits { session, week } => shared.limits.note(session, week),
-                Event::BackgroundTasks(tasks) => {
-                    if shared.note_background_tasks(tasks) {
-                        forward(Input::BackgroundEnded);
-                    }
-                }
-                Event::TaskStarted {
-                    task_id,
-                    tool_use_id,
-                    is_backgrounded,
-                    is_agent,
-                } => (shared.output).note_task_started(
-                    task_id,
-                    tool_use_id,
-                    is_backgrounded,
-                    is_agent,
-                ),
-                Event::TaskBackgrounded { task_id } => {
-                    shared.output.note_task_backgrounded(&task_id);
-                }
-                Event::TaskEnded {
-                    task_id,
-                    status,
-                    summary,
-                } => shared.output.show_task_end(&task_id, status, &summary),
-                Event::Call(usage) => {
-                    shared.context.note_call(&usage, Instant::now());
-                }
-                Event::LastCall(usage) => shared.context.note_last_call(usage.as_ref()),
-                Event::Model(model) => shared.model = Some(model),
-                Event::Ceiling(ceiling) => shared.context.note_ceiling(ceiling),
-                Event::Ask(ask) => forward(Input::Ask(ask)),
-                Event::Incompatible(error) => forward(Input::Incompatible(error)),
-                Event::Unsupported {
-                    request_id,
-                    subtype,
-                } => forward(Input::Unsupported {
-                    request_id,
-                    subtype,
-                }),
-            }
+            lock(shared).note(event, forward);
         }
     }
     forward(Input::Closed);

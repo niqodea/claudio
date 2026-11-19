@@ -50,6 +50,7 @@ use crate::style::{
 use crate::terminal::{Settings, run_in_terminal};
 use crate::text::{Line, Row, Span, Text};
 use crate::vi::{Editor, Mode};
+use crate::work::{Kind, Work};
 use crate::wrap;
 use crate::{Shared, lock};
 
@@ -559,7 +560,7 @@ impl InputLine {
     /// The ids of the tasks that run in the background, as Claude Code last listed them.
     fn background(&self) -> Vec<String> {
         let shared = lock(&self.shared);
-        let tasks = shared.output.background_tasks();
+        let tasks = shared.work.listed();
         tasks.iter().map(|task| task.id.clone()).collect()
     }
 
@@ -1191,19 +1192,19 @@ impl InputLine {
                     " ".into(),
                     limit_indicator('W', shared.limits.week().map(limit_level)),
                 ]);
-                let output = &shared.output;
                 // A subagent counts in A alone, as it runs in the background or not
-                let commands = (output.background_tasks().iter())
-                    .filter(|task| !task.is_agent())
+                let commands = (shared.work.listed().iter())
+                    .filter(|task| task.kind() == Kind::Command)
                     .count();
                 let activity = Line::from([
                     waiting_indicator(*waiting),
                     " ".into(),
                     background_indicator(commands),
                     " ".into(),
-                    agents_indicator(output.running_agents()),
+                    agents_indicator(shared.work.running_subagents(None)),
                 ]);
-                let work = describe_work(&shared.output).unwrap_or_else(|| "idle".to_string());
+                let work = describe_work(&shared.output, &shared.work)
+                    .unwrap_or_else(|| "idle".to_string());
                 let state =
                     (self.confirmation()).unwrap_or_else(|| Span::new(work, SUBDUED_ON_BAR));
                 let mut label = Line::from(marks())
@@ -1214,7 +1215,7 @@ impl InputLine {
                     .with(state);
                 if shared.is_clear_waiting {
                     label.push(Span::new(" │ ", SUBDUED_ON_BAR));
-                    label.push(clear_wait(output.background_tasks().len()));
+                    label.push(clear_wait(shared.work.listed().len()));
                 }
                 label
             }
@@ -1251,14 +1252,14 @@ impl InputLine {
             }
             Phase::Ending(Ending) => {
                 let output = &shared.output;
-                let tasks = output.background_tasks();
+                let tasks = shared.work.listed();
                 let descriptions: Vec<&str> =
                     tasks.iter().map(|task| task.description.as_str()).collect();
                 let background = (!descriptions.is_empty())
                     .then(|| format!("background: {}", descriptions.join(", ")));
                 let parts: Vec<String> = ["ending".to_string()]
                     .into_iter()
-                    .chain(describe_work(output))
+                    .chain(describe_work(output, &shared.work))
                     .chain(background)
                     .collect();
                 let mut label = Line::from([
@@ -1973,8 +1974,8 @@ fn escape() -> KeyEvent {
     KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
 }
 
-/// What Claude does, none while it waits for the user.
-fn describe_work(output: &Output) -> Option<String> {
+/// What Claude does, none while it waits for the user, which names a call by `work`.
+fn describe_work(output: &Output, work: &Work) -> Option<String> {
     match output.status() {
         Status::Idle => None,
         Status::Working => Some("working".to_string()),
@@ -1982,11 +1983,9 @@ fn describe_work(output: &Output) -> Option<String> {
             Some("writing, stderr waiting".to_string())
         }
         Status::Writing => Some("writing".to_string()),
-        Status::Running { tool, call } => {
-            Some(format!("running {}", output.name_call(&tool, &call)))
-        }
+        Status::Running { tool, call } => Some(format!("running {}", work.name_call(&tool, &call))),
         Status::Checking { tool, call } => {
-            Some(format!("checking {}", output.name_call(&tool, &call)))
+            Some(format!("checking {}", work.name_call(&tool, &call)))
         }
     }
 }

@@ -24,8 +24,8 @@ pub enum Input {
         request_id: String,
         subtype: String,
     },
-    /// No task runs in the background any more, while a clear waits for that.
-    BackgroundEnded,
+    /// The clear that waited for the tasks in the background goes, since none is left.
+    HeldClear,
     /// Claude Code ended.
     Closed,
     /// Claude Code works in a way claudio was not made for, as this error says, which ends the
@@ -84,10 +84,11 @@ impl<'a> Conversation<'a> {
         loop {
             match self.session.next_input() {
                 Some(Input::Ask(ask)) => {
-                    let mut shared = lock(&self.session.shared);
-                    let agent = shared.output.agent_of(&ask.tool_use_id);
-                    let full_view_lines = shared.output.show_ask(&ask);
-                    drop(shared);
+                    let mut guard = lock(&self.session.shared);
+                    let shared = &mut *guard;
+                    let agent = shared.work.owner_of(&ask.tool_use_id);
+                    let full_view_lines = shared.output.show_ask(&shared.work, &ask);
+                    drop(guard);
                     questions.add(*ask, agent, full_view_lines);
                     continue;
                 }
@@ -98,11 +99,8 @@ impl<'a> Conversation<'a> {
                     self.refuse(&request_id, &subtype)?;
                     continue;
                 }
-                Some(Input::BackgroundEnded) => {
-                    let waits = std::mem::take(&mut lock(&self.session.shared).is_clear_waiting);
-                    if waits {
-                        self.send(&Command::Run { command: "clear" })?;
-                    }
+                Some(Input::HeldClear) => {
+                    self.send(&Command::Run { command: "clear" })?;
                     continue;
                 }
                 Some(Input::Closed) => {
@@ -182,20 +180,13 @@ impl<'a> Conversation<'a> {
         Ok(Some((text, false)))
     }
 
-    /// Clears the context once no task runs in the background, so their ends reach the session
-    /// that started them, and Claude's turns on them run there too, after which Claude Code runs
-    /// the clear. The reader of Claude Code's output notes the tasks under the same lock, so the
-    /// end of the last task wakes the clear that waits for it.
-    ///
-    /// Undocumented: [`crate::contract::a_clear_follows_the_turn_on_the_last_tasks_end`]
+    /// Clears the context now, or once no task runs in the background, as `Shared::hold_clear`
+    /// decides.
     fn clear(&mut self) -> Result<(), String> {
-        let mut shared = lock(&self.session.shared);
-        if !shared.output.background_tasks().is_empty() {
-            shared.is_clear_waiting = true;
-            return Ok(());
+        if lock(&self.session.shared).hold_clear() {
+            self.send(&Command::Run { command: "clear" })?;
         }
-        drop(shared);
-        self.send(&Command::Run { command: "clear" })
+        Ok(())
     }
 
     /// Stops Claude's turn as `stop` says: the turn that waits on questions ends as they are
@@ -285,8 +276,9 @@ impl<'a> Conversation<'a> {
     /// Tells Claude Code the answer to what it asked. A plan or a permission adds the decision
     /// to the conversation, which a call's questions do with their answers.
     fn reply(&mut self, ask: &Ask, answer: Answer) -> Result<(), String> {
-        let mut shared = lock(&self.session.shared);
-        let output = &mut shared.output;
+        let mut guard = lock(&self.session.shared);
+        let shared = &mut *guard;
+        let (output, work) = (&mut shared.output, &shared.work);
         let is_decision = !matches!(ask.kind, AskKind::Questions(_));
         // The result of a refused tool repeats the refusal
         match &answer {
@@ -294,17 +286,19 @@ impl<'a> Conversation<'a> {
                 output.hide_result(&ask.tool_use_id);
                 output.note_interrupt(Interruption::Stop);
                 if is_decision {
-                    output.show_decision(ask, "refused", None);
+                    output.show_decision(work, ask, "refused", None);
                 }
             }
             Answer::Explain { reason } => {
                 output.hide_result(&ask.tool_use_id);
-                output.show_decision(ask, "refused", Some(reason));
+                output.show_decision(work, ask, "refused", Some(reason));
             }
-            Answer::Allow { .. } if is_decision => output.show_decision(ask, "allowed", None),
+            Answer::Allow { .. } if is_decision => {
+                output.show_decision(work, ask, "allowed", None);
+            }
             Answer::Allow { .. } => {}
         }
-        drop(shared);
+        drop(guard);
         self.send(&Command::Answer(ask, answer))
     }
 
@@ -320,7 +314,7 @@ impl<'a> Conversation<'a> {
         let id = Uuid::new_v4().to_string();
         self.send(&Command::Message { id: &id, text })?;
         if is_working {
-            let calls = lock(&self.session.shared).output.foreground_calls();
+            let calls = lock(&self.session.shared).work.foreground_calls();
             for call in &calls {
                 let request_id = self.next_request_id();
                 self.send(&Command::Background {
@@ -405,7 +399,7 @@ impl Ending<'_> {
                     Input::Ask(_)
                     | Input::Unsupported { .. }
                     | Input::Incompatible(_)
-                    | Input::BackgroundEnded,
+                    | Input::HeldClear,
                 )
                 | None => {}
             }

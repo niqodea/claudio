@@ -302,6 +302,9 @@ pub enum OnMessage {
         tasks: Vec<String>,
     },
     /// Clears the context, which holds something, after stopping the turn that runs, if any.
+    /// Whether it waits for the tasks in the background is decided as it goes, rather than with
+    /// the key, under the lock that notes the tasks, so the end of the last one never slips past
+    /// it.
     Clear(Option<TurnStop>),
     /// Ends the session's input.
     End,

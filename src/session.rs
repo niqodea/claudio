@@ -153,7 +153,12 @@ impl<'a> Conversation<'a> {
                 let command = sending.text.trim();
                 self.refuse_questions(questions)?;
                 lock(&self.session.shared).output.show_command(command);
-                self.send(&Command::Run { command })?;
+                // A clear waits for the background, however the user asks for it
+                if command == "clear" {
+                    self.clear()?;
+                } else {
+                    self.send(&Command::Run { command })?;
+                }
             }
             OnMessage::Stop(stop) => self.stop_turn(*stop, questions)?,
             OnMessage::Kill { stop, tasks } => {

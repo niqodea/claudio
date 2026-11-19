@@ -139,6 +139,7 @@ Ctrl+C stops Claude's turn and leaves what runs in the background running, and C
 Ctrl+D waits for them to end, and names them on the label row meanwhile, and Ctrl+C there stops them.
 
 Ctrl+L starts a new session, as Claude Code's `/clear` does, and keeps your text in the box, ready to be the new session's first message.
+That is why claudio clears rather than leaving it to a restart: you often decide on a fresh context with the message already written, and Ctrl+L sends it there without retyping it.
 While tasks run in the background, it waits for them to end before it clears, so their ends, and what Claude does with them, stay in the session that started them, and the label row says so, like `clear waits for 2 background tasks, Ctrl+K stops them`.
 Meanwhile Enter and Ctrl+L wait too, and Ctrl+K stops the tasks, after which the clear goes through.
 The conversation marks the new start with a line like `›› cleared │ session <id>`, which names the session it ended, and `claude --resume <id>` goes back to.

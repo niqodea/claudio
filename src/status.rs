@@ -17,9 +17,11 @@
 //! names what the permission mode decides
 //! Ref: <https://clig.dev/#output>, on using color with intention
 
+use std::num::NonZeroUsize;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::context::{COLD_COLOR, Context};
+use crate::cut::{self, ScreenRow};
 use crate::limits::{Limits, level, limit_level};
 use crate::protocol::{Ceiling, Limit, McpServerStatus};
 use crate::style::{ATTENTION, FAILED_OR_REMOVED, PLAIN, SUBDUED, Style};
@@ -90,6 +92,14 @@ pub fn lines(
     ]
 }
 
+/// The status's `lines` as the rows of a screen `columns` wide and `rows` tall: fitted to its
+/// height, and each cut to its width, so the status takes exactly its rows on any screen.
+pub fn screen_rows(lines: &[Line], columns: NonZeroUsize, rows: usize) -> Vec<ScreenRow> {
+    (cut::fit_lines(lines, rows).iter())
+        .map(|line| ScreenRow::cut(line, columns))
+        .collect()
+}
+
 fn text_row(name: &str, value: Line) -> Line {
     Line::from(label(name)).with_line(value)
 }
@@ -118,8 +128,9 @@ fn paying(facts: &Facts) -> Line {
     }
 }
 
-/// How many MCP servers are connected, then each one that is not, with how it stands: in red
-/// when it failed, and in orange when it waits for the user to sign in.
+/// How many MCP servers are connected, then how many stand in each other state, so the row's
+/// length follows the states, few, rather than the servers, which `:mcp` names: first those that
+/// need the user, in red when they failed and in orange when they wait for the user to sign in.
 fn mcp(servers: Option<&[McpServerStatus]>) -> Line {
     let Some(servers) = servers else {
         return known(None);
@@ -132,15 +143,30 @@ fn mcp(servers: Option<&[McpServerStatus]>) -> Line {
         (all, connected) if connected == all => format!("{all} connected"),
         (all, connected) => format!("{connected} of {all} connected"),
     });
-    for server in servers.iter().filter(|server| server.status != "connected") {
-        let (state, style) = match server.status.as_str() {
-            "failed" => ("failed", FAILED_OR_REMOVED),
-            "needs-auth" => ("needs sign-in", ATTENTION),
-            "pending" => ("connecting", PLAIN),
-            status => (status, PLAIN),
-        };
-        line.push(" · ");
-        line.push(Span::new(format!("{} {state}", server.name), style));
+    // Each state as Claude Code names it, then in the status's words, for one server and more
+    let known = [
+        ("failed", "failed", "failed", FAILED_OR_REMOVED),
+        ("needs-auth", "needs sign-in", "need sign-in", ATTENTION),
+        ("pending", "connecting", "connecting", PLAIN),
+        ("disabled", "disabled", "disabled", PLAIN),
+    ];
+    let mut by_state: Vec<(&str, &str, &str, Style)> = known.to_vec();
+    // A state of a later Claude Code, by its own name
+    for server in servers {
+        let status = server.status.as_str();
+        if status != "connected" && !by_state.iter().any(|(name, ..)| *name == status) {
+            by_state.push((status, status, status, PLAIN));
+        }
+    }
+    for (status, one, more, style) in by_state {
+        let count = (servers.iter())
+            .filter(|server| server.status == status)
+            .count();
+        if count > 0 {
+            let state = if count == 1 { one } else { more };
+            line.push(" · ");
+            line.push(Span::new(format!("{count} {state}"), style));
+        }
     }
     line
 }
@@ -467,26 +493,49 @@ mod tests {
     }
 
     #[test]
-    fn each_mcp_server_not_connected_follows_the_count() {
+    fn the_mcp_servers_not_connected_are_counted_by_state() {
         let server = |name: &str, status: &str| McpServerStatus {
             name: name.to_string(),
             status: status.to_string(),
         };
         let facts = Facts {
             mcp_servers: Some(vec![
-                server("docs", "connected"),
+                server("docs", "pending"),
+                server("slack", "needs-auth"),
                 server("github", "failed"),
                 server("linear", "needs-auth"),
+                server("notion", "connected"),
+                server("sentry", "rebooting"),
             ]),
             ..facts()
         };
         let row = row_of(&facts, "MCP");
         assert_eq!(
             row.text(),
-            "MCP      1 of 3 connected · github failed · linear needs sign-in"
+            "MCP      1 of 6 connected · 1 failed · 2 need sign-in · 1 connecting · 1 rebooting"
         );
-        assert_eq!(row.style_of("github failed"), Some(FAILED_OR_REMOVED));
-        assert_eq!(row.style_of("linear needs sign-in"), Some(ATTENTION));
+        assert_eq!(row.style_of("1 failed"), Some(FAILED_OR_REMOVED));
+        assert_eq!(row.style_of("2 need sign-in"), Some(ATTENTION));
+    }
+
+    #[test]
+    fn a_status_wider_and_taller_than_the_screen_takes_exactly_its_rows() {
+        let status = lines(
+            &facts(),
+            Some("a1"),
+            None,
+            &Limits::new(),
+            &Context::new(),
+            Instant::now(),
+            SystemTime::now(),
+        );
+        let columns = NonZeroUsize::new(12).expect("12 is not zero");
+        let rows = screen_rows(&status, columns, 7);
+        let texts: Vec<String> = rows.iter().map(|row| row.line().text()).collect();
+        assert_eq!(texts.len(), 7);
+        assert!(texts.iter().all(|text| text.chars().count() <= 12));
+        assert_eq!(texts[0], "Model    cl…");
+        assert_eq!(texts[6], "… 6 more ro…");
     }
 
     #[test]

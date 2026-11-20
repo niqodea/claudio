@@ -12,7 +12,7 @@ use std::num::NonZeroUsize;
 use unicode_width::UnicodeWidthChar;
 
 use crate::keys::{Field, Mark, Tone};
-use crate::style::Style;
+use crate::style::{SUBDUED, Style};
 use crate::text::{Line, Row, Span};
 use crate::wording::{Hint, with_hint};
 
@@ -160,6 +160,31 @@ pub fn cut_before_hidden(line: &Line, columns: NonZeroUsize) -> Line {
     }
 }
 
+/// `lines` fitted in `rows` rows, cut down from the end, as a list reads from its start, as `fit`
+/// fits fields: first the empty lines go, the last first, which hide nothing, then the last
+/// lines, swallowed by the last row, which counts them. A taller screen shows them, as a wider
+/// screen shows the label row whole, so the row names no key.
+pub fn fit_lines(lines: &[Line], rows: usize) -> Vec<Line> {
+    let mut lines = lines.to_vec();
+    while lines.len() > rows {
+        let Some(index) = lines.iter().rposition(Line::is_empty) else {
+            break;
+        };
+        lines.remove(index);
+    }
+    if lines.len() <= rows || rows == 0 {
+        lines.truncate(rows);
+        return lines;
+    }
+    let hidden = lines.len() - (rows - 1);
+    lines.truncate(rows - 1);
+    lines.push(Line::from(Span::new(
+        format!("… {hidden} more rows"),
+        SUBDUED,
+    )));
+    lines
+}
+
 /// The rows a field needs to show anything: none for empty rows, which hide nothing, and one for
 /// any other, a preview too, whose one row ends in `…`.
 fn min_rows(field: &Field) -> usize {
@@ -252,6 +277,16 @@ mod tests {
 
     fn subdued(text: &str) -> Span {
         Span::new(text, SUBDUED)
+    }
+
+    #[test]
+    fn lines_give_up_their_empty_rows_first_from_the_end() {
+        let lines = [plain("a"), plain(""), plain("b"), plain(""), plain("c")];
+        let texts = |lines: Vec<Line>| lines.iter().map(Line::text).collect::<Vec<_>>();
+        assert_eq!(texts(fit_lines(&lines, 4)), ["a", "", "b", "c"]);
+        assert_eq!(texts(fit_lines(&lines, 3)), ["a", "b", "c"]);
+        assert_eq!(texts(fit_lines(&lines, 2)), ["a", "… 2 more rows"]);
+        assert_eq!(texts(fit_lines(&lines, 0)), Vec::<String>::new());
     }
 
     #[test]

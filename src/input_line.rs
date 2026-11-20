@@ -61,6 +61,10 @@ const MIN_CONVERSATION_ROWS: u16 = 1;
 /// How long the input waits for a key before it looks again for output and a changed label.
 const TICK: Duration = Duration::from_millis(25);
 
+/// The rows of a screen of its own for the screen's columns and rows, each a `ScreenRow`, so the
+/// screen takes as many rows of the terminal as it lays out.
+type ScreenRows<'a> = &'a dyn Fn(NonZeroUsize, usize) -> Vec<ScreenRow>;
+
 // The terminal shows a frame between the two at once
 const BEGIN_FRAME: &str = "\x1b[?2026h";
 const END_FRAME: &str = "\x1b[?2026l";
@@ -748,19 +752,26 @@ impl InputLine {
                 SystemTime::now(),
             )
         };
-        self.show_screen(&lines)
+        self.show_screen(&|columns, rows| status::screen_rows(&lines, columns, rows))
     }
 
     /// Shows `error` on a screen of its own, like a program the input line runs, since it
-    /// concerns the input line rather than the conversation.
+    /// concerns the input line rather than the conversation. The error stays whole, wrapped onto
+    /// as many rows as it takes. An error takes fewer rows than the screen has, as one of a
+    /// program's or a file's does, and a longer one shows from where the screen's top cuts it.
     fn show_error(&mut self, error: &str) -> Result<(), String> {
-        self.show_screen(&[Line::from(error)])
+        self.show_screen(&|columns, _| {
+            (wrap::wrap(error, 0, None, columns.get()).rows.iter())
+                .map(|row| ScreenRow::cut(&row.text, columns))
+                .collect()
+        })
     }
 
-    /// Shows `lines` at the bottom of the terminal's alternate screen, until the next key or a
-    /// question from Claude Code closes them. The conversation stays as it was on the main
-    /// screen, which comes back once they close.
-    fn show_screen(&mut self, lines: &[Line]) -> Result<(), String> {
+    /// Shows the rows that `rows` lays out for the screen's columns and rows at the bottom of
+    /// the terminal's alternate screen, until the next key or a question from Claude Code closes
+    /// them, laid out again on each resize. The conversation stays as it was on the main screen,
+    /// which comes back once they close.
+    fn show_screen(&mut self, rows: ScreenRows) -> Result<(), String> {
         // The question view is on the alternate screen already, and draws itself again after
         let mut out = Vec::new();
         if !self.in_view {
@@ -768,7 +779,7 @@ impl InputLine {
         }
         put!(out, Hide);
         write_out(&out)?;
-        let shown = self.show_screen_until_closed(lines);
+        let shown = self.show_screen_until_closed(rows);
         let mut out = Vec::new();
         if !self.in_view {
             put!(out, LeaveAlternateScreen);
@@ -780,19 +791,21 @@ impl InputLine {
         left
     }
 
-    /// Draws `lines` on the alternate screen until a key or a question from Claude Code closes
-    /// it. Returns the size of the last resize meanwhile, if any.
-    fn show_screen_until_closed(&self, lines: &[Line]) -> Result<Option<(u16, u16)>, String> {
-        let mut height = self.layout.height;
+    /// Draws the rows that `rows` lays out on the alternate screen until a key or a question from
+    /// Claude Code closes it. Returns the size of the last resize meanwhile, if any.
+    fn show_screen_until_closed(&self, rows: ScreenRows) -> Result<Option<(u16, u16)>, String> {
+        let (mut width, mut height) = (self.layout.width, self.layout.height);
         let mut resized = None;
         let mut is_drawn = false;
         while !self.break_signal.load(Ordering::Relaxed) {
             if !is_drawn {
-                let top = height.saturating_sub(u16::try_from(lines.len()).unwrap_or(u16::MAX));
+                let columns = NonZeroUsize::new(usize::from(width)).unwrap_or(NonZeroUsize::MIN);
+                let rows = rows(columns, usize::from(height));
+                let top = height.saturating_sub(u16::try_from(rows.len()).unwrap_or(u16::MAX));
                 let mut out = Vec::new();
                 put!(out, Clear(ClearType::All), MoveTo(0, top));
-                let lines: Vec<String> = lines.iter().map(Line::to_string).collect();
-                out.extend(lines.join("\r\n").as_bytes());
+                let rows: Vec<String> = rows.iter().map(ScreenRow::to_terminal).collect();
+                out.extend(rows.join("\r\n").as_bytes());
                 write_out(&out)?;
                 is_drawn = true;
             }
@@ -802,7 +815,7 @@ impl InputLine {
             match event::read().map_err(|error| cannot_read_terminal(&error))? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => break,
                 Event::Resize(new_width, new_height) => {
-                    height = new_height;
+                    (width, height) = (new_width, new_height);
                     resized = Some((new_width, new_height));
                     is_drawn = false;
                 }

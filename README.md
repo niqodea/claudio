@@ -311,9 +311,14 @@ In a terminal that fails it, claudio warns in orange as it starts, and each redr
 A narrower screen splits rows into more, so the conversation is never erased, but stray copies of the label row and the box can stay in the scrollback.
 
 The case in tmux: a narrower screen wraps rows into more, and tmux then shows the last rows that fit the screen, the empty ones below the cursor included, so the extra rows push the screen's top into the scrollback even when the screen has empty rows at its bottom ([`grid_reflow`](https://github.com/tmux/tmux/blob/3.5a/grid.c#L1378)).
-Until the conversation fills the screen, the live rows sit above empty rows, so a narrower screen can push the start of the label row out of the screen, where no climb reaches, and leave a copy of it in the scrollback.
-The label row ends in the mode's letter at the screen's edge, so it fills its row, and any narrower screen wraps it.
-Once the conversation fills the screen, the live rows are at its bottom, and only the conversation's rows go to the scrollback, as they would anyway.
+The label row ends in the mode's letter at the screen's edge, so it fills its row, and any narrower screen wraps it onto one more row, which pushes the screen's top into the scrollback.
+claudio then draws the label row on one row again, so the row it took becomes an empty row at the bottom, which the next narrower screen keeps too.
+So each narrower screen that claudio draws again after moves the live rows up a row, and once they have moved up as many rows as the screen had above them, a narrower screen pushes the start of the label row out of the screen, where no climb reaches, and leaves a copy of it in the scrollback.
+Narrowing a pane a column at a time, like dragging its border or zooming it back into a layout, can do that; one resize, however wide, moves the live rows up only once.
+Until the conversation fills the screen, the live rows have few rows above them, so a single narrower screen can be enough.
+Claude's next lines move the live rows back down, as they fill the empty rows.
+Seen with tmux 3.8: narrowing a 14-row screen a column at a time, 0.4 s apart, moved the live rows up a row each time, and the tenth left a copy.
+The fix belongs in tmux: taking the rows a narrower screen adds from the empty rows below the cursor first, as a shorter screen already does, would keep the live rows in place.
 A shorter screen has no such case, since tmux then drops the empty rows below the cursor first.
 
 One limit holds in any terminal: a program can clear the scrollback only whole, never change a row of it, so live rows taller than the screen push the screen's top into the scrollback for good.

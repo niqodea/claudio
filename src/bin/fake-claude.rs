@@ -18,6 +18,7 @@
 //! The message `Write a long line` gets a line of 200 words, streamed in two parts: when
 //! `FAKE_GATE` names a pipe, the second part waits until someone writes to it, so a test can
 //! act while the line is unfinished.
+//! The message `Write tables` gets a table that fits as a grid, then one too wide for it.
 
 use std::env;
 use std::fs;
@@ -34,6 +35,14 @@ const BLOCKS: [&str; 2] = [
 ];
 
 const LONG_LINE_MESSAGE: &str = "Write a long line";
+
+const TABLES_MESSAGE: &str = "Write tables";
+const TABLES: &str = "A narrow table:\n\n\
+    | Fruit | Color |\n|---|---|\n| Apple | red |\n| Banana | yellow |\n\n\
+    A wide one:\n\n\
+    | Option | Speed | Notes |\n|---|:-:|---|\n\
+    | Redis | fast | Keeps everything in memory, so it is fast, and needs a server of its own to run beside the program |\n\
+    | SQLite | | A single file next to the program, with no server to run at all |";
 const LONG_LINE_END: &str = " and that is the end of the long line.";
 
 const ASK_REQUEST_ID: &str = "fake-ask";
@@ -168,6 +177,7 @@ impl Fake {
             }
             contract::REPLY_OK_MESSAGE => return self.send_turn(&[text_line("ok")]),
             LONG_LINE_MESSAGE => return self.send_long_line(),
+            TABLES_MESSAGE => return self.send_turn(&[text_line(TABLES)]),
             contract::MOVED_CALL_MESSAGE => {
                 return self.wait_for_interrupt(&contract::moved_call());
             }

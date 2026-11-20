@@ -18,6 +18,9 @@ pub struct Config {
     /// The columns a noisy line takes at most on screen: a line that shows a tool's input or
     /// output as it is.
     pub max_noisy_line_columns: NonZeroUsize,
+    /// The columns a table of Claude's takes at most as a grid, past which it shows one record
+    /// per row.
+    pub max_table_columns: NonZeroUsize,
     /// How Claude's text shows while Claude writes it.
     pub stream: Stream,
 }
@@ -43,6 +46,8 @@ impl Default for Config {
             // A cut keeps 44 columns at the start and 43 at the end, which hold a noisy line's
             // marks, tags, tool name and counts whole, since each end's fixed part takes about 20
             max_noisy_line_columns: NonZeroUsize::new(88).expect("88 is not zero"),
+            // The width of a noisy line, so Claude's tables and the tools' lines end together
+            max_table_columns: NonZeroUsize::new(88).expect("88 is not zero"),
             stream: Stream::Chunk,
         }
     }

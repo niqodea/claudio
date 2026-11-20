@@ -277,6 +277,7 @@ fn run() -> Result<ExitCode, String> {
                 .reopen()
                 .map_err(|error| format!("cannot open the file of the full view: {error}"))?,
             config.max_noisy_line_columns,
+            config.max_table_columns,
         ),
         context: Context::new(),
         limits: Limits::new(),

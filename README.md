@@ -95,12 +95,15 @@ Every setting is optional, and these are the defaults:
 input_rows = 3
 # The columns a noisy line takes at most: a tool call's input or a tool's output
 max_noisy_line_columns = 88
+# The columns a table of Claude's takes at most as a grid
+max_table_columns = 88
 # How Claude's text shows while Claude writes it: "chunk", each piece as Claude Code sends it,
 # or "line", each line once it ends
 stream = "chunk"
 ```
 
 A noisy line wider than that loses its end to `…`, and Ctrl+O shows it whole.
+A wider table shows as a numbered list instead, one item per row with a line for each cell, as psql shows a table too wide for its screen, and it still copies as Markdown.
 With `stream = "line"`, a paragraph shows only once Claude ends it, while the label row says `writing`, but no resize leaves a copy of Claude's text in the scrollback, as [Resizing](#resizing) tells.
 A setting claudio does not know, or a 0, stops claudio with an error that names it.
 

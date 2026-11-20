@@ -1,0 +1,2 @@
+# Names that docs write as words, ".." keeping clippy's own list
+doc-valid-idents = ["CommonMark", ".."]

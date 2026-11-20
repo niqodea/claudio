@@ -500,9 +500,10 @@ pub fn preview(choices: &[Choice], pick: &Pick) -> Option<Preview> {
 /// included.
 pub fn preview_lines(markdown: &str) -> Vec<Line> {
     let markdown = markdown.trim();
-    // The highlighter keeps every line, so each colored line is the one of the Markdown
+    // The highlighter keeps every line, and lays out each table as a grid, a line per row, so
+    // each colored line is the one of the Markdown
     (markdown.lines())
-        .zip(markdown_lines(markdown))
+        .zip(markdown_lines(markdown, usize::MAX))
         .filter(|(line, _)| shows_in_preview(line))
         .map(|(_, colored)| colored)
         .collect()

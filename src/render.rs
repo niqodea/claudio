@@ -85,6 +85,8 @@ pub struct Output {
     hidden_results: HashSet<String>,
     /// The columns a noisy line takes at most on screen.
     max_noisy_line_columns: NonZeroUsize,
+    /// The columns a table of Claude's takes at most as a grid.
+    max_table_columns: NonZeroUsize,
     /// How the user stopped the turn that runs, if they did.
     interruption: Option<Interruption>,
     highlighter: Highlighter,
@@ -157,7 +159,11 @@ enum Section {
 }
 
 impl Output {
-    pub fn new(full_view: File, max_noisy_line_columns: NonZeroUsize) -> Self {
+    pub fn new(
+        full_view: File,
+        max_noisy_line_columns: NonZeroUsize,
+        max_table_columns: NonZeroUsize,
+    ) -> Self {
         Output {
             text: Text::default(),
             full_view,
@@ -170,8 +176,9 @@ impl Output {
             status: Status::Idle,
             hidden_results: HashSet::new(),
             max_noisy_line_columns,
+            max_table_columns,
             interruption: None,
-            highlighter: Highlighter::new(),
+            highlighter: Highlighter::new(max_table_columns.get()),
             waiting_stderr: Vec::new(),
             stderr_end: None,
         }
@@ -600,7 +607,9 @@ impl Output {
                 vec![line]
             }
             // The plan shows whole, since the answer depends on all of it
-            AskKind::Plan(plan) => vec![self.push_details(markdown_lines(plan))],
+            AskKind::Plan(plan) => {
+                vec![self.push_details(markdown_lines(plan, self.max_table_columns.get()))]
+            }
             AskKind::Questions(questions) => questions
                 .iter()
                 .map(|question| self.push_details(question_lines(question)))
@@ -868,9 +877,9 @@ impl Output {
     }
 }
 
-/// The lines of Markdown, highlighted.
-pub fn markdown_lines(markdown: &str) -> Vec<Line> {
-    let mut highlighter = Highlighter::new();
+/// The lines of Markdown, highlighted, with its tables as grids up to `max_table_columns`.
+pub fn markdown_lines(markdown: &str, max_table_columns: usize) -> Vec<Line> {
+    let mut highlighter = Highlighter::new(max_table_columns);
     let mut colored = highlighter.push(markdown.trim());
     colored.append(highlighter.finish());
     colored
@@ -987,7 +996,11 @@ mod tests {
     impl Shown {
         fn new(full_view: File) -> Self {
             Shown {
-                output: Output::new(full_view, Config::default().max_noisy_line_columns),
+                output: Output::new(
+                    full_view,
+                    Config::default().max_noisy_line_columns,
+                    Config::default().max_table_columns,
+                ),
                 work: Work::default(),
             }
         }

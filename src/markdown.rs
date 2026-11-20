@@ -34,6 +34,8 @@ pub struct Highlighter {
     code_block: Option<CodeBlock>,
     /// The rows of a table, held until the table ends.
     table: Vec<String>,
+    /// The columns a table takes at most as a grid, past which it shows as records.
+    max_table_columns: usize,
     line: Open,
 }
 
@@ -75,10 +77,11 @@ enum Kind {
 }
 
 impl Highlighter {
-    pub fn new() -> Self {
+    pub fn new(max_table_columns: usize) -> Self {
         Highlighter {
             code_block: None,
             table: Vec::new(),
+            max_table_columns,
             line: Open::Start(String::new()),
         }
     }
@@ -106,7 +109,7 @@ impl Highlighter {
     pub fn finish(&mut self) -> Text {
         let mut colored = self.end_line();
         self.take_table(&mut colored);
-        *self = Highlighter::new();
+        *self = Highlighter::new(self.max_table_columns);
         colored
     }
 
@@ -206,12 +209,12 @@ impl Highlighter {
     }
 
     /// Adds the table's rows held to `colored`, laid out when they make a table, and as they
-    /// were written otherwise. A table wider than the terminal is laid out too, and the terminal
-    /// wraps its lines.
+    /// were written otherwise. The layout depends on a fixed number of columns, never on the
+    /// terminal's, since the scrollback keeps the lines after a resize.
     fn take_table(&mut self, colored: &mut Text) {
         let rows = std::mem::take(&mut self.table);
         let lines = match Table::read(&rows) {
-            Some(table) => table.render(color_inline),
+            Some(table) => table.render(color_inline, self.max_table_columns),
             None => rows.into_iter().map(Line::from).collect(),
         };
         for line in lines {
@@ -400,6 +403,9 @@ mod tests {
     use super::*;
     use crate::text::Row;
 
+    /// The default of the setting, which the table's own tests try both sides of.
+    const MAX_TABLE_COLUMNS: usize = 88;
+
     fn color(lines: &[&str]) -> Vec<Line> {
         (color_in_pieces(&[lines.join("\n")]).into_rows().into_iter())
             .map(Row::into_line)
@@ -525,7 +531,11 @@ mod tests {
         let rows = ["| a | b |", "|---|---|", "| long cell | x |"];
         let lines: Vec<String> = rows.iter().map(ToString::to_string).collect();
         let mut expected = vec![Line::from("Before")];
-        expected.extend(Table::read(&lines).expect("a table").render(color_inline));
+        expected.extend(
+            Table::read(&lines)
+                .expect("a table")
+                .render(color_inline, MAX_TABLE_COLUMNS),
+        );
         expected.push(Line::from("After"));
         assert_eq!(
             color(&["Before", rows[0], rows[1], rows[2], "After"]),
@@ -537,7 +547,9 @@ mod tests {
     fn a_table_that_ends_the_block_is_laid_out_when_the_block_ends() {
         let rows = ["| a |", "|---|", "| x |"];
         let lines: Vec<String> = rows.iter().map(ToString::to_string).collect();
-        let laid_out = Table::read(&lines).expect("a table").render(color_inline);
+        let laid_out = Table::read(&lines)
+            .expect("a table")
+            .render(color_inline, MAX_TABLE_COLUMNS);
         assert_eq!(color(&rows), laid_out);
     }
 
@@ -550,11 +562,14 @@ mod tests {
     }
 
     #[test]
-    fn a_wide_table_is_laid_out_too() {
-        let row = format!("| {} |", "x".repeat(200));
-        let lines = vec![row.clone(), "|---|".to_string()];
-        let laid_out = Table::read(&lines).expect("a table").render(color_inline);
-        assert_eq!(color(&[&row, "|---|"]), laid_out);
+    fn a_table_wider_than_the_limit_shows_as_records() {
+        let row = format!("| {} |", "x".repeat(MAX_TABLE_COLUMNS));
+        let lines = vec![row.clone(), "|---|".to_string(), "| y |".to_string()];
+        let laid_out = Table::read(&lines)
+            .expect("a table")
+            .render(color_inline, MAX_TABLE_COLUMNS);
+        assert_eq!(laid_out[0].text(), "1.");
+        assert_eq!(color(&[&row, "|---|", "| y |"]), laid_out);
     }
 
     #[test]
@@ -564,7 +579,7 @@ mod tests {
 
     /// Colors the Markdown that arrives in `pieces`, one after the other.
     fn color_in_pieces<S: AsRef<str>>(pieces: &[S]) -> Text {
-        let mut highlighter = Highlighter::new();
+        let mut highlighter = Highlighter::new(MAX_TABLE_COLUMNS);
         let mut colored = Text::default();
         for piece in pieces {
             colored.append(highlighter.push(piece.as_ref()));
@@ -596,7 +611,7 @@ mod tests {
     /// Asserts that each piece, pushed in turn, settles the text paired with it, a text and its
     /// style for each span, with `\n` where a line ends.
     fn assert_settles(pieces: &[(&str, &[(&str, Style)])]) {
-        let mut highlighter = Highlighter::new();
+        let mut highlighter = Highlighter::new(MAX_TABLE_COLUMNS);
         for (piece, settled) in pieces {
             let mut expected = Text::default();
             for &(text, style) in *settled {

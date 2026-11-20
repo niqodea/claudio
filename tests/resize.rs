@@ -1,18 +1,58 @@
-//! Resizes that reach the terminal while claudio's output is still on its way to it.
+//! What a resize does to the conversation and to the live rows below it, the label row and the
+//! input box, in a terminal with the properties below.
 //!
-//! In real use this happens all the time on a phone: opening the keyboard shrinks the window
-//! while Claude answers, and rotating the phone changes its width. The terminal applies the
-//! resize at once, but claudio hears of it only later, so what it already sent, drawn for the
-//! old size, lands on the new one. A redraw that relies on where rows were before then erases or
-//! repeats rows: in claudio 0.1, a message and the reply that followed it went missing from the
-//! scrollback, and copies of the label row were left in it.
+//! # The terminal
 //!
-//! The race depends on timing, which a test cannot set, so these tests set the order of events
-//! instead: `pty-relay` sits between tmux and claudio, holds claudio's output back as if it were
-//! still on its way, and tells claudio of the resize only when the test says so. The same order
-//! then gives the same screen on every run.
+//! - Backspace at a row's start goes up only onto a row that wrapped into it, which claudio checks
+//!   as it starts, so its climb back to the first live row is exact
+//! - Bottom-anchored rewrap: a narrower screen wraps the rows again into more, and shows the last
+//!   rows that fit, the empty rows below the cursor included, so the rows it adds push the
+//!   screen's top into the scrollback
+//! - Empty-first shortening: a shorter screen drops the empty rows below the cursor first
+//! - The scrollback is the terminal's for good: no program changes a row of it
 //!
-//! They run claudio with the fake Claude Code in tmux, on a tmux server of their own.
+//! tmux 3.8, which these tests run in, has all four.
+//!
+//! # The screen
+//!
+//! From the top, the screen holds `a` rows of the conversation, the `h` live rows, and `E` empty
+//! rows: `a + h + E` is the screen's height.
+//!
+//! claudio draws the live rows again once it hears of a resize, and resizes it hears of together
+//! act as one, from the size it last drew for to the size it hears of. While the scrollback holds
+//! rows:
+//!
+//! - A narrower screen wraps the live rows that fill their row, the label row always, and a row
+//!   of the box full of text too, onto `w` more rows, and the bottom-anchored rewrap pushes `w`
+//!   rows off the top, while `E` stays: `a` falls by `w`. claudio then draws each live row on one
+//!   row again, and the `w` rows become empty: `E` grows by `w`. The conversation's own rows that
+//!   wrap again push only themselves off the top.
+//! - A wider screen leaves `a` and `E` as they are: the scrollback fills the room that the
+//!   conversation's rows leave as they join again.
+//! - A shorter screen takes its rows from `E` first, and from `a` once `E` is 0.
+//! - A taller screen takes its rows from the scrollback, at the top: `a` grows, and `E` stays.
+//! - Claude's next lines push the live rows down into the empty rows: `a` grows as `E` falls.
+//!
+//! The live rows leave a copy in the scrollback exactly when their first row goes past the
+//! screen's top, beyond any climb: when a narrower screen takes `a` below 0, and when the screen
+//! is shorter than `h`, which the line Claude still writes can make taller than any screen. The
+//! tests check each rule, and both copies, so a change to claudio or to the terminal that makes a
+//! copy fails them, and so does one that lifts a limit the README describes.
+//!
+//! # Races
+//!
+//! A resize reaches the terminal at once, but claudio hears of it only later, so what it already
+//! sent, drawn for the old size, lands on the new one. In real use this happens all the time on a
+//! phone: opening the keyboard shrinks the window while Claude answers. A redraw that relies on
+//! where rows were before then erases or repeats rows: in claudio 0.1, a message and the reply that
+//! followed it went missing from the scrollback, and copies of the label row were left in it.
+//!
+//! Timing is what a test cannot set, so these tests set the order of events instead: `pty-relay`
+//! sits between the terminal and claudio, holds claudio's output back as if it were still on its
+//! way, and tells claudio of the resize only when the test says so. The same order then gives the
+//! same screen on every run.
+//!
+//! They run claudio with the fake Claude Code, on a tmux server of their own.
 
 use std::ffi::CString;
 use std::fs;
@@ -31,6 +71,9 @@ static SESSIONS: AtomicUsize = AtomicUsize::new(0);
 const STEP_LIMIT: Duration = Duration::from_secs(10);
 
 const LABEL_MARK: &str = "│ Y";
+/// The start of the label row once Claude Code told whether the session's cache is warm, before
+/// which a message waits for a second Enter, and the label row shows `*` in front of the T.
+const KNOWN_CACHE: &str = "›› T";
 const IDLE: &str = "│ idle";
 const FIRST_BLOCK: &str = "The first block of text.";
 const SECOND_BLOCK: &str = "The second block, right after the first.";
@@ -141,6 +184,135 @@ fn a_shrink_below_the_unfinished_line_leaves_one_copy_of_its_start() {
     assert_eq!(labels, 1, "copies of the label row stayed:\n{history}");
 }
 
+/// The rows of the input box, by default.
+const BOX_ROWS: usize = 3;
+
+/// The narrower screens, a column at a time, move the live rows up a row each, until the one
+/// that takes them past the screen's top, which leaves one copy of the label row.
+#[test]
+fn each_narrower_screen_moves_the_live_rows_up_a_row_until_one_leaves_a_copy() {
+    let session = Session::start(62, 14);
+    session.fill_screen();
+    let above = session.rows_above_label();
+    for step in 1..=above {
+        session.resize(62 - step, 14);
+        assert_eq!(
+            session.rows_above_label(),
+            above - step,
+            "after {step} narrower screens"
+        );
+        assert_eq!(session.label_copies(), 0, "after {step} narrower screens");
+    }
+    session.resize(61 - above, 14);
+    assert_eq!(
+        session.label_copies(),
+        1,
+        "the screen that took the label row past the top"
+    );
+}
+
+/// One narrower screen moves the live rows up as many rows as the label row wraps onto, however
+/// narrower it is, so it leaves no copy while the conversation above has that many rows.
+#[test]
+fn one_narrower_screen_moves_the_live_rows_up_by_the_rows_the_label_row_wraps_onto() {
+    let session = Session::start(62, 14);
+    session.fill_screen();
+    let above = session.rows_above_label();
+    // 62 columns wrap onto 3 more rows at 20
+    session.resize(20, 14);
+    assert_eq!(session.rows_above_label(), above - 3);
+    assert_eq!(session.label_copies(), 0);
+}
+
+/// Claude's next lines fill the empty rows that narrower screens left, so the live rows end at
+/// the screen's bottom again.
+#[test]
+fn claudes_next_lines_move_the_live_rows_back_down() {
+    let session = Session::start(62, 14);
+    session.fill_screen();
+    let above = session.rows_above_label();
+    for step in 1..=3 {
+        session.resize(62 - step, 14);
+    }
+    assert_eq!(session.rows_above_label(), above - 3);
+    session.send_message("message after");
+    session.wait_for_reply_to("message after");
+    assert_eq!(session.empty_rows_below(), 0);
+    assert_eq!(session.label_copies(), 0);
+}
+
+/// A shorter screen gives up the empty rows below the live rows first, so the live rows keep
+/// their place.
+#[test]
+fn a_shorter_screen_gives_up_the_empty_rows_first() {
+    let session = Session::start(62, 14);
+    session.fill_screen();
+    let above = session.rows_above_label();
+    for step in 1..=3 {
+        session.resize(62 - step, 14);
+    }
+    let empty = session.empty_rows_below();
+    assert_eq!(empty, 3);
+    session.resize(59, 14 - empty);
+    assert_eq!(session.rows_above_label(), above - 3);
+    assert_eq!(session.empty_rows_below(), 0);
+    assert_eq!(session.label_copies(), 0);
+}
+
+/// A wider screen leaves the live rows where they are, empty rows below them included.
+#[test]
+fn a_wider_screen_leaves_the_live_rows_where_they_are() {
+    let session = Session::start(62, 14);
+    session.fill_screen();
+    for step in 1..=3 {
+        session.resize(62 - step, 14);
+    }
+    let (above, empty) = (session.rows_above_label(), session.empty_rows_below());
+    session.resize(70, 14);
+    assert_eq!(session.rows_above_label(), above);
+    assert_eq!(session.empty_rows_below(), empty);
+}
+
+/// A taller screen takes its rows from the scrollback, above the conversation, and keeps the
+/// empty rows below the live rows.
+#[test]
+fn a_taller_screen_takes_its_rows_from_the_scrollback() {
+    let session = Session::start(62, 14);
+    session.fill_screen();
+    for step in 1..=3 {
+        session.resize(62 - step, 14);
+    }
+    let (above, empty) = (session.rows_above_label(), session.empty_rows_below());
+    session.resize(59, 17);
+    assert_eq!(session.rows_above_label(), above + 3);
+    assert_eq!(session.empty_rows_below(), empty);
+}
+
+/// Two narrower screens that claudio hears of together act as one, from the size it last drew
+/// for: 62 columns wrap onto one more row at 60 as at 61, so the live rows move up a row.
+#[test]
+fn narrower_screens_heard_together_act_as_one() {
+    let session = Session::start(62, 14);
+    session.fill_screen();
+    let above = session.rows_above_label();
+    session.resize_terminal(61, 14);
+    session.resize_terminal(60, 14);
+    session.tell_size();
+    assert_eq!(session.rows_above_label(), above - 1);
+}
+
+/// A row of the box full of text fills its row as the label row does, so a narrower screen wraps
+/// both, and the live rows move up two rows.
+#[test]
+fn a_full_row_of_the_box_wraps_as_the_label_row_does() {
+    let session = Session::start(62, 14);
+    session.fill_screen();
+    let above = session.rows_above_label();
+    session.type_text(&"x".repeat(100));
+    session.resize(61, 14);
+    assert_eq!(session.rows_above_label(), above - 2);
+}
+
 /// claudio in a tmux session of its own, behind `pty-relay`.
 struct Session {
     server: String,
@@ -197,7 +369,9 @@ impl Session {
             &program,
         ]);
         session.tmux(&["set-option", "-t", "main", "window-size", "manual"]);
-        session.wait_until("claudio starts", || session.screen().contains(LABEL_MARK));
+        session.wait_until("Claude Code tells the cache's state", || {
+            session.screen().contains(KNOWN_CACHE)
+        });
         session
     }
 
@@ -231,6 +405,104 @@ impl Session {
             .open(self.dir.path().join("gate"))
             .expect("the fake's gate");
         writeln!(pipe, "go").expect("the fake reads the gate");
+    }
+
+    /// Resizes the terminal, then tells claudio.
+    fn resize(&self, width: usize, height: usize) {
+        self.resize_terminal(width, height);
+        self.tell_size();
+    }
+
+    /// Resizes the terminal, which claudio hears of only once told, and waits until the pane's
+    /// terminal has the size, since tmux gives it the size after the command returns, and
+    /// `pty-relay` passes on the size the terminal has when told.
+    fn resize_terminal(&self, width: usize, height: usize) {
+        let (columns, rows) = (width.to_string(), height.to_string());
+        self.tmux(&["resize-window", "-t", "main", "-x", &columns, "-y", &rows]);
+        let terminal = self.tmux(&["display-message", "-p", "-t", "main", "#{pane_tty}"]);
+        let pane_height = self.pane("pane_height");
+        self.wait_until("the terminal takes the new size", || {
+            terminal_size(terminal.trim()) == (width, pane_height)
+        });
+    }
+
+    /// Tells claudio the terminal's size, and waits until claudio drew for it and the terminal
+    /// shows that.
+    fn tell_size(&self) {
+        let before = self.output().len();
+        self.relay("resize");
+        self.wait_until("claudio draws for the new size", || {
+            self.output().len() > before
+        });
+        self.wait_until_settled();
+    }
+
+    /// Sends messages until the conversation fills the screen, with the live rows at its bottom.
+    fn fill_screen(&self) {
+        let mut sent = 0;
+        while self.empty_rows_below() > 0 {
+            sent += 1;
+            let message = format!("filler {sent}");
+            self.send_message(&message);
+            self.wait_for_reply_to(&message);
+            self.wait_until_settled();
+        }
+    }
+
+    /// The conversation's rows on screen above the label row.
+    fn rows_above_label(&self) -> usize {
+        self.label_row()
+    }
+
+    /// The empty rows below the input box, which takes the rows right under the label row.
+    fn empty_rows_below(&self) -> usize {
+        self.pane("pane_height") - self.label_row() - 1 - BOX_ROWS
+    }
+
+    /// The row of the screen, from 0, that the label row is on, which starts with the same marks
+    /// however narrow the screen, while its end gives way.
+    fn label_row(&self) -> usize {
+        (self.screen().lines())
+            .position(|line| line.starts_with(KNOWN_CACHE) || line.starts_with("››*T"))
+            .expect("the label row is on screen")
+    }
+
+    /// The copies of the label row in the scrollback, above the screen.
+    fn label_copies(&self) -> usize {
+        self.tmux(&["capture-pane", "-p", "-S", "-", "-E", "-1", "-t", "main"])
+            .lines()
+            .filter(|line| line.contains(LABEL_MARK))
+            .count()
+    }
+
+    fn cursor_row(&self) -> usize {
+        self.pane("cursor_y")
+    }
+
+    fn pane(&self, variable: &str) -> usize {
+        let format = format!("#{{{variable}}}");
+        let value = self.tmux(&["display-message", "-p", "-t", "main", &format]);
+        value.trim().parse().expect("a number")
+    }
+
+    /// Waits until the screen and the cursor stay the same over two looks, so the terminal has
+    /// drawn all that claudio wrote.
+    fn wait_until_settled(&self) {
+        let look = || (self.screen(), self.cursor_row());
+        let mut last = look();
+        self.wait_until("the screen settles", || {
+            thread::sleep(Duration::from_millis(100));
+            let now = look();
+            let settled = now == last;
+            last = now;
+            settled
+        });
+    }
+
+    /// Types `text` into the box, without sending it.
+    fn type_text(&self, text: &str) {
+        self.tmux(&["send-keys", "-t", "main", "-l", text]);
+        self.wait_until_settled();
     }
 
     fn send_message(&self, text: &str) {
@@ -278,7 +550,7 @@ impl Session {
         )
     }
 
-    fn wait_until(&self, what: &str, done: impl Fn() -> bool) {
+    fn wait_until(&self, what: &str, mut done: impl FnMut() -> bool) {
         let start = Instant::now();
         while !done() {
             assert!(
@@ -297,6 +569,27 @@ impl Drop for Session {
             .args(["-L", &self.server, "kill-server"])
             .output();
     }
+}
+
+/// The columns and rows of the terminal device at `path`.
+fn terminal_size(path: &str) -> (usize, usize) {
+    let terminal = fs::File::open(path).expect("the pane's terminal");
+    let mut size = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: the descriptor is open for the call, and `size` is a winsize it may write
+    let result = unsafe {
+        libc::ioctl(
+            std::os::fd::AsRawFd::as_raw_fd(&terminal),
+            libc::TIOCGWINSZ,
+            &raw mut size,
+        )
+    };
+    assert_eq!(result, 0, "cannot read the terminal's size");
+    (usize::from(size.ws_col), usize::from(size.ws_row))
 }
 
 fn make_pipe(path: &Path) {

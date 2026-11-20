@@ -10,8 +10,10 @@
 //!   screen's top into the scrollback
 //! - Empty-first shortening: a shorter screen drops the empty rows below the cursor first
 //! - The scrollback is the terminal's for good: no program changes a row of it
+//! - Scrollback-first growing: a screen that gains rows takes them from the scrollback's last
+//!   rows, at the top, while it holds rows, and adds the rest as empty rows at the bottom
 //!
-//! tmux 3.8, which these tests run in, has all four.
+//! tmux 3.8, which these tests run in, has all five.
 //!
 //! # The screen
 //!
@@ -19,18 +21,19 @@
 //! rows: `a + h + E` is the screen's height.
 //!
 //! claudio draws the live rows again once it hears of a resize, and resizes it hears of together
-//! act as one, from the size it last drew for to the size it hears of. While the scrollback holds
-//! rows:
+//! act as one, from the size it last drew for to the size it hears of. With `s` rows in the
+//! scrollback:
 //!
 //! - A narrower screen wraps the live rows that fill their row, the label row always, and a row
 //!   of the box full of text too, onto `w` more rows, and the bottom-anchored rewrap pushes `w`
 //!   rows off the top, while `E` stays: `a` falls by `w`. claudio then draws each live row on one
 //!   row again, and the `w` rows become empty: `E` grows by `w`. The conversation's own rows that
 //!   wrap again push only themselves off the top.
-//! - A wider screen leaves `a` and `E` as they are: the scrollback fills the room that the
-//!   conversation's rows leave as they join again.
+//! - A wider screen joins the conversation's wrapped rows again, `j` of them, which `a` loses,
+//!   and the screen gains back `min(j, s)` from the scrollback: `a` falls by `j - min(j, s)`, and
+//!   `E` grows by as many.
 //! - A shorter screen takes its rows from `E` first, and from `a` once `E` is 0.
-//! - A taller screen takes its rows from the scrollback, at the top: `a` grows, and `E` stays.
+//! - A taller screen adds `t` rows: `a` grows by `min(t, s)`, and `E` by the rest.
 //! - Claude's next lines push the live rows down into the empty rows: `a` grows as `E` falls.
 //!
 //! The live rows leave a copy in the scrollback exactly when their first row goes past the
@@ -259,9 +262,10 @@ fn a_shorter_screen_gives_up_the_empty_rows_first() {
     assert_eq!(session.label_copies(), 0);
 }
 
-/// A wider screen leaves the live rows where they are, empty rows below them included.
+/// A wider screen leaves the live rows where they are, empty rows below them included, while the
+/// scrollback holds as many rows as join again.
 #[test]
-fn a_wider_screen_leaves_the_live_rows_where_they_are() {
+fn a_wider_screen_with_a_scrollback_leaves_the_live_rows_where_they_are() {
     let session = Session::start(62, 14);
     session.fill_screen();
     for step in 1..=3 {
@@ -286,6 +290,39 @@ fn a_taller_screen_takes_its_rows_from_the_scrollback() {
     session.resize(59, 17);
     assert_eq!(session.rows_above_label(), above + 3);
     assert_eq!(session.empty_rows_below(), empty);
+}
+
+/// A wider screen with an empty scrollback moves the live rows up by the rows that join again,
+/// and leaves as many empty rows below them.
+#[test]
+fn a_wider_screen_with_an_empty_scrollback_moves_the_live_rows_up() {
+    let session = Session::start(30, 30);
+    session.send_message("message 1");
+    session.wait_for_reply_on_a_narrow_screen("message 1");
+    let (above, empty) = (session.rows_above_label(), session.empty_rows_below());
+    assert_eq!(session.scrollback_rows(), 0);
+    // At 30 columns, 2 of the reply's lines wrap onto a row more each
+    session.resize(62, 30);
+    assert_eq!(session.rows_above_label(), above - 2);
+    assert_eq!(session.empty_rows_below(), empty + 2);
+}
+
+/// A taller screen takes as many rows as the scrollback holds from it, and adds the rest as empty
+/// rows below the live rows.
+#[test]
+fn a_taller_screen_adds_empty_rows_once_the_scrollback_runs_out() {
+    let session = Session::start(30, 30);
+    session.send_message("message 1");
+    session.wait_for_reply_on_a_narrow_screen("message 1");
+    let above = session.rows_above_label();
+    // The empty rows go first, then 2 rows of the conversation, into the scrollback
+    let shorter = 30 - session.empty_rows_below() - 2;
+    session.resize(30, shorter);
+    assert_eq!(session.scrollback_rows(), 2);
+    session.resize(30, shorter + 5);
+    assert_eq!(session.rows_above_label(), above);
+    assert_eq!(session.empty_rows_below(), 3);
+    assert_eq!(session.scrollback_rows(), 0);
 }
 
 /// Two narrower screens that claudio hears of together act as one, from the size it last drew
@@ -475,6 +512,11 @@ impl Session {
             .count()
     }
 
+    /// The rows in the scrollback, above the screen.
+    fn scrollback_rows(&self) -> usize {
+        self.pane("history_size")
+    }
+
     fn cursor_row(&self) -> usize {
         self.pane("cursor_y")
     }
@@ -514,23 +556,33 @@ impl Session {
         self.wait_for_reply_ending(message, SECOND_BLOCK);
     }
 
+    /// Waits as `wait_for_reply_to` does, on a screen too narrow for the label row to show `idle`:
+    /// until claudio wrote the reply, and the screen settles.
+    fn wait_for_reply_on_a_narrow_screen(&self, message: &str) {
+        self.wait_until(&format!("the reply to {message}"), || {
+            self.after_reply(message, SECOND_BLOCK).is_some()
+        });
+        self.wait_until_settled();
+    }
+
     /// Waits until claudio wrote the reply to `message` up to `end`, and the label row's `idle`
     /// after it, and tmux shows the label row. It reads what claudio wrote, not what the screen
     /// shows, so a claudio that loses lines on screen fails the test's checks rather than this
     /// wait.
     fn wait_for_reply_ending(&self, message: &str, end: &str) {
         self.wait_until(&format!("the reply to {message}"), || {
-            let output = self.output();
-            // The message's last copy is in the conversation, since the box empties once it is sent
-            let Some(start) = output.rfind(message) else {
-                return false;
-            };
-            let after = &output[start..];
-            after
-                .find(end)
-                .is_some_and(|reply| after[reply..].contains(IDLE))
+            self.after_reply(message, end)
+                .is_some_and(|rest| rest.contains(IDLE))
                 && self.screen().contains(IDLE)
         });
+    }
+
+    /// What claudio wrote from the end of its reply to `message`, once it wrote the reply up to `end`.
+    fn after_reply(&self, message: &str, end: &str) -> Option<String> {
+        let output = self.output();
+        // The message's last copy is in the conversation, since the box empties once it is sent
+        let after = &output[output.rfind(message)?..];
+        Some(after[after.find(end)?..].to_string())
     }
 
     /// The whole history, with the rows the terminal wrapped joined into their lines.

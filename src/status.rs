@@ -143,53 +143,44 @@ fn paying(facts: &Facts) -> Line {
     }
 }
 
-/// How many MCP servers are connected, then how many stand in each other state, so the row's
-/// length follows the states, few, rather than the servers, which `:mcp` names: first those that
-/// need the user, in red when they failed and in orange when they wait for the user to sign in.
-/// The row counts the servers the user set up, and the claude.ai connectors that run or failed:
+/// The states of a server that is not connected, as Claude Code names them, then in the
+/// status's words, for one server and for more, first those that need the user: in red when they
+/// failed, and in orange when they wait for the user to sign in.
+/// Ref: `McpServerStatus` in `sdk.d.ts`
+const NOT_CONNECTED: [(&str, &str, &str, Style); 4] = [
+    ("failed", "failed", "failed", FAILED_OR_REMOVED),
+    ("needs-auth", "needs sign-in", "need sign-in", ATTENTION),
+    ("pending", "connecting", "connecting", PLAIN),
+    ("disabled", "disabled", "disabled", PLAIN),
+];
+
+/// How many of the session's MCP servers are connected, then how many stand in each other state,
+/// so the row's length follows the states, few, rather than the servers, which `:mcp` names. The
+/// session's servers are those the user set up, and the claude.ai connectors that run or failed:
 /// claude.ai offers every account its connectors, which wait for a sign-in until the user sets
 /// one up, so those are offers rather than servers of the session.
 fn mcp(servers: Option<&[McpServerStatus]>) -> Line {
     let Some(servers) = servers else {
         return known(None);
     };
-    let servers: Vec<&McpServerStatus> = (servers.iter())
-        .filter(|server| {
-            !(server.scope.as_deref() == Some("claudeai") && server.status == "needs-auth")
-        })
-        .collect();
-    let connected = (servers.iter())
-        .filter(|server| server.status == "connected")
-        .count();
-    let mut line = Line::from(match (servers.len(), connected) {
+    let is_offer = |server: &&McpServerStatus| {
+        server.scope.as_deref() == Some("claudeai") && server.status == "needs-auth"
+    };
+    let servers: Vec<&McpServerStatus> = servers.iter().filter(|s| !is_offer(s)).collect();
+    let count = |status: &str| (servers.iter()).filter(|s| s.status == status).count();
+    let mut line = Line::from(match (servers.len(), count("connected")) {
         (0, _) => "none".to_string(),
         (all, connected) if connected == all => format!("{all} connected"),
         (all, connected) => format!("{connected} of {all} connected"),
     });
-    // Each state as Claude Code names it, then in the status's words, for one server and more
-    let known = [
-        ("failed", "failed", "failed", FAILED_OR_REMOVED),
-        ("needs-auth", "needs sign-in", "need sign-in", ATTENTION),
-        ("pending", "connecting", "connecting", PLAIN),
-        ("disabled", "disabled", "disabled", PLAIN),
-    ];
-    let mut by_state: Vec<(&str, &str, &str, Style)> = known.to_vec();
-    // A state of a later Claude Code, by its own name
-    for server in &servers {
-        let status = server.status.as_str();
-        if status != "connected" && !by_state.iter().any(|(name, ..)| *name == status) {
-            by_state.push((status, status, status, PLAIN));
-        }
-    }
-    for (status, one, more, style) in by_state {
-        let count = (servers.iter())
-            .filter(|server| server.status == status)
-            .count();
-        if count > 0 {
-            let state = if count == 1 { one } else { more };
-            line.push(" · ");
-            line.push(Span::new(format!("{count} {state}"), style));
-        }
+    for (status, one, more, style) in NOT_CONNECTED {
+        let state = match count(status) {
+            0 => continue,
+            1 => format!("1 {one}"),
+            many => format!("{many} {more}"),
+        };
+        line.push(" · ");
+        line.push(Span::new(state, style));
     }
     line
 }
@@ -529,14 +520,13 @@ mod tests {
                 server("github", "failed"),
                 server("linear", "needs-auth"),
                 server("notion", "connected"),
-                server("sentry", "rebooting"),
             ]),
             ..facts()
         };
         let row = row_of(&facts, "MCP");
         assert_eq!(
             row.text(),
-            "MCP      1 of 6 connected · 1 failed · 2 need sign-in · 1 connecting · 1 rebooting"
+            "MCP      1 of 5 connected · 1 failed · 2 need sign-in · 1 connecting"
         );
         assert_eq!(row.style_of("1 failed"), Some(FAILED_OR_REMOVED));
         assert_eq!(row.style_of("2 need sign-in"), Some(ATTENTION));
@@ -560,6 +550,39 @@ mod tests {
         assert!(texts.iter().all(|text| text.chars().count() <= 12));
         assert_eq!(texts[0], "Model    cl…");
         assert_eq!(texts[6], "… 6 more ro…");
+    }
+
+    /// Each row counts what it shows rather than listing it, so the servers' names take no room,
+    /// and a thousand servers in every state show the same rows, as wide, whatever their names.
+    #[test]
+    fn the_rows_count_the_mcp_servers_rather_than_list_them() {
+        let widths = |name: &str| {
+            let servers = (0..1000)
+                .map(|n| McpServerStatus {
+                    name: format!("{name} {n}"),
+                    status: ["connected", "failed", "needs-auth", "pending", "disabled"][n % 5]
+                        .to_string(),
+                    scope: Some("user".to_string()),
+                })
+                .collect();
+            let facts = Facts {
+                mcp_servers: Some(servers),
+                ..facts()
+            };
+            (lines(
+                &facts,
+                None,
+                None,
+                &Limits::new(),
+                &Context::new(),
+                Instant::now(),
+                SystemTime::now(),
+            )
+            .iter())
+            .map(Line::width)
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(widths("x"), widths("a server with a long name"));
     }
 
     #[test]

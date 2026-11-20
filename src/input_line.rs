@@ -828,8 +828,8 @@ impl InputLine {
         let (mut width, mut height) = (self.layout.width, self.layout.height);
         let mut resized = None;
         let mut asked_at: Option<Instant> = None;
-        // The rows on the screen, at the height they were drawn for
-        let mut drawn: Option<(Vec<String>, u16)> = None;
+        // What the screen shows, drawn again only when it changes
+        let mut drawn = Vec::new();
         while !self.break_signal.load(Ordering::Relaxed) {
             if asked_at.is_none_or(|at| at.elapsed() >= ASK_EVERY) {
                 refresh()?;
@@ -839,13 +839,13 @@ impl InputLine {
             let shown: Vec<String> = (rows(columns, usize::from(height)).iter())
                 .map(ScreenRow::to_terminal)
                 .collect();
-            if drawn.as_ref() != Some(&(shown.clone(), height)) {
-                let top = height.saturating_sub(u16::try_from(shown.len()).unwrap_or(u16::MAX));
-                let mut out = Vec::new();
-                put!(out, Clear(ClearType::All), MoveTo(0, top));
-                out.extend(shown.join("\r\n").as_bytes());
-                write_out(&out)?;
-                drawn = Some((shown, height));
+            let top = height.saturating_sub(u16::try_from(shown.len()).unwrap_or(u16::MAX));
+            let mut frame = Vec::new();
+            put!(frame, Clear(ClearType::All), MoveTo(0, top));
+            frame.extend(shown.join("\r\n").as_bytes());
+            if frame != drawn {
+                write_out(&frame)?;
+                drawn = frame;
             }
             if !event::poll(TICK).map_err(|error| cannot_read_terminal(&error))? {
                 continue;

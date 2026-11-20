@@ -917,7 +917,7 @@ fn read_response(request_id: &str, response: Option<Value>) -> Result<Vec<Event>
 ///
 /// Undocumented: [`crate::contract::the_paying_key_is_named_by_its_source`],
 /// [`crate::contract::the_start_lists_the_commands`],
-/// [`crate::contract::the_start_tells_the_permission_mode`]
+/// [`crate::contract::the_start_tells_every_fact_of_the_status`]
 fn read_initialize(response: Option<Value>) -> Result<Vec<Event>, String> {
     let initialize: Initialize = serde_json::from_value(response.unwrap_or_default())
         .map_err(|error| format!("Unreadable account from Claude Code: {error}"))?;

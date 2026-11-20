@@ -151,8 +151,8 @@ pub const CHECKS: [Check; 19] = [
         setup: Setup::Live(the_start_lists_the_commands),
     },
     Check {
-        name: "the start tells the permission mode",
-        setup: Setup::Live(the_start_tells_the_permission_mode),
+        name: "the start tells every fact of the status",
+        setup: Setup::Live(the_start_tells_every_fact_of_the_status),
     },
     Check {
         name: "a clear resets the session",
@@ -280,19 +280,48 @@ pub(crate) fn the_start_lists_the_commands(claude: &Live) -> Result<(), String> 
     }
 }
 
-/// Seen with Claude Code 2.1.322: the answer to `initialize` tells the permission mode, as
+/// The answers to the requests claudio sends as the session starts tell every fact the status
+/// shows of how the session runs and of its context, so none of them waits for the first message.
+/// Seen with Claude Code 2.1.322, whose answer to `initialize` tells the permission mode as
 /// `current_permission_mode`, which `sdk.d.ts` leaves out of `SDKControlInitializeResponse`.
-pub(crate) fn the_start_tells_the_permission_mode(claude: &Live) -> Result<(), String> {
+pub(crate) fn the_start_tells_every_fact_of_the_status(claude: &Live) -> Result<(), String> {
+    type IsTold = fn(&Event) -> bool;
+    let facts: [(&str, IsTold); 8] = [
+        ("model", |event| matches!(event, Event::Model(_))),
+        ("effort", |event| matches!(event, Event::Effort(_))),
+        ("fast mode", |event| matches!(event, Event::FastMode(_))),
+        ("permission mode", |event| {
+            matches!(event, Event::PermissionMode(_))
+        }),
+        ("plan or paying key", |event| {
+            matches!(event, Event::Plan(_) | Event::PayingKey(_))
+        }),
+        ("version", |event| matches!(event, Event::Version(_))),
+        ("context's tokens", |event| {
+            matches!(event, Event::CountedTokens(_))
+        }),
+        ("context's ceiling", |event| {
+            matches!(event, Event::Ceiling(_))
+        }),
+    ];
     let mut run = claude.start()?;
-    run.send(&protocol::Command::Initialize)?;
+    for command in [
+        protocol::Command::Initialize,
+        protocol::Command::GetSettings,
+        protocol::Command::GetContext,
+    ] {
+        run.send(&command)?;
+    }
     run.close_input();
-    let lines = run.read_to_end()?;
-    let tells =
-        (events(&texts(&lines)).into_iter()).any(|event| matches!(event, Event::PermissionMode(_)));
-    if tells {
+    let events = events(&texts(&run.read_to_end()?));
+    let missing: Vec<&str> = (facts.into_iter())
+        .filter(|(_, is_told)| !events.iter().any(is_told))
+        .map(|(fact, _)| fact)
+        .collect();
+    if missing.is_empty() {
         Ok(())
     } else {
-        Err("the answer to initialize tells no permission mode".to_string())
+        Err(format!("the start tells no {}", missing.join(", no ")))
     }
 }
 
@@ -326,6 +355,8 @@ pub fn initialize_response(account: &Value) -> String {
             "commands": commands,
             "account": account,
             "current_permission_mode": "default",
+            "fast_mode_state": "off",
+            "claude_code_version": claude_code::VERSION,
         }},
     });
     line.to_string()

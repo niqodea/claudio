@@ -107,8 +107,8 @@ impl<'a> Conversation<'a> {
                     continue;
                 }
                 // Claude Code answers these from what it holds, locally: with Claude Code 2.1.322,
-                // 150 of them and of the MCP servers' took 0.2 s in all, while its network
-                // traffic stayed at its idle level. A turn can be a command, like `/effort` or
+                // 150 such requests took 0.2 s in all, while its network traffic stayed at its
+                // idle level. A turn can be a command, like `/effort` or
                 // `/clear`, that changes what they tell
                 Some(Input::TurnEnded) => {
                     self.send(&Command::GetEffort)?;

@@ -1,14 +1,15 @@
 //! The session in its two phases: the conversation, which sends messages and answers to Claude
 //! Code, then the ending, while Claude finishes its work.
 
-use std::io::{self, Write};
-use std::process::{Child, ChildStdin};
+use std::io;
+use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 
 use uuid::Uuid;
 
+use crate::claude_input::ClaudeInput;
 use crate::input_line::{InputLine, Outcome};
 use crate::keys::{OnEnding, OnMessage, OnQuestion, TurnStop};
 use crate::picker::Draft;
@@ -26,7 +27,7 @@ pub enum Input {
     },
     /// The clear that waited for the tasks in the background goes, since none is left.
     HeldClear,
-    /// A turn ended, over which the MCP servers may have connected or failed.
+    /// A turn ended, which can be a command, like `/effort` or `/clear`.
     TurnEnded,
     /// Claude Code ended.
     Closed,
@@ -38,7 +39,7 @@ pub enum Input {
 /// The session while the user talks with Claude, through Claude Code's input.
 pub struct Conversation<'a> {
     session: Session,
-    to_claude: ChildStdin,
+    to_claude: ClaudeInput,
     claude: &'a Child,
     request_count: u64,
 }
@@ -49,7 +50,7 @@ impl<'a> Conversation<'a> {
         shared: Arc<Mutex<Shared>>,
         inputs: Receiver<Input>,
         break_signal: Arc<AtomicBool>,
-        to_claude: ChildStdin,
+        to_claude: ClaudeInput,
         claude: &'a Child,
     ) -> Self {
         Conversation {
@@ -77,7 +78,6 @@ impl<'a> Conversation<'a> {
         // Ref: <https://github.com/jarrodwatts/claude-hud/issues/173>, on the usage endpoint
         // answering a status line with HTTP 429
         self.send(&Command::GetUsage)?;
-        self.send(&Command::GetMcpStatus)?;
         let mut draft = String::new();
         // What Claude asks waits for the user to open it with Ctrl+Y, so no key typed before a
         // question showed can answer it
@@ -107,13 +107,12 @@ impl<'a> Conversation<'a> {
                     continue;
                 }
                 // Claude Code answers these from what it holds, locally: with Claude Code 2.1.322,
-                // 150 of them took 0.2 s in all, while its network traffic stayed at its idle
-                // level. A turn can be a command, like `/effort` or `/clear`, that changes what
-                // they tell
+                // 150 of them and of the MCP servers' took 0.2 s in all, while its network
+                // traffic stayed at its idle level. A turn can be a command, like `/effort` or
+                // `/clear`, that changes what they tell
                 Some(Input::TurnEnded) => {
                     self.send(&Command::GetEffort)?;
                     self.send(&Command::GetContext)?;
-                    self.send(&Command::GetMcpStatus)?;
                     continue;
                 }
                 Some(Input::Closed) => {
@@ -287,7 +286,7 @@ impl<'a> Conversation<'a> {
             claude,
             request_count: _,
         } = self;
-        drop(to_claude);
+        to_claude.close();
         Ok(Some(Ending { session, claude }))
     }
 
@@ -381,16 +380,7 @@ impl<'a> Conversation<'a> {
     /// Sends the command, which Claude Code that already ended never reads. Its reader then
     /// says it closed, and the session's end says how it exited.
     fn send(&mut self, command: &Command) -> Result<(), String> {
-        match self
-            .to_claude
-            .write_all(command.to_line().as_bytes())
-            .and_then(|()| self.to_claude.flush())
-        {
-            Err(error) if error.kind() != io::ErrorKind::BrokenPipe => {
-                Err(format!("cannot write to claude: {error}"))
-            }
-            _ => Ok(()),
-        }
+        self.to_claude.send(command)
     }
 }
 

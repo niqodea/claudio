@@ -10,6 +10,7 @@
 //! files, which keeps the client small and its assumptions on how Claude Code works few.
 
 mod claude_code;
+mod claude_input;
 mod climb;
 mod code;
 mod config;
@@ -47,6 +48,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+use claude_input::ClaudeInput;
 use config::Config;
 use context::Context;
 use input_line::InputLine;
@@ -317,15 +319,16 @@ fn run() -> Result<ExitCode, String> {
         read_claude_errors(errors_from_claude, &errors_shared);
     });
 
+    let to_claude = ClaudeInput::new(to_claude);
     let quiet_terminal = QuietTerminal::new()?;
     let input = InputLine::new(
         editor_command,
         full_view.path().to_path_buf(),
         quiet_terminal.original(),
-        config.input_rows,
-        config.stream,
+        &config,
         Arc::clone(&break_signal),
         Arc::clone(&shared),
+        to_claude.clone(),
     )?;
     let conversation = Conversation::new(
         input,

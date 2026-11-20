@@ -29,8 +29,9 @@ use crossterm::event::{
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::claude_input::ClaudeInput;
 use crate::climb::{self, Climb};
-use crate::config::Stream;
+use crate::config::{Config, Stream};
 use crate::context::COLD_COLOR;
 use crate::cut::{self, ScreenRow, Whole, cut, cut_before_hidden, cut_path};
 use crate::keys::{
@@ -41,6 +42,7 @@ use crate::keys::{
 use crate::label::{KeyState, MainLabel, Progress, QuestionLabel};
 use crate::limits::{Level, limit_level};
 use crate::picker::{self, Cursor, Draft, Form, Move, Pick, question_name, request_name};
+use crate::protocol::Command;
 use crate::render::{Output, Status};
 use crate::status;
 use crate::style::{
@@ -64,6 +66,13 @@ const TICK: Duration = Duration::from_millis(25);
 /// The rows of a screen of its own for the screen's columns and rows, each a `ScreenRow`, so the
 /// screen takes as many rows of the terminal as it lays out.
 type ScreenRows<'a> = &'a dyn Fn(NonZeroUsize, usize) -> Vec<ScreenRow>;
+
+/// What a screen of its own asks Claude Code for as it opens, then every `ASK_EVERY` while it
+/// stays open, so it shows what Claude Code tells only when asked.
+type Refresh<'a> = &'a dyn Fn() -> Result<(), String>;
+
+/// How often an open screen asks again. Claude Code answers from what it holds, locally.
+const ASK_EVERY: Duration = Duration::from_secs(1);
 
 // The terminal shows a frame between the two at once
 const BEGIN_FRAME: &str = "\x1b[?2026h";
@@ -146,6 +155,7 @@ impl Keys for Answering {
 pub struct InputLine {
     shared: Arc<Mutex<Shared>>,
     break_signal: Arc<AtomicBool>,
+    to_claude: ClaudeInput,
     editor_command: String,
     /// The file of the full view, which the output writes to.
     full_view: PathBuf,
@@ -200,10 +210,10 @@ impl InputLine {
         editor_command: String,
         full_view: PathBuf,
         original_settings: Settings,
-        input_rows: NonZeroU16,
-        stream: Stream,
+        config: &Config,
         break_signal: Arc<AtomicBool>,
         shared: Arc<Mutex<Shared>>,
+        to_claude: ClaudeInput,
     ) -> Result<Self, String> {
         let (width, height) = terminal::size().map_err(|error| cannot_read_terminal(&error))?;
         let (column, row) = cursor::position().map_err(|error| cannot_read_terminal(&error))?;
@@ -215,7 +225,7 @@ impl InputLine {
         } else {
             row
         };
-        let layout = Layout::new(width, height, input_rows);
+        let layout = Layout::new(width, height, config.input_rows);
         let mut out = Vec::new();
         let lowest = layout.lowest_label_row();
         if row > lowest {
@@ -235,11 +245,12 @@ impl InputLine {
         Ok(InputLine {
             shared,
             break_signal,
+            to_claude,
             editor_command,
             full_view,
             original_settings,
-            input_rows,
-            stream,
+            input_rows: config.input_rows,
+            stream: config.stream,
             editor: Editor::new(""),
             command_line: None,
             completion: None,
@@ -739,20 +750,31 @@ impl InputLine {
     /// The conversation stays as it was on the main screen, and its new lines wait for the
     /// status to close. A resize meanwhile moves the status to the new bottom and reaches the
     /// input box once the status closes. The main screen comes back whatever ends the status.
+    ///
+    /// The status shows the session as it stands while it is open. Claude Code lists its MCP
+    /// servers only once it loaded them, a second or so after it starts, and tells nothing as
+    /// they connect, so the open status asks for them again.
     fn show_status(&mut self) -> Result<(), String> {
-        let lines = {
-            let shared = lock(&self.shared);
-            status::lines(
-                &shared.facts,
-                shared.session_id.as_deref(),
-                shared.claude_code_version.as_deref(),
-                &shared.limits,
-                &shared.context,
-                Instant::now(),
-                SystemTime::now(),
-            )
-        };
-        self.show_screen(&|columns, rows| status::screen_rows(&lines, columns, rows))
+        let shared = Arc::clone(&self.shared);
+        let to_claude = self.to_claude.clone();
+        self.show_screen(
+            &|columns, rows| {
+                let lines = {
+                    let shared = lock(&shared);
+                    status::lines(
+                        &shared.facts,
+                        shared.session_id.as_deref(),
+                        shared.claude_code_version.as_deref(),
+                        &shared.limits,
+                        &shared.context,
+                        Instant::now(),
+                        SystemTime::now(),
+                    )
+                };
+                status::screen_rows(&lines, columns, rows)
+            },
+            &|| to_claude.send(&Command::GetMcpStatus),
+        )
     }
 
     /// Shows `error` on a screen of its own, like a program the input line runs, since it
@@ -760,18 +782,22 @@ impl InputLine {
     /// as many rows as it takes. An error takes fewer rows than the screen has, as one of a
     /// program's or a file's does, and a longer one shows from where the screen's top cuts it.
     fn show_error(&mut self, error: &str) -> Result<(), String> {
-        self.show_screen(&|columns, _| {
-            (wrap::wrap(error, 0, None, columns.get()).rows.iter())
-                .map(|row| ScreenRow::cut(&row.text, columns))
-                .collect()
-        })
+        self.show_screen(
+            &|columns, _| {
+                (wrap::wrap(error, 0, None, columns.get()).rows.iter())
+                    .map(|row| ScreenRow::cut(&row.text, columns))
+                    .collect()
+            },
+            &|| Ok(()),
+        )
     }
 
     /// Shows the rows that `rows` lays out for the screen's columns and rows at the bottom of
     /// the terminal's alternate screen, until the next key or a question from Claude Code closes
-    /// them, laid out again on each resize. The conversation stays as it was on the main screen,
-    /// which comes back once they close.
-    fn show_screen(&mut self, rows: ScreenRows) -> Result<(), String> {
+    /// them, drawn again whenever they change, with what `refresh` asks Claude Code for, or
+    /// with the screen's size. The conversation stays as it was on the main screen, which comes
+    /// back once they close.
+    fn show_screen(&mut self, rows: ScreenRows, refresh: Refresh) -> Result<(), String> {
         // The question view is on the alternate screen already, and draws itself again after
         let mut out = Vec::new();
         if !self.in_view {
@@ -779,7 +805,7 @@ impl InputLine {
         }
         put!(out, Hide);
         write_out(&out)?;
-        let shown = self.show_screen_until_closed(rows);
+        let shown = self.show_screen_until_closed(rows, refresh);
         let mut out = Vec::new();
         if !self.in_view {
             put!(out, LeaveAlternateScreen);
@@ -792,22 +818,34 @@ impl InputLine {
     }
 
     /// Draws the rows that `rows` lays out on the alternate screen until a key or a question from
-    /// Claude Code closes it. Returns the size of the last resize meanwhile, if any.
-    fn show_screen_until_closed(&self, rows: ScreenRows) -> Result<Option<(u16, u16)>, String> {
+    /// Claude Code closes it, asking with `refresh` as it opens and every `ASK_EVERY`. Returns
+    /// the size of the last resize meanwhile, if any.
+    fn show_screen_until_closed(
+        &self,
+        rows: ScreenRows,
+        refresh: Refresh,
+    ) -> Result<Option<(u16, u16)>, String> {
         let (mut width, mut height) = (self.layout.width, self.layout.height);
         let mut resized = None;
-        let mut is_drawn = false;
+        let mut asked_at: Option<Instant> = None;
+        // The rows on the screen, at the height they were drawn for
+        let mut drawn: Option<(Vec<String>, u16)> = None;
         while !self.break_signal.load(Ordering::Relaxed) {
-            if !is_drawn {
-                let columns = NonZeroUsize::new(usize::from(width)).unwrap_or(NonZeroUsize::MIN);
-                let rows = rows(columns, usize::from(height));
-                let top = height.saturating_sub(u16::try_from(rows.len()).unwrap_or(u16::MAX));
+            if asked_at.is_none_or(|at| at.elapsed() >= ASK_EVERY) {
+                refresh()?;
+                asked_at = Some(Instant::now());
+            }
+            let columns = NonZeroUsize::new(usize::from(width)).unwrap_or(NonZeroUsize::MIN);
+            let shown: Vec<String> = (rows(columns, usize::from(height)).iter())
+                .map(ScreenRow::to_terminal)
+                .collect();
+            if drawn.as_ref() != Some(&(shown.clone(), height)) {
+                let top = height.saturating_sub(u16::try_from(shown.len()).unwrap_or(u16::MAX));
                 let mut out = Vec::new();
                 put!(out, Clear(ClearType::All), MoveTo(0, top));
-                let rows: Vec<String> = rows.iter().map(ScreenRow::to_terminal).collect();
-                out.extend(rows.join("\r\n").as_bytes());
+                out.extend(shown.join("\r\n").as_bytes());
                 write_out(&out)?;
-                is_drawn = true;
+                drawn = Some((shown, height));
             }
             if !event::poll(TICK).map_err(|error| cannot_read_terminal(&error))? {
                 continue;
@@ -817,7 +855,6 @@ impl InputLine {
                 Event::Resize(new_width, new_height) => {
                     (width, height) = (new_width, new_height);
                     resized = Some((new_width, new_height));
-                    is_drawn = false;
                 }
                 _ => {}
             }

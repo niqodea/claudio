@@ -106,8 +106,13 @@ impl<'a> Conversation<'a> {
                     self.send(&Command::Run { command: "clear" })?;
                     continue;
                 }
-                // Claude Code answers from what it holds, with no call to the API
+                // Claude Code answers these from what it holds, locally: with Claude Code 2.1.322,
+                // 150 of them took 0.2 s in all, while its network traffic stayed at its idle
+                // level. A turn can be a command, like `/effort` or `/clear`, that changes what
+                // they tell
                 Some(Input::TurnEnded) => {
+                    self.send(&Command::GetEffort)?;
+                    self.send(&Command::GetContext)?;
                     self.send(&Command::GetMcpStatus)?;
                     continue;
                 }

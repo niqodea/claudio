@@ -19,6 +19,7 @@ const SETTINGS_REQUEST_ID: &str = "settings";
 const CONTEXT_REQUEST_ID: &str = "context";
 const USAGE_REQUEST_ID: &str = "usage";
 const MCP_REQUEST_ID: &str = "mcp";
+const EFFORT_REQUEST_ID: &str = "effort";
 
 /// Something Claude Code reported.
 pub enum Event {
@@ -113,7 +114,8 @@ pub enum Event {
     FastMode(String),
     /// The permission mode, which decides what Claude does without asking, like `auto`.
     PermissionMode(String),
-    /// How hard Claude thinks, like `high`, `default` when the session sets none.
+    /// How hard Claude thinks on the next message, like `high`, `none` when Claude Code sends no
+    /// effort, as for a model without one.
     Effort(String),
     /// The MCP servers and how each is connected.
     McpServers(Vec<McpServerStatus>),
@@ -133,9 +135,12 @@ pub enum Event {
     Call(Usage),
     /// The last call of the session as Claude Code starts it, none in a new session.
     LastCall(Option<Usage>),
-    /// The model of the session as Claude Code starts it.
+    /// The context's tokens as Claude Code counts them itself, which a context with no call yet
+    /// holds: the system prompt, the tools and the memory files.
+    CountedTokens(u64),
+    /// The model of the session, as Claude Code starts it and after each turn.
     Model(String),
-    /// What the context can grow to as Claude Code starts the session.
+    /// What the context can grow to, as Claude Code starts the session and after each turn.
     Ceiling(Ceiling),
     /// A sign that Claude Code works in a way claudio was not made for, as this error says, which
     /// ends the session as it starts.
@@ -401,10 +406,13 @@ pub enum Command<'a> {
     /// stopped, as `SDKControlInitializeRequest` in `sdk.d.ts` types it:
     /// <https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.325/sdk.d.ts>.
     Initialize,
+    /// Asks for the settings, which tell the files Claude Code skipped, and the effort.
     GetSettings,
-    /// Asks for the context's usage, which tells the last call of a resumed session. The
-    /// summary comes from that call's usage, where the full answer would count each part of
-    /// the context with the API.
+    /// Asks for the settings again, for the effort alone, which a command like `/effort` changes.
+    GetEffort,
+    /// Asks for the context's usage, which tells the last call of a resumed session, and the
+    /// context's tokens as Claude Code counts them itself. The summary comes from that call's
+    /// usage, where the full answer would count each part of the context with the API.
     GetContext,
     /// Asks for the plan's usage limits, which Claude Code reads from the plan's usage, where a
     /// call to the API would only send them along with its reply. The SDK's types mark the
@@ -501,6 +509,9 @@ impl Command<'_> {
             ),
             Command::GetSettings => {
                 control_request(SETTINGS_REQUEST_ID, &json!({"subtype": "get_settings"}))
+            }
+            Command::GetEffort => {
+                control_request(EFFORT_REQUEST_ID, &json!({"subtype": "get_settings"}))
             }
             Command::GetContext => control_request(
                 CONTEXT_REQUEST_ID,
@@ -757,7 +768,6 @@ fn read_init(init: Init) -> Vec<Event> {
         Event::SessionId(init.session_id),
         Event::Version(init.claude_code_version),
         Event::PermissionMode(init.permission_mode),
-        Event::Effort(init.effort.unwrap_or_else(|| "default".to_string())),
         // The docs' examples name them with their `/` and without
         Event::Commands(
             (init.slash_commands.iter())
@@ -888,6 +898,7 @@ fn read_response(request_id: &str, response: Option<Value>) -> Result<Vec<Event>
     match request_id {
         INITIALIZE_REQUEST_ID => read_initialize(response),
         SETTINGS_REQUEST_ID => read_settings(response),
+        EFFORT_REQUEST_ID => read_effort(response),
         CONTEXT_REQUEST_ID => {
             Ok(read_context_usage(response)
                 .unwrap_or_else(|error| vec![Event::Incompatible(error)]))
@@ -901,11 +912,12 @@ fn read_response(request_id: &str, response: Option<Value>) -> Result<Vec<Event>
 }
 
 /// What the session's start tells: the key that pays for it, none when the subscription does,
-/// the plan, fast mode, Claude Code's version, and the commands it runs, which the init that
-/// comes with the first message tells again.
+/// the plan, fast mode, the permission mode, Claude Code's version, and the commands it runs,
+/// which the init that comes with the first message tells again.
 ///
 /// Undocumented: [`crate::contract::the_paying_key_is_named_by_its_source`],
-/// [`crate::contract::the_start_lists_the_commands`]
+/// [`crate::contract::the_start_lists_the_commands`],
+/// [`crate::contract::the_start_tells_the_permission_mode`]
 fn read_initialize(response: Option<Value>) -> Result<Vec<Event>, String> {
     let initialize: Initialize = serde_json::from_value(response.unwrap_or_default())
         .map_err(|error| format!("Unreadable account from Claude Code: {error}"))?;
@@ -921,20 +933,38 @@ fn read_initialize(response: Option<Value>) -> Result<Vec<Event>, String> {
         .into_iter()
         .chain(account.subscription_type.map(Event::Plan))
         .chain(initialize.fast_mode_state.map(Event::FastMode))
+        .chain(
+            initialize
+                .current_permission_mode
+                .map(Event::PermissionMode),
+        )
         .chain(initialize.claude_code_version.map(Event::Version))
         .chain([Event::Commands(commands)])
         .collect())
 }
 
-/// The settings files Claude Code skipped, none when it read them all.
+/// The effort, and the settings files Claude Code skipped, if any.
 fn read_settings(response: Option<Value>) -> Result<Vec<Event>, String> {
-    let settings: Settings = serde_json::from_value(response.unwrap_or_default())
-        .map_err(|error| format!("Unreadable settings from Claude Code: {error}"))?;
-    if settings.errors.is_empty() {
-        Ok(vec![])
-    } else {
-        Ok(vec![Event::SettingsErrors(settings.errors)])
-    }
+    let settings = parse_settings(response)?;
+    let errors = (!settings.errors.is_empty()).then_some(Event::SettingsErrors(settings.errors));
+    Ok([effort(settings.applied)]
+        .into_iter()
+        .chain(errors)
+        .collect())
+}
+
+/// The effort alone, since the files Claude Code skipped show once, as the session starts.
+fn read_effort(response: Option<Value>) -> Result<Vec<Event>, String> {
+    Ok(vec![effort(parse_settings(response)?.applied)])
+}
+
+fn parse_settings(response: Option<Value>) -> Result<Settings, String> {
+    serde_json::from_value(response.unwrap_or_default())
+        .map_err(|error| format!("Unreadable settings from Claude Code: {error}"))
+}
+
+fn effort(applied: Applied) -> Event {
+    Event::Effort(applied.effort.unwrap_or_else(|| "none".to_string()))
 }
 
 /// The last call of the session, which the context's usage tells, with the model and the
@@ -951,6 +981,7 @@ fn read_context_usage(response: Option<Value>) -> Result<Vec<Event>, String> {
     };
     Ok(vec![
         Event::LastCall(context.api_usage.map(Usage::from)),
+        Event::CountedTokens(context.total_tokens),
         Event::Model(context.model),
         Event::Ceiling(ceiling),
     ])
@@ -1484,6 +1515,7 @@ struct Initialize {
     #[serde(default)]
     commands: Vec<CommandName>,
     fast_mode_state: Option<String>,
+    current_permission_mode: Option<String>,
     claude_code_version: Option<String>,
 }
 
@@ -1506,6 +1538,15 @@ struct Settings {
     // Claude Code leaves the list out when no file failed
     #[serde(default)]
     errors: Vec<SettingsError>,
+    applied: Applied,
+}
+
+/// The settings that apply to the next message.
+#[derive(Deserialize)]
+struct Applied {
+    /// Null when Claude Code sends no effort, as for a model without one.
+    /// Ref: `effort` in `sdk.d.ts`, the same value that `get_settings` reports as `applied.effort`
+    effort: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1515,6 +1556,8 @@ struct ContextUsage {
     /// Ref: `SDKControlGetContextUsageResponse` in `sdk.d.ts`, whose `apiUsage` is `{…} | null`
     #[serde(rename = "apiUsage", deserialize_with = "Option::deserialize")]
     api_usage: Option<ApiUsage>,
+    #[serde(rename = "totalTokens")]
+    total_tokens: u64,
     model: String,
     /// The window the context fits in.
     #[serde(rename = "maxTokens")]
@@ -1535,9 +1578,6 @@ struct Init {
     slash_commands: Vec<String>,
     #[serde(rename = "permissionMode")]
     permission_mode: String,
-    /// Null when the session sets none, so the model's own applies.
-    #[serde(default)]
-    effort: Option<String>,
     fast_mode_state: Option<String>,
 }
 
@@ -1782,6 +1822,56 @@ mod tests {
     }
 
     #[test]
+    fn the_start_tells_the_permission_mode() {
+        let line = contract::initialize_response(&contract::subscription_account());
+        let events = read_events(&line).expect("a readable line");
+        assert!(
+            (events.iter())
+                .any(|event| matches!(event, Event::PermissionMode(mode) if mode == "default"))
+        );
+    }
+
+    fn settings_response(request_id: &str, effort: &Value, errors: &Value) -> String {
+        json!({
+            "type": "control_response",
+            "response": {"subtype": "success", "request_id": request_id, "response": {
+                "applied": {"model": "claude-opus-5-5", "effort": effort},
+                "errors": errors,
+            }},
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn the_settings_tell_the_effort_and_the_files_skipped() {
+        let errors =
+            json!([{"file": "settings.json", "path": "model", "message": "is not a string"}]);
+        let line = settings_response(SETTINGS_REQUEST_ID, &json!("medium"), &errors);
+        let events = read_events(&line).expect("a readable line");
+        assert!(matches!(
+            events.as_slice(),
+            [Event::Effort(effort), Event::SettingsErrors(errors)]
+                if effort == "medium" && errors.len() == 1
+        ));
+    }
+
+    #[test]
+    fn the_effort_alone_leaves_out_the_files_skipped() {
+        let errors =
+            json!([{"file": "settings.json", "path": "model", "message": "is not a string"}]);
+        let line = settings_response(EFFORT_REQUEST_ID, &json!("high"), &errors);
+        let events = read_events(&line).expect("a readable line");
+        assert!(matches!(events.as_slice(), [Event::Effort(effort)] if effort == "high"));
+    }
+
+    #[test]
+    fn no_effort_sent_shows_as_none() {
+        let line = settings_response(EFFORT_REQUEST_ID, &Value::Null, &json!([]));
+        let events = read_events(&line).expect("a readable line");
+        assert!(matches!(events.as_slice(), [Event::Effort(effort)] if effort == "none"));
+    }
+
+    #[test]
     fn the_subscription_pays_with_no_key() {
         assert_eq!(paying_key(&contract::subscription_account()), None);
     }
@@ -1811,7 +1901,6 @@ mod tests {
             "tools": [],
             "slash_commands": ["compact", "/model"],
             "permissionMode": "auto",
-            "effort": null,
             "fast_mode_state": "off",
         });
         let events = read_events(&line.to_string()).expect("a readable line");
@@ -1821,13 +1910,11 @@ mod tests {
                 Event::SessionId(id),
                 Event::Version(version),
                 Event::PermissionMode(mode),
-                Event::Effort(effort),
                 Event::Commands(commands),
                 Event::FastMode(fast),
             ] if id == "a1"
                 && version == "2.1.322"
                 && mode == "auto"
-                && effort == "default"
                 && commands == &["compact", "model"]
                 && fast == "off"
         ));
@@ -1941,12 +2028,19 @@ mod tests {
     }
 
     #[test]
-    fn the_context_usage_tells_the_model_and_where_claude_code_compacts() {
+    fn the_context_usage_tells_its_count_the_model_and_where_claude_code_compacts() {
         let line = context_response(&Value::Null, 1_000_000, Some(967_000));
         let events = read_events(&line).expect("a readable line");
-        let [_, Event::Model(model), Event::Ceiling(ceiling)] = events.as_slice() else {
-            panic!("the model and the ceiling");
+        let [
+            _,
+            Event::CountedTokens(tokens),
+            Event::Model(model),
+            Event::Ceiling(ceiling),
+        ] = events.as_slice()
+        else {
+            panic!("the count, the model and the ceiling");
         };
+        assert_eq!(*tokens, 13_351);
         assert_eq!(model, "claude-opus-5-5");
         assert_eq!(*ceiling, Ceiling::Compact(967_000));
     }

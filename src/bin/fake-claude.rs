@@ -88,6 +88,7 @@ impl Fake {
     fn answer_request(&mut self, message: &Value) -> bool {
         match message["request"]["subtype"].as_str() {
             Some("initialize") => send(&contract::initialize_response(&account())),
+            Some("get_settings") => respond(message, &settings()),
             Some("get_context_usage") => respond(message, &context_usage()),
             Some("mcp_status") => respond(message, &mcp_status()),
             Some("get_usage") => respond(message, &plan_usage()),
@@ -411,10 +412,16 @@ fn account() -> Value {
     }
 }
 
-/// The usage of a new session's context, which has had no call. It also tells the model, the
-/// window and where Claude Code compacts.
+/// The settings, which every file passed, with the effort that applies.
+fn settings() -> Value {
+    json!({"applied": {"effort": "high"}})
+}
+
+/// The usage of a new session's context, which has had no call, and Claude Code's own count of
+/// its tokens. It also tells the model, the window and where Claude Code compacts.
 fn context_usage() -> Value {
     json!({
+        "totalTokens": 21_513,
         "model": "claude-opus-5-5",
         "maxTokens": 1_000_000,
         "isAutoCompactEnabled": true,

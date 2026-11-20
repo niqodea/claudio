@@ -26,8 +26,10 @@ pub struct Context {
     cache: Cache,
     /// The TTL of the cache entry, which the last call that wrote one told.
     ttl: Duration,
-    /// What the context can grow to, as Claude Code told it when the session started. It holds
-    /// until the model or the settings change during the session, which leaves it out of date.
+    /// The tokens of a context with no call yet, as Claude Code counts them itself, none before
+    /// it tells them.
+    counted: Option<u64>,
+    /// What the context can grow to, as Claude Code told it last.
     ceiling: Option<Ceiling>,
 }
 
@@ -59,6 +61,7 @@ impl Context {
             tokens: 0,
             cache: Cache::Starting,
             ttl: SHORTEST_TTL,
+            counted: None,
             ceiling: None,
         }
     }
@@ -67,10 +70,18 @@ impl Context {
         self.ceiling = Some(ceiling);
     }
 
-    /// The tokens of the context, none before a call tells them.
+    /// Notes the tokens of the context as Claude Code counts them itself, which stand for a
+    /// context with no call yet.
+    pub fn note_counted(&mut self, tokens: u64) {
+        self.counted = Some(tokens);
+    }
+
+    /// The tokens of the context: a call's, and Claude Code's own count before the first call,
+    /// none before either tells them.
     pub fn tokens(&self) -> Option<u64> {
         match self.cache {
-            Cache::Starting | Cache::Empty => None,
+            Cache::Starting => None,
+            Cache::Empty => self.counted,
             Cache::WarmUntil(_) | Cache::Unknown => Some(self.tokens),
         }
     }
@@ -153,6 +164,7 @@ impl Context {
     /// Starts over for a cleared context, which holds nothing yet, as a new session's.
     pub fn reset(&mut self) {
         self.tokens = 0;
+        self.counted = None;
         self.cache = Cache::Empty;
     }
 }
@@ -174,6 +186,22 @@ mod tests {
         let now = Instant::now();
         assert_eq!(context.level(), Some(0));
         assert_eq!(context.held(now + HOUR), Held::Nothing);
+    }
+
+    #[test]
+    fn a_context_with_no_call_has_claude_codes_count_until_a_call_and_after_a_clear() {
+        let mut context = Context::new();
+        context.note_last_call(None);
+        assert_eq!(context.tokens(), None);
+        context.note_counted(21_000);
+        assert_eq!(context.tokens(), Some(21_000));
+        context.note_call(&usage(40_000, None), Instant::now());
+        context.note_counted(41_000);
+        assert_eq!(context.tokens(), Some(40_000));
+        context.reset();
+        assert_eq!(context.tokens(), None);
+        context.note_counted(22_000);
+        assert_eq!(context.tokens(), Some(22_000));
     }
 
     #[test]

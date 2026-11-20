@@ -200,6 +200,7 @@ impl Shared {
                 self.context.note_call(&usage, Instant::now());
             }
             Event::LastCall(usage) => self.context.note_last_call(usage.as_ref()),
+            Event::CountedTokens(tokens) => self.context.note_counted(tokens),
             Event::Model(model) => self.facts.model = Some(model),
             Event::Ceiling(ceiling) => self.context.note_ceiling(ceiling),
             Event::Ask(ask) => forward(Input::Ask(ask)),

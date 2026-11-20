@@ -97,7 +97,7 @@ impl Setup {
 }
 
 /// The checks, by setup.
-pub const CHECKS: [Check; 18] = [
+pub const CHECKS: [Check; 19] = [
     Check {
         name: "a slow permission check is told",
         setup: Setup::Hermetic(a_slow_permission_check_is_told),
@@ -149,6 +149,10 @@ pub const CHECKS: [Check; 18] = [
     Check {
         name: "the start lists the commands",
         setup: Setup::Live(the_start_lists_the_commands),
+    },
+    Check {
+        name: "the start tells the permission mode",
+        setup: Setup::Live(the_start_tells_the_permission_mode),
     },
     Check {
         name: "a clear resets the session",
@@ -276,6 +280,22 @@ pub(crate) fn the_start_lists_the_commands(claude: &Live) -> Result<(), String> 
     }
 }
 
+/// Seen with Claude Code 2.1.322: the answer to `initialize` tells the permission mode, as
+/// `current_permission_mode`, which `sdk.d.ts` leaves out of `SDKControlInitializeResponse`.
+pub(crate) fn the_start_tells_the_permission_mode(claude: &Live) -> Result<(), String> {
+    let mut run = claude.start()?;
+    run.send(&protocol::Command::Initialize)?;
+    run.close_input();
+    let lines = run.read_to_end()?;
+    let tells =
+        (events(&texts(&lines)).into_iter()).any(|event| matches!(event, Event::PermissionMode(_)));
+    if tells {
+        Ok(())
+    } else {
+        Err("the answer to initialize tells no permission mode".to_string())
+    }
+}
+
 #[must_use]
 pub fn subscription_account() -> Value {
     json!({"subscriptionType": "Claude Team", "apiProvider": "firstParty"})
@@ -305,6 +325,7 @@ pub fn initialize_response(account: &Value) -> String {
         "response": {"subtype": "success", "request_id": protocol::INITIALIZE_REQUEST_ID, "response": {
             "commands": commands,
             "account": account,
+            "current_permission_mode": "default",
         }},
     });
     line.to_string()

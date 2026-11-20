@@ -343,16 +343,21 @@ fn check_claude_code(is_paid: bool) -> Result<ExitCode, String> {
         );
     }
     let mut failed = 0;
+    let width = (contract::CHECKS.iter())
+        .map(|check| check.setup.name().len())
+        .max()
+        .unwrap_or(0);
     for check in &contract::CHECKS {
-        if check.is_paid && !is_paid {
-            println!("skip  {} (paid, --paid runs it)", check.name);
+        let setup = format!("{:width$}", check.setup.name());
+        if check.setup.is_paid() && !is_paid {
+            println!("skip  {setup}  {} (--paid runs it)", check.name);
             continue;
         }
-        match (check.run)(&program) {
-            Ok(()) => println!("ok    {}", check.name),
+        match check.setup.run(&program) {
+            Ok(()) => println!("ok    {setup}  {}", check.name),
             Err(error) => {
                 failed += 1;
-                println!("FAIL  {}: {error}", check.name);
+                println!("FAIL  {setup}  {}: {error}", check.name);
             }
         }
     }

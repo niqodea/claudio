@@ -8,9 +8,11 @@ fn the_fake_passes_the_free_checks() {
     let fake = Path::new(env!("CARGO_BIN_EXE_fake-claude"));
     let failures: Vec<String> = claudio::contract::CHECKS
         .iter()
-        .filter(|check| !check.is_paid)
+        .filter(|check| !check.setup.is_paid())
         .filter_map(|check| {
-            (check.run)(fake)
+            check
+                .setup
+                .run(fake)
                 .err()
                 .map(|error| format!("{}: {error}", check.name))
         })

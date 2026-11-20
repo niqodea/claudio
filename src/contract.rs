@@ -10,14 +10,8 @@
 //! The README's "What claudio relies on" tells where the checks fit: what claudio shows is
 //! either promised by the SDK's types or observed by a check.
 //!
-//! A free check makes no call to the API, or calls the fake of `fake_api` instead. A paid one
-//! makes a few, with the cheapest model, and runs only with `--paid`.
-//!
-//! A check against the fake sees Claude Code with the defaults of the flags it fetches from
-//! Anthropic's servers, since its config directory and key are its own, so the fetch fails. A
-//! user's session fetches them with the user's login, and may differ, also with no new version
-//! of Claude Code. The other checks run with the user's login, so they see the flags a session
-//! gets.
+//! A check is hermetic, live or live and paid, as [`Setup`] tells, by what it runs Claude Code
+//! with.
 //! Ref: <https://martinfowler.com/bliki/ContractTest.html>, on checking a test double against
 //! the real service
 
@@ -38,100 +32,143 @@ use crate::protocol::{self, Event, read_events};
 /// A check, which fails with what Claude Code did instead.
 pub struct Check {
     pub name: &'static str,
-    pub is_paid: bool,
-    pub run: fn(&Path) -> Result<(), String>,
+    pub setup: Setup,
 }
 
+/// How a check starts Claude Code, which trades hermeticity, a result that depends on nothing
+/// but the check, for fidelity to a user's session. A check that needs no answer of Claude's is
+/// live, which costs nothing. One that does is hermetic when the fake can give the answer, and
+/// live and paid when only the API can. Each setup gives its check the one way it has to start
+/// Claude Code, so a check runs as its setup says.
+/// Ref: <https://abseil.io/resources/swe-book/html/ch14.html#the_system_under_test>, on
+/// hermeticity and fidelity: "Often these two factors are in direct conflict"
+/// Ref: <https://abseil.io/resources/swe-book/html/ch11.html#test_size>, on telling tests apart
+/// by the resources they need, like the network beyond localhost
+#[derive(Clone, Copy)]
+pub enum Setup {
+    /// Claude Code runs against the fake of `fake_api`, with a config directory of its own: the
+    /// check is free, works offline and gives the same result on every run, while Claude Code
+    /// cannot fetch its flags with the user's login, so each keeps its default.
+    Hermetic(fn(&Hermetic) -> Result<(), String>),
+    /// Claude Code runs with the user's login, so it sees the flags a session gets, and the
+    /// check sends only what Claude Code answers itself, like `/clear`, so it is free.
+    Live(fn(&Live) -> Result<(), String>),
+    /// Claude Code runs with the user's login, and Claude answers with [`MODEL`], a few cents in
+    /// all, so the check runs only with `--paid`.
+    LivePaid(fn(&Live) -> Result<(), String>),
+}
+
+impl Setup {
+    /// The setup's name, as `check-claude-code` shows it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Setup::Hermetic(_) => "hermetic",
+            Setup::Live(_) => "live",
+            Setup::LivePaid(_) => "live paid",
+        }
+    }
+
+    #[must_use]
+    pub fn is_paid(self) -> bool {
+        matches!(self, Setup::LivePaid(_))
+    }
+
+    /// Runs the check against `program`, which the setup starts.
+    ///
+    /// # Errors
+    ///
+    /// Fails with what Claude Code did instead of what the check expects.
+    pub fn run(self, program: &Path) -> Result<(), String> {
+        match self {
+            Setup::Hermetic(check) => check(&Hermetic { program }),
+            Setup::Live(check) => check(&Live {
+                program,
+                args: &[],
+                timeout: FREE_TIMEOUT,
+            }),
+            Setup::LivePaid(check) => check(&Live {
+                program,
+                args: &["--model", MODEL],
+                timeout: PAID_TIMEOUT,
+            }),
+        }
+    }
+}
+
+/// The checks, by setup.
 pub const CHECKS: [Check; 18] = [
     Check {
-        name: "session state comes with its variable",
-        is_paid: false,
-        run: session_state_comes_with_its_variable,
-    },
-    Check {
-        name: "send now is announced",
-        is_paid: false,
-        run: send_now_is_announced,
-    },
-    Check {
-        name: "the paying key is named by its source",
-        is_paid: false,
-        run: the_paying_key_is_named_by_its_source,
-    },
-    Check {
-        name: "the start lists the commands",
-        is_paid: false,
-        run: the_start_lists_the_commands,
-    },
-    Check {
-        name: "a clear resets the session",
-        is_paid: false,
-        run: a_clear_resets_the_session,
-    },
-    Check {
         name: "a slow permission check is told",
-        is_paid: false,
-        run: a_slow_permission_check_is_told,
+        setup: Setup::Hermetic(a_slow_permission_check_is_told),
     },
     Check {
         name: "a background task is told from start to end",
-        is_paid: false,
-        run: a_background_task_is_told_from_start_to_end,
+        setup: Setup::Hermetic(a_background_task_is_told_from_start_to_end),
     },
     Check {
         name: "a call moved to the background is told",
-        is_paid: false,
-        run: a_call_moved_to_the_background_is_told,
+        setup: Setup::Hermetic(a_call_moved_to_the_background_is_told),
     },
     Check {
         name: "a call moved by its id makes way for send now",
-        is_paid: false,
-        run: a_call_moved_by_its_id_makes_way_for_send_now,
+        setup: Setup::Hermetic(a_call_moved_by_its_id_makes_way_for_send_now),
     },
     Check {
         name: "a subagent is told from start to end",
-        is_paid: false,
-        run: a_subagent_is_told_from_start_to_end,
+        setup: Setup::Hermetic(a_subagent_is_told_from_start_to_end),
     },
     Check {
         name: "a message to a subagent resumes it",
-        is_paid: false,
-        run: a_message_to_a_subagent_resumes_it,
+        setup: Setup::Hermetic(a_message_to_a_subagent_resumes_it),
     },
     Check {
         name: "a stopped call gets its result",
-        is_paid: false,
-        run: a_stopped_call_gets_its_result,
+        setup: Setup::Hermetic(a_stopped_call_gets_its_result),
     },
     Check {
         name: "a clear follows the turn on the last task's end",
-        is_paid: false,
-        run: a_clear_follows_the_turn_on_the_last_tasks_end,
+        setup: Setup::Hermetic(a_clear_follows_the_turn_on_the_last_tasks_end),
     },
     Check {
         name: "a stop of a task that ended succeeds",
-        is_paid: false,
-        run: a_stop_of_a_task_that_ended_succeeds,
+        setup: Setup::Hermetic(a_stop_of_a_task_that_ended_succeeds),
+    },
+    Check {
+        name: "session state comes with its variable",
+        setup: Setup::Live(session_state_comes_with_its_variable),
+    },
+    Check {
+        name: "send now is announced",
+        setup: Setup::Live(send_now_is_announced),
+    },
+    Check {
+        name: "the paying key is named by its source",
+        setup: Setup::Live(the_paying_key_is_named_by_its_source),
+    },
+    Check {
+        name: "the start lists the commands",
+        setup: Setup::Live(the_start_lists_the_commands),
+    },
+    Check {
+        name: "a clear resets the session",
+        setup: Setup::Live(a_clear_resets_the_session),
     },
     Check {
         name: "a rate limit event has every window",
-        is_paid: true,
-        run: a_rate_limit_event_has_every_window,
+        setup: Setup::LivePaid(a_rate_limit_event_has_every_window),
     },
     Check {
         name: "a permission after the input closes fails",
-        is_paid: true,
-        run: a_permission_after_the_input_closes_fails,
+        setup: Setup::LivePaid(a_permission_after_the_input_closes_fails),
     },
     Check {
         name: "SIGINT stops Claude Code after its input closes",
-        is_paid: true,
-        run: sigint_stops_claude_code_after_its_input_closes,
+        setup: Setup::LivePaid(sigint_stops_claude_code_after_its_input_closes),
     },
     Check {
         name: "the output closes as Claude Code exits",
-        is_paid: true,
-        run: the_output_closes_as_claude_code_exits,
+        setup: Setup::LivePaid(the_output_closes_as_claude_code_exits),
     },
 ];
 
@@ -147,11 +184,12 @@ const PAID_TIMEOUT: Duration = Duration::from_secs(180);
 /// With `CLAUDE_CODE_SDK_READS_SESSION_STATE` set, as the Agent SDK sets it for the Claude Code
 /// it starts, Claude Code sends `session_state_changed` as a turn starts and ends, and without
 /// it, never. The SDK's types type the message, but name no variable.
-pub(crate) fn session_state_comes_with_its_variable(program: &Path) -> Result<(), String> {
-    let with = Run::start(program, &[], &[], &[])?.clear_once()?;
+pub(crate) fn session_state_comes_with_its_variable(claude: &Live) -> Result<(), String> {
+    let with = claude.start()?.clear_once()?;
     compare(&["state"], &with, &session_states_of_a_turn())?;
-    let without =
-        Run::start(program, &[], &[], &["CLAUDE_CODE_SDK_READS_SESSION_STATE"])?.clear_once()?;
+    let without = claude
+        .start_with(&[], &[], &["CLAUDE_CODE_SDK_READS_SESSION_STATE"])?
+        .clear_once()?;
     compare(&["state"], &without, &[])
 }
 
@@ -173,9 +211,9 @@ pub fn session_state(state: &str) -> String {
 /// as a plain interrupt.
 /// Ref: <https://code.claude.com/docs/en/changelog>, on send now moving running tools to the
 /// background
-pub(crate) fn send_now_is_announced(program: &Path) -> Result<(), String> {
+pub(crate) fn send_now_is_announced(claude: &Live) -> Result<(), String> {
     // A clear starts a session, whose init comes without a call
-    let lines = Run::start(program, &[], &[], &[])?.clear_once()?;
+    let lines = claude.start()?.clear_once()?;
     let announces = lines.iter().any(|line| {
         let line: Value = serde_json::from_str(line).unwrap_or_default();
         line["subtype"] == "init"
@@ -194,7 +232,7 @@ pub(crate) fn send_now_is_announced(program: &Path) -> Result<(), String> {
 /// `apiKeySource` with its name, `ANTHROPIC_AUTH_TOKEN` fills `tokenSource` with its name, and
 /// the subscription's login leaves `apiKeySource` out and `tokenSource` out or `claude.ai`. The
 /// check needs a login to the subscription, and no settings file that sets either variable.
-pub(crate) fn the_paying_key_is_named_by_its_source(program: &Path) -> Result<(), String> {
+pub(crate) fn the_paying_key_is_named_by_its_source(claude: &Live) -> Result<(), String> {
     const KEYS: [&str; 2] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
     let cases = [
         (None, subscription_account()),
@@ -207,10 +245,10 @@ pub(crate) fn the_paying_key_is_named_by_its_source(program: &Path) -> Result<()
             .into_iter()
             .filter(|other| Some(*other) != key)
             .collect();
-        let mut run = Run::start(program, &[], &env, &removed)?;
+        let mut run = claude.start_with(&[], &env, &removed)?;
         run.send(&protocol::Command::Initialize)?;
         run.close_input();
-        let lines = run.read_to_end(FREE_TIMEOUT)?;
+        let lines = run.read_to_end()?;
         let real = texts(&lines);
         compare(&["paying"], &real, &[initialize_response(&account)])
             .map_err(|error| format!("with {}: {error}", key.unwrap_or("the subscription")))?;
@@ -223,11 +261,11 @@ pub(crate) fn the_paying_key_is_named_by_its_source(program: &Path) -> Result<()
 /// SDK's `supportedCommands` reads them there.
 /// Ref: <https://code.claude.com/docs/en/agent-sdk/slash-commands>, on the commands a session
 /// runs
-pub(crate) fn the_start_lists_the_commands(program: &Path) -> Result<(), String> {
-    let mut run = Run::start(program, &[], &[], &[])?;
+pub(crate) fn the_start_lists_the_commands(claude: &Live) -> Result<(), String> {
+    let mut run = claude.start()?;
     run.send(&protocol::Command::Initialize)?;
     run.close_input();
-    let lines = run.read_to_end(FREE_TIMEOUT)?;
+    let lines = run.read_to_end()?;
     let lists = events(&texts(&lines)).into_iter().any(|event| {
         matches!(event, Event::Commands(commands) if commands.iter().any(|name| name == "compact"))
     });
@@ -275,12 +313,12 @@ pub fn initialize_response(account: &Value) -> String {
 /// Seen with Claude Code 2.1.322: `/clear` sends `conversation_reset`, whose `session_id` is
 /// the cleared session's, then the new session's init, then a result that ends a turn of no
 /// calls.
-pub(crate) fn a_clear_resets_the_session(program: &Path) -> Result<(), String> {
-    let mut run = Run::start(program, &[], &[], &[])?;
+pub(crate) fn a_clear_resets_the_session(claude: &Live) -> Result<(), String> {
+    let mut run = claude.start()?;
     run.send(&protocol::Command::Run { command: "clear" })?;
     run.send(&protocol::Command::Run { command: "clear" })?;
     run.close_input();
-    let lines = run.read_to_end(FREE_TIMEOUT)?;
+    let lines = run.read_to_end()?;
     let real = texts(&lines);
     compare(&["reset", "session", "turn end"], &real, &two_clears())
 }
@@ -329,8 +367,8 @@ pub fn init(session: &str) -> String {
 /// The check runs Claude Code against [`crate::fake_api`], whose classifier answers after 5
 /// seconds. The call runs `sh -c true`, since Claude Code allows a read-only command without the
 /// classifier.
-pub(crate) fn a_slow_permission_check_is_told(program: &Path) -> Result<(), String> {
-    let lines = on_fake(program, Duration::from_secs(5), |run| {
+pub(crate) fn a_slow_permission_check_is_told(fake: &Hermetic) -> Result<(), String> {
+    let lines = fake.run_with_slow_classifier(|run| {
         run.send_message(SLOW_PERMISSION_CHECK_MESSAGE)?;
         Ok(Vec::new())
     })?;
@@ -394,21 +432,21 @@ pub fn slow_permission_check() -> Vec<String> {
 ///
 /// The check runs Claude Code against [`crate::fake_api`], and waits for each task's end before
 /// it closes the input, since Claude Code waits for its background tasks once the input closes.
-pub(crate) fn a_background_task_is_told_from_start_to_end(program: &Path) -> Result<(), String> {
+pub(crate) fn a_background_task_is_told_from_start_to_end(fake: &Hermetic) -> Result<(), String> {
     for (message, status) in [
         (BACKGROUND_TASK_MESSAGE, "completed"),
         (FAILED_BACKGROUND_TASK_MESSAGE, "failed"),
     ] {
-        let lines = on_fake(program, Duration::ZERO, |run| {
+        let lines = fake.run(|run| {
             run.send_message(message)?;
-            run.read_until(FREE_TIMEOUT, is_no_background_task)
+            run.read_until(is_no_background_task)
         })?;
         compare(TASK_KINDS, &lines, &background_task(status))
             .map_err(|error| format!("a task that {status}: {error}"))?;
     }
-    let lines = on_fake(program, Duration::ZERO, |run| {
+    let lines = fake.run(|run| {
         run.send_message(LONG_BACKGROUND_TASK_MESSAGE)?;
-        let mut lines = run.read_until(FREE_TIMEOUT, |line| line["subtype"] == "task_started")?;
+        let mut lines = run.read_until(|line| line["subtype"] == "task_started")?;
         let task_id = lines
             .last()
             .map_or("", |line| line["task_id"].as_str().unwrap_or(""));
@@ -416,8 +454,8 @@ pub(crate) fn a_background_task_is_told_from_start_to_end(program: &Path) -> Res
             id: "claudio-check-stop",
             text: &stop_message(task_id),
         })?;
-        lines.extend(run.read_until(FREE_TIMEOUT, is_no_background_task)?);
-        lines.extend(run.read_until(FREE_TIMEOUT, is_tool_result)?);
+        lines.extend(run.read_until(is_no_background_task)?);
+        lines.extend(run.read_until(is_tool_result)?);
         Ok(lines)
     })?;
     compare(TASK_KINDS, &lines, &stopped_background_task())
@@ -428,10 +466,10 @@ pub(crate) fn a_background_task_is_told_from_start_to_end(program: &Path) -> Res
 /// foreground, moves the command to the background. Its task started in the foreground, as for
 /// any command that runs for a while, then a `task_updated` says it moved, before the call's
 /// result. The task's end then comes as for any background task.
-pub(crate) fn a_call_moved_to_the_background_is_told(program: &Path) -> Result<(), String> {
-    let lines = on_fake(program, Duration::ZERO, |run| {
+pub(crate) fn a_call_moved_to_the_background_is_told(fake: &Hermetic) -> Result<(), String> {
+    let lines = fake.run(|run| {
         run.send_message(MOVED_CALL_MESSAGE)?;
-        let mut lines = run.read_until(FREE_TIMEOUT, is_tool_use)?;
+        let mut lines = run.read_until(is_tool_use)?;
         run.send(&protocol::Command::Message {
             id: "claudio-check-move",
             text: REPLY_OK_MESSAGE,
@@ -440,7 +478,7 @@ pub(crate) fn a_call_moved_to_the_background_is_told(program: &Path) -> Result<(
             request_id: "claudio-check-send-now".to_string(),
             message_id: "claudio-check-move",
         })?;
-        lines.extend(run.read_until(FREE_TIMEOUT, is_no_background_task)?);
+        lines.extend(run.read_until(is_no_background_task)?);
         Ok(lines)
     })?;
     compare(TASK_KINDS, &lines, &moved_call())
@@ -451,10 +489,10 @@ pub(crate) fn a_call_moved_to_the_background_is_told(program: &Path) -> Result<(
 /// that runs in the foreground, and spares the subagent the call started. Claude Code alone
 /// stops the turn for a subagent that runs in the foreground, and the subagent with it. The
 /// move leaves the subagent's own command in the foreground, where the subagent waits for it.
-pub(crate) fn a_call_moved_by_its_id_makes_way_for_send_now(program: &Path) -> Result<(), String> {
-    let lines = on_fake(program, Duration::ZERO, |run| {
+pub(crate) fn a_call_moved_by_its_id_makes_way_for_send_now(fake: &Hermetic) -> Result<(), String> {
+    let lines = fake.run(|run| {
         run.send_message(MOVED_SUBAGENT_MESSAGE)?;
-        let mut lines = run.read_until(FREE_TIMEOUT, |line| {
+        let mut lines = run.read_until(|line| {
             line["subtype"] == "task_started" && line["task_type"] == "local_bash"
         })?;
         let agent_call = lines
@@ -473,7 +511,7 @@ pub(crate) fn a_call_moved_by_its_id_makes_way_for_send_now(program: &Path) -> R
             request_id: "claudio-check-send-now".to_string(),
             message_id: "claudio-check-move",
         })?;
-        lines.extend(run.read_until(FREE_TIMEOUT, is_no_background_task)?);
+        lines.extend(run.read_until(is_no_background_task)?);
         Ok(lines)
     })?;
     compare(TASK_KINDS, &lines, &moved_subagent())
@@ -579,14 +617,14 @@ pub fn moved_subagent() -> Vec<String> {
 /// flags from Anthropic with the user's credentials, which the fake lacks, so a user's sessions
 /// may differ. In one that sends every subagent to the background, claudio shows them all as
 /// ones in the background, which it shows as well.
-pub(crate) fn a_subagent_is_told_from_start_to_end(program: &Path) -> Result<(), String> {
+pub(crate) fn a_subagent_is_told_from_start_to_end(fake: &Hermetic) -> Result<(), String> {
     for (message, is_backgrounded) in [
         (SUBAGENT_MESSAGE, false),
         (BACKGROUND_SUBAGENT_MESSAGE, true),
     ] {
-        let lines = on_fake(program, Duration::ZERO, |run| {
+        let lines = fake.run(|run| {
             run.send_message(message)?;
-            run.read_until(FREE_TIMEOUT, |line| line["subtype"] == "task_notification")
+            run.read_until(|line| line["subtype"] == "task_notification")
         })?;
         compare(
             &["task started", "task ended"],
@@ -689,10 +727,10 @@ pub fn subagent(is_backgrounded: bool) -> Vec<String> {
 /// ended, which its task's id is, resumes it, as a task of the same id that the call starts,
 /// in the background. `SendMessage` is absent from the SDK's types of tools, and only Claude
 /// Code's result for an `Agent` call tells Claude to send to the id.
-pub(crate) fn a_message_to_a_subagent_resumes_it(program: &Path) -> Result<(), String> {
-    let lines = on_fake(program, Duration::ZERO, |run| {
+pub(crate) fn a_message_to_a_subagent_resumes_it(fake: &Hermetic) -> Result<(), String> {
+    let lines = fake.run(|run| {
         run.send_message(SUBAGENT_MESSAGE)?;
-        let mut lines = run.read_until(FREE_TIMEOUT, |line| line["type"] == "result")?;
+        let mut lines = run.read_until(|line| line["type"] == "result")?;
         let agent = lines
             .iter()
             .find(|line| line["subtype"] == "task_started")
@@ -701,7 +739,7 @@ pub(crate) fn a_message_to_a_subagent_resumes_it(program: &Path) -> Result<(), S
             id: "claudio-check-resume",
             text: &resume_message(agent),
         })?;
-        lines.extend(run.read_until(FREE_TIMEOUT, |line| line["subtype"] == "task_notification")?);
+        lines.extend(run.read_until(|line| line["subtype"] == "task_notification")?);
         Ok(lines)
     })?;
     compare(&["task started", "task ended"], &lines, &resumed_subagent())
@@ -782,14 +820,14 @@ pub fn resumed_subagent() -> Vec<String> {
 
 /// Seen with Claude Code 2.1.322: an interrupt fails the call that runs with a result of its
 /// own, so every call gets its result, however its turn ends.
-pub(crate) fn a_stopped_call_gets_its_result(program: &Path) -> Result<(), String> {
-    let lines = on_fake(program, Duration::ZERO, |run| {
+pub(crate) fn a_stopped_call_gets_its_result(fake: &Hermetic) -> Result<(), String> {
+    let lines = fake.run(|run| {
         run.send_message(STOPPED_CALL_MESSAGE)?;
-        let mut lines = run.read_until(FREE_TIMEOUT, is_tool_use)?;
+        let mut lines = run.read_until(is_tool_use)?;
         run.send(&protocol::Command::Interrupt {
             request_id: "claudio-check-interrupt".to_string(),
         })?;
-        lines.extend(run.read_until(FREE_TIMEOUT, |line| line["type"] == "result")?);
+        lines.extend(run.read_until(|line| line["type"] == "result")?);
         Ok(lines)
     })?;
     compare(&["tool use", "tool result"], &lines, &stopped_call())
@@ -799,12 +837,14 @@ pub(crate) fn a_stopped_call_gets_its_result(program: &Path) -> Result<(), Strin
 /// and starts a turn on it before it lists no task left, so a `/clear` sent once it lists none
 /// runs after that turn, and the task's end stays in the session that started it. A subagent's
 /// end was seen to come the same way.
-pub(crate) fn a_clear_follows_the_turn_on_the_last_tasks_end(program: &Path) -> Result<(), String> {
-    let lines = on_fake(program, Duration::ZERO, |run| {
+pub(crate) fn a_clear_follows_the_turn_on_the_last_tasks_end(
+    fake: &Hermetic,
+) -> Result<(), String> {
+    let lines = fake.run(|run| {
         run.send_message(BACKGROUND_TASK_MESSAGE)?;
-        run.read_until(FREE_TIMEOUT, is_no_background_task)?;
+        run.read_until(is_no_background_task)?;
         run.send(&protocol::Command::Run { command: "clear" })?;
-        run.read_until(FREE_TIMEOUT, |line| line["type"] == "conversation_reset")
+        run.read_until(|line| line["type"] == "conversation_reset")
     })?;
     compare(&["turn end", "reset"], &lines, &clear_after_task())
 }
@@ -822,10 +862,10 @@ pub fn clear_after_task() -> Vec<String> {
 
 /// Seen with Claude Code 2.1.322: `stop_task` succeeds for a task that ended already, as for one
 /// that runs, so a stop sent as the task ends never fails.
-pub(crate) fn a_stop_of_a_task_that_ended_succeeds(program: &Path) -> Result<(), String> {
-    let lines = on_fake(program, Duration::ZERO, |run| {
+pub(crate) fn a_stop_of_a_task_that_ended_succeeds(fake: &Hermetic) -> Result<(), String> {
+    let lines = fake.run(|run| {
         run.send_message(BACKGROUND_TASK_MESSAGE)?;
-        let lines = run.read_until(FREE_TIMEOUT, is_no_background_task)?;
+        let lines = run.read_until(is_no_background_task)?;
         let task_id = (lines.iter())
             .find(|line| line["subtype"] == "task_started")
             .map_or("", |line| line["task_id"].as_str().unwrap_or(""));
@@ -833,7 +873,7 @@ pub(crate) fn a_stop_of_a_task_that_ended_succeeds(program: &Path) -> Result<(),
             request_id: "claudio-check-stop".to_string(),
             task_id,
         })?;
-        run.read_until(FREE_TIMEOUT, |line| {
+        run.read_until(|line| {
             line["type"] == "control_response"
                 && line["response"]["request_id"] == "claudio-check-stop"
         })
@@ -1087,11 +1127,11 @@ pub fn stopped_call() -> Vec<String> {
 /// Seen with Claude Code 2.1.316: only `unifiedWindows` holds every limit of the plan, where the
 /// documented fields describe only the limit that applies now. The check needs a login to the
 /// subscription, whose plan has the limits.
-pub(crate) fn a_rate_limit_event_has_every_window(program: &Path) -> Result<(), String> {
-    let mut run = Run::start(program, &["--model", MODEL], &[], &[])?;
+pub(crate) fn a_rate_limit_event_has_every_window(claude: &Live) -> Result<(), String> {
+    let mut run = claude.start()?;
     run.send_message("Reply with the single word ok.")?;
     run.close_input();
-    let lines = run.read_to_end(PAID_TIMEOUT)?;
+    let lines = run.read_to_end()?;
     let mut real = summary(&["limits"], &events(&texts(&lines)));
     // A turn can tell the limits more than once, each time whole
     real.dedup();
@@ -1123,18 +1163,13 @@ pub fn rate_limit_event() -> String {
 
 /// Seen with Claude Code 2.1.316: once its input closed, Claude Code fails each permission it
 /// would ask for, with "Stream closed" in the tool's result.
-pub(crate) fn a_permission_after_the_input_closes_fails(program: &Path) -> Result<(), String> {
-    let mut run = Run::start(
-        program,
-        &["--model", MODEL, "--permission-mode", "default"],
-        &[],
-        &[],
-    )?;
+pub(crate) fn a_permission_after_the_input_closes_fails(claude: &Live) -> Result<(), String> {
+    let mut run = claude.start_with(&["--permission-mode", "default"], &[], &[])?;
     run.send_message(
         "Use the Bash tool to run this command, and nothing else: touch claudio-check",
     )?;
     run.close_input();
-    let lines = run.read_to_end(PAID_TIMEOUT)?;
+    let lines = run.read_to_end()?;
     let results: Vec<String> = events(&texts(&lines))
         .into_iter()
         .filter_map(|event| match event {
@@ -1152,47 +1187,36 @@ pub(crate) fn a_permission_after_the_input_closes_fails(program: &Path) -> Resul
 /// Seen with Claude Code 2.1.316: SIGINT stops Claude's turn and its background tasks, as
 /// Ctrl+C does a program's work in the terminal, and Claude Code then exits, since its input
 /// closed.
-pub(crate) fn sigint_stops_claude_code_after_its_input_closes(
-    program: &Path,
-) -> Result<(), String> {
-    let mut run = Run::start(
-        program,
-        &["--model", MODEL, "--allowedTools", "Bash(sleep:*)"],
-        &[],
-        &[],
-    )?;
+pub(crate) fn sigint_stops_claude_code_after_its_input_closes(claude: &Live) -> Result<(), String> {
+    let mut run = claude.start_with(&["--allowedTools", "Bash(sleep:*)"], &[], &[])?;
     run.send_message(
         "Run the Bash command `sleep 60` with run_in_background set to true, then reply with the single word started.",
     )?;
     run.close_input();
-    run.read_until(PAID_TIMEOUT, |line| {
+    run.read_until(|line| {
         line["subtype"] == "background_tasks_changed"
             && line["tasks"]
                 .as_array()
                 .is_some_and(|tasks| !tasks.is_empty())
     })?;
     run.interrupt()?;
-    run.wait(Duration::from_secs(15))
-        .map_err(|error| format!("after SIGINT, {error}"))
+    run.timeout = Duration::from_secs(15);
+    run.wait().map_err(|error| format!("after SIGINT, {error}"))
 }
 
 /// Seen with Claude Code 2.1.316: the processes Claude Code starts write to files of their own,
 /// so its output closes as it exits, even while a process it started still runs.
-pub(crate) fn the_output_closes_as_claude_code_exits(program: &Path) -> Result<(), String> {
-    let mut run = Run::start(
-        program,
-        &["--model", MODEL, "--allowedTools", "Bash(sleep:*)"],
-        &[],
-        &[],
-    )?;
+pub(crate) fn the_output_closes_as_claude_code_exits(claude: &Live) -> Result<(), String> {
+    let mut run = claude.start_with(&["--allowedTools", "Bash(sleep:*)"], &[], &[])?;
     run.send_message(
         "Run this exact Bash command, without run_in_background: sleep 60 & Then reply with the single word started.",
     )?;
     run.close_input();
-    run.wait(PAID_TIMEOUT)?;
+    run.wait()?;
     // The output holds what Claude Code wrote before it exited, which a reader takes at once
+    run.timeout = Duration::from_secs(2);
     let lines = run
-        .read_to_end(Duration::from_secs(2))
+        .read_to_end()
         .map_err(|error| format!("after Claude Code exited, {error}"))?;
     let ran_bash = events(&texts(&lines))
         .iter()
@@ -1204,37 +1228,87 @@ pub(crate) fn the_output_closes_as_claude_code_exits(program: &Path) -> Result<(
     }
 }
 
-/// What Claude Code writes as `act` drives it, and then until it exits, its input closed, when
-/// it runs against [`crate::fake_api`], whose classifier answers after `classifier_delay`. It
-/// runs in auto mode, with a config directory of its own, since the user's settings can set
-/// the API's address and key.
-fn on_fake(
-    program: &Path,
-    classifier_delay: Duration,
-    act: impl FnOnce(&mut Run) -> Result<Vec<Value>, String>,
-) -> Result<Vec<String>, String> {
-    let api = FakeApi::start(classifier_delay)?;
-    let config =
-        tempfile::tempdir().map_err(|error| format!("cannot create a directory: {error}"))?;
-    let config_path = config.path().to_string_lossy();
-    let mut run = Run::start(
-        program,
-        &["--model", MODEL, "--permission-mode", "auto"],
-        &[
-            ("ANTHROPIC_BASE_URL", &api.url),
-            ("ANTHROPIC_API_KEY", "claudio-check"),
-            ("CLAUDE_CONFIG_DIR", &config_path),
-        ],
-        &["ANTHROPIC_AUTH_TOKEN"],
-    )?;
-    let lines = act(&mut run).and_then(|mut lines| {
-        run.close_input();
-        lines.extend(run.read_to_end(FREE_TIMEOUT)?);
-        Ok(lines)
-    });
-    // A request that no rule covers explains a timeout too, as Claude Code then retries
-    api.all_covered()?;
-    Ok(texts(&lines?))
+/// What a hermetic check starts Claude Code with.
+pub struct Hermetic<'a> {
+    program: &'a Path,
+}
+
+impl Hermetic<'_> {
+    /// What Claude Code writes as `act` drives it, with the fake's classifier answering at once.
+    fn run(
+        &self,
+        act: impl FnOnce(&mut Run) -> Result<Vec<Value>, String>,
+    ) -> Result<Vec<String>, String> {
+        self.run_with_classifier(Duration::ZERO, act)
+    }
+
+    /// What Claude Code writes as `act` drives it, with the fake's classifier answering after 5
+    /// seconds.
+    fn run_with_slow_classifier(
+        &self,
+        act: impl FnOnce(&mut Run) -> Result<Vec<Value>, String>,
+    ) -> Result<Vec<String>, String> {
+        self.run_with_classifier(Duration::from_secs(5), act)
+    }
+
+    /// What Claude Code writes as `act` drives it, and then until it exits, its input closed,
+    /// when it runs against [`crate::fake_api`], whose classifier answers after
+    /// `classifier_delay`. It runs in auto mode, with a config directory of its own, since the
+    /// user's settings can set the API's address and key.
+    fn run_with_classifier(
+        &self,
+        classifier_delay: Duration,
+        act: impl FnOnce(&mut Run) -> Result<Vec<Value>, String>,
+    ) -> Result<Vec<String>, String> {
+        let api = FakeApi::start(classifier_delay)?;
+        let config =
+            tempfile::tempdir().map_err(|error| format!("cannot create a directory: {error}"))?;
+        let config_path = config.path().to_string_lossy();
+        let mut run = Run::start(
+            self.program,
+            &["--model", MODEL, "--permission-mode", "auto"],
+            &[
+                ("ANTHROPIC_BASE_URL", &api.url),
+                ("ANTHROPIC_API_KEY", "claudio-check"),
+                ("CLAUDE_CONFIG_DIR", &config_path),
+            ],
+            &["ANTHROPIC_AUTH_TOKEN"],
+            FREE_TIMEOUT,
+        )?;
+        let lines = act(&mut run).and_then(|mut lines| {
+            run.close_input();
+            lines.extend(run.read_to_end()?);
+            Ok(lines)
+        });
+        // A request that no rule covers explains a timeout too, as Claude Code then retries
+        api.all_covered()?;
+        Ok(texts(&lines?))
+    }
+}
+
+/// What a live check starts Claude Code with: the user's login, and the setup's arguments.
+pub struct Live<'a> {
+    program: &'a Path,
+    args: &'static [&'static str],
+    timeout: Duration,
+}
+
+impl Live<'_> {
+    /// Starts Claude Code with the setup's arguments.
+    fn start(&self) -> Result<Run, String> {
+        self.start_with(&[], &[], &[])
+    }
+
+    /// Starts Claude Code with the setup's arguments, then `args`, `env` set and `removed` unset.
+    fn start_with(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+        removed: &[&str],
+    ) -> Result<Run, String> {
+        let args: Vec<&str> = self.args.iter().chain(args).copied().collect();
+        Run::start(self.program, &args, env, removed, self.timeout)
+    }
 }
 
 /// Compares the events of the kinds in `kinds` that `real` and `fixture` tell, in order.
@@ -1357,16 +1431,20 @@ struct Run {
     child: Child,
     input: Option<ChildStdin>,
     lines: Receiver<Value>,
+    /// How long a read or a wait waits for Claude Code.
+    timeout: Duration,
     _directory: TempDir,
 }
 
 impl Run {
-    /// Starts `program` with `args` after claudio's own, `env` set and `removed` unset.
+    /// Starts `program` with `args` after claudio's own, `env` set and `removed` unset, to wait
+    /// for it up to `timeout`.
     fn start(
         program: &Path,
         args: &[&str],
         env: &[(&str, &str)],
         removed: &[&str],
+        timeout: Duration,
     ) -> Result<Self, String> {
         let directory =
             tempfile::tempdir().map_err(|error| format!("cannot create a directory: {error}"))?;
@@ -1401,6 +1479,7 @@ impl Run {
             child,
             input,
             lines,
+            timeout,
             _directory: directory,
         })
     }
@@ -1428,16 +1507,13 @@ impl Run {
     fn clear_once(mut self) -> Result<Vec<String>, String> {
         self.send(&protocol::Command::Run { command: "clear" })?;
         self.close_input();
-        let lines = self.read_to_end(FREE_TIMEOUT)?;
+        let lines = self.read_to_end()?;
         Ok(texts(&lines))
     }
 
-    /// The lines Claude Code writes, up to the first one that `is_last` takes, within `timeout`.
-    fn read_until(
-        &mut self,
-        timeout: Duration,
-        is_last: impl Fn(&Value) -> bool,
-    ) -> Result<Vec<Value>, String> {
+    /// The lines Claude Code writes, up to the first one that `is_last` takes, within the timeout.
+    fn read_until(&mut self, is_last: impl Fn(&Value) -> bool) -> Result<Vec<Value>, String> {
+        let timeout = self.timeout;
         let deadline = Instant::now() + timeout;
         let mut lines = Vec::new();
         loop {
@@ -1460,8 +1536,9 @@ impl Run {
         }
     }
 
-    /// The lines Claude Code writes until its output closes, within `timeout`.
-    fn read_to_end(&mut self, timeout: Duration) -> Result<Vec<Value>, String> {
+    /// The lines Claude Code writes until its output closes, within the timeout.
+    fn read_to_end(&mut self) -> Result<Vec<Value>, String> {
+        let timeout = self.timeout;
         let deadline = Instant::now() + timeout;
         let mut lines = Vec::new();
         loop {
@@ -1488,8 +1565,9 @@ impl Run {
         Ok(())
     }
 
-    /// Waits for Claude Code to exit, within `timeout`.
-    fn wait(&mut self, timeout: Duration) -> Result<(), String> {
+    /// Waits for Claude Code to exit, within the timeout.
+    fn wait(&mut self) -> Result<(), String> {
+        let timeout = self.timeout;
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             match self.child.try_wait() {

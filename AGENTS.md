@@ -89,4 +89,5 @@ The conversation follows one grammar, which `src/wording.rs` writes out and hold
 
 ## Checks
 
+- Give each check the setup that `contract::Setup` names for what it needs: live when it needs no answer of Claude's, hermetic when the fake can give the answer, and live and paid only when the API alone can. A live check sees what a user's session sees, and a hermetic one is free and repeatable. [Software Engineering at Google](https://abseil.io/resources/swe-book/html/ch14.html#the_system_under_test), on trading hermeticity for fidelity, [Software Engineering at Google](https://abseil.io/resources/swe-book/html/ch11.html), which prefers "to keep the real dependencies in place when it is feasible to do so"
 - Keep the API of the checks a fake: give each kind of request one rule, listed in the doc of `fake_api`, and fail the check on a request that no rule covers. [Software Engineering at Google](https://abseil.io/resources/swe-book/html/ch13.html#faking-id00043)

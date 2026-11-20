@@ -22,7 +22,7 @@ When its version is not the one claudio was checked against, claudio warns in or
 When Claude Code refuses claudio's request for the context's usage, or answers it in a shape claudio cannot read, claudio stops as it starts, and says why.
 
 `claudio check-claude-code` runs the contract checks against the Claude Code that claudio runs, the one `CLAUDIO_CLAUDE` names too, so it tells whether a newer Claude Code still works with claudio.
-The checks that call the API run only with `--paid`, on the cheapest model, at a few cents in all.
+The checks that have Claude answer run only with `--paid`, on the cheapest model, at a few cents in all.
 
 claudio has no key to switch the permission mode, which Claude Code's settings set, like auto mode in `~/.claude/settings.json`:
 
@@ -65,16 +65,21 @@ What claudio shows, it relies on, and each thing it relies on is either promised
 - promised: the types of the Agent SDK of the same version, `sdk.d.ts`, declare it, as Anthropic's published contract for what Claude Code sends
 - observed: nothing declares it, so a contract check sees it in the real Claude Code, and the code that relies on it links to the check with `Undocumented:`
 
-A check that needs the API to do what it does only now and then, like a slow answer, runs the real Claude Code against a fake of the API on localhost, whose Claude follows one plain rule for each kind of request.
-Such a check is free, works offline, and gives the same result on every run.
+Each check runs Claude Code in one of three setups, which trade hermeticity, a result that depends on nothing but the check, for fidelity to your sessions, as [Software Engineering at Google](https://abseil.io/resources/swe-book/html/ch14.html#the_system_under_test) weighs them:
+
+- hermetic: Claude Code runs against a fake of the API on localhost, with a config directory of its own, for a check that needs an answer the API gives only now and then, like a slow one. The check is free, works offline, and gives the same result on every run
+- live: Claude Code runs with your login, for a check that needs no answer of Claude's, like one of `/clear`. The check is free, and sees Claude Code as your sessions do
+- live and paid: Claude Code runs with your login, and Claude answers with the cheapest model, for a check that needs what only the API gives, like your plan's limits. The check runs only with `--paid`
+
+The fake's Claude follows one plain rule for each kind of request.
 It uses a fake rather than canned answers, since a fake behaves like the real API wherever a check meets it, as [Software Engineering at Google](https://abseil.io/resources/swe-book/html/ch13.html#faking-id00043) recommends.
 The fake's answers follow the API's docs, and Claude Code is what reads them, so a check fails once Claude Code stops accepting them.
 
-A check against the fake sees Claude Code with the defaults of its flags, which may differ from what your sessions do.
+A hermetic check pays for its hermeticity with flags: it sees Claude Code with the defaults of its flags, which may differ from what your sessions do.
 Claude Code fetches flags from Anthropic's servers with your login, and they turn its features on and off, like whether a subagent may run in the foreground.
-A check against the fake runs it with a config directory of its own and a key the fake makes up, so the fetch fails, and every flag keeps its default.
-So a change to a flag on Anthropic's side, which needs no new version of Claude Code, can change what your sessions do while every check against the fake still passes.
-The other checks run with your login, so they see the flags your sessions get.
+A hermetic check runs it with a config directory of its own and a key the fake makes up, so the fetch fails, and every flag keeps its default.
+So a change to a flag on Anthropic's side, which needs no new version of Claude Code, can change what your sessions do while every hermetic check still passes.
+A live check sees the flags your sessions get.
 
 What claudio skips, it relies on in no way, so it needs neither.
 The flag stays as a last net, since Claude Code sends kinds its types never declare, like `session_title_changed`, and catches what neither the types nor the checks foresaw.

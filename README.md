@@ -170,7 +170,7 @@ Enter waits for a second press as on a message: while questions wait, which a co
 
 Claude asks in three kinds of requests: the questions of a call of `AskUserQuestion`, a plan to carry out, from plan mode, and a call to allow, which Claude Code asks you about when its permission mode and rules leave it to you.
 Each request waits until you open it, so no key meant for your message answers one.
-`Y` on the label row counts them, a call's questions as one request, up to 9 and then `+`, in orange while any waits.
+`Y` on the label row counts them, a call's questions as one request, up to 9 and then `+`, reversed while any waits.
 Meanwhile, Enter on a message refuses them, so it waits for a second press.
 Ctrl+Y shows them one at a time, and Ctrl+Y goes back to the message, as Esc does on the list.
 Each part of the screen says one thing about the request.
@@ -356,7 +356,8 @@ Each color means one thing, and a character on the line says it too, as [Design]
 | Dim, or grey on the bar | what stays in the background, like a call's result, whether the call succeeded or failed |
 | The bar's background | what is yours: your lines and the input box |
 | Cyan | the conversation's marks: `››`, `‹‹`, the rules of a boundary `─── cleared ───`, the cursor `❯` among options and the command line's `command:` |
-| Orange | what needs your attention: a warning, after `!`, a key that waits for a second press, questions that wait, a cache that turns cold, a limit near its end |
+| Reversed | what's picked out: your selection, the request or question shown, and `Y` and its count while requests wait |
+| Orange | what needs your attention: a warning, after `!`, a key that waits for a second press, a cache that turns cold, a limit near its end |
 | Red | what failed or was removed: an error that needs you, after `!`, like Claude Code's error output, a limit reached, the lines a diff removes |
 | Green | what is done or added: a submitted answer, the lines a diff adds |
 

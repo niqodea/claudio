@@ -87,6 +87,10 @@ const DIM: Style = Style {
     is_dim: true,
     ..PLAIN
 };
+const REVERSED: Style = Style {
+    is_reversed: true,
+    ..PLAIN
+};
 const RED: Style = foreground(Color::Theme(31));
 const GREEN: Style = foreground(Color::Theme(32));
 const MAGENTA: Style = foreground(Color::Theme(35));
@@ -135,6 +139,9 @@ pub const MARK: Style = CYAN;
 /// What needs the user's attention, like a warning, a key that waits for a second press, or a
 /// cache that turns cold.
 pub const ATTENTION: Style = ORANGE;
+/// What waits for the user's answer: the requests Claude makes. Reversed, as tmux marks a window
+/// that alerts, so it stands out on any theme in no hue of its own.
+pub const AWAITS_YOU: Style = REVERSED;
 /// What failed or was removed: an error, a limit reached, the lines a diff removes. Red reads as
 /// an error, so it says nothing else.
 pub const FAILED_OR_REMOVED: Style = RED;

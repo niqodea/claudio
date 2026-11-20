@@ -46,8 +46,8 @@ use crate::protocol::Command;
 use crate::render::{Output, Status};
 use crate::status;
 use crate::style::{
-    ATTENTION, DONE_OR_ADDED, FAILED_OR_REMOVED, MARK, PLAIN, STRONG, SUBDUED, SUBDUED_ON_BAR,
-    YOURS,
+    ATTENTION, AWAITS_YOU, DONE_OR_ADDED, FAILED_OR_REMOVED, MARK, PLAIN, STRONG, SUBDUED,
+    SUBDUED_ON_BAR, YOURS,
 };
 use crate::terminal::{Settings, run_in_terminal};
 use crate::text::{Line, Span, Text};
@@ -1608,15 +1608,14 @@ fn name_row(done: &[bool], shown: usize, name: fn(usize) -> char, room: usize) -
     row
 }
 
-/// Y and how many questions wait, in the color of a warning while any waits, since only the
-/// user moves them on.
+/// Y and how many requests wait, reversed while any waits, since only the user moves them on.
 fn waiting_indicator(waiting: usize) -> Span {
-    let color = if waiting == 0 {
+    let style = if waiting == 0 {
         SUBDUED_ON_BAR
     } else {
-        ATTENTION
+        AWAITS_YOU
     };
-    Span::new(format!("Y{}", show_count(waiting)), color)
+    Span::new(format!("Y{}", show_count(waiting)), style)
 }
 
 /// B and how many tasks run in the background, like a shell Claude started, in the bar's grey
@@ -2079,7 +2078,7 @@ mod tests {
         assert_eq!(background_indicator(9), Span::new("B9", SUBDUED_ON_BAR));
         assert_eq!(background_indicator(10), Span::new("B+", SUBDUED_ON_BAR));
         assert_eq!(waiting_indicator(0), Span::new("Y0", SUBDUED_ON_BAR));
-        assert_eq!(waiting_indicator(12), Span::new("Y+", ATTENTION));
+        assert_eq!(waiting_indicator(12), Span::new("Y+", AWAITS_YOU));
     }
 
     #[test]

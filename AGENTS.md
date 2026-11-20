@@ -85,6 +85,12 @@ The conversation follows one grammar, which `src/wording.rs` writes out and hold
 - Make each tool's layout fill `INPUT_ROWS` exactly, so a call that gives every field shows them all, and the field that matters most, like a command, or what an edit puts in, takes the most rows: `LAYOUTS`, checked by a test
 - Name an MCP server by a field of its own, `mcp_server`, among a call's other fields by name, since only the word MCP tells a person where the tool comes from: `MCP_SERVER`, claudio's own rule
 
+## Status
+
+- Read each fact of the status from an answer Claude Code gives before the first message, and show `?` until it comes, never a value of claudio's own: a fact read from the first message's init showed `?` until then, and the effort, which that init leaves out in claudio's sessions, showed `default` while Claude Code used `medium`: `status::lines`, claudio's own rule
+- Keep the open status current, asking again for what Claude Code tells only when asked, so a status opened too early fills in rather than keeping what Claude Code had not loaded yet: `Refresh` in `show_screen`. [NN/g](https://www.nngroup.com/articles/visibility-system-status/), which asks to keep users informed of what is going on "within a reasonable amount of time"
+- Count among the MCP servers those of the session, the ones the user set up and the claude.ai connectors that run or failed, and leave out the connectors that wait for a sign-in, which claude.ai offers every account: 35 of them buried the 3 that ran: `mcp`, claudio's own rule
+
 ## Keys
 
 - Let the key that names an option, its number or its letter, only move the cursor to it, and Enter answer, so the user sees their choice before it counts, and a slip, like Ctrl+Y that loses its Ctrl, answers nothing. [Primer](https://primer.style/accessibility/patterns/keyboard-shortcuts#avoid-single-character-shortcuts-by-default), [NN/g](https://www.nngroup.com/articles/ui-accelerators/)

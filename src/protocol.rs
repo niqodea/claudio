@@ -1588,6 +1588,9 @@ pub struct McpServerStatus {
     pub name: String,
     /// `connected`, `failed`, `needs-auth`, `pending` or `disabled`.
     pub status: String,
+    /// Where the server is configured, like `user`, `project` or `claudeai`, for a connector of
+    /// the claude.ai account.
+    pub scope: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1948,10 +1951,12 @@ mod tests {
                 McpServerStatus {
                     name: "docs".to_string(),
                     status: "connected".to_string(),
+                    scope: None,
                 },
                 McpServerStatus {
                     name: "github".to_string(),
                     status: "failed".to_string(),
+                    scope: None,
                 },
             ]
         );

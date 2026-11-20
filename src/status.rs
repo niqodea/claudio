@@ -10,6 +10,21 @@
 //!
 //! What only a command shows whole stays out: `:context` breaks the context down, and `:mcp`
 //! tells why a server is not connected. Color marks only what needs the user's attention.
+//!
+//! The status shows the session as it stands, from the first moment:
+//! - every fact comes from an answer Claude Code gives as it starts, before the first message:
+//!   the effort as `get_settings` applies it, and the context's tokens as Claude Code counts them
+//!   before the first call. The init that comes with the first message is too late, and in
+//!   claudio's sessions it carries no effort
+//! - what Claude Code tells only when asked, the MCP servers, the open status asks for again
+//!   every second: Claude Code lists them only once it loaded them, a second or so after it
+//!   starts, and sends no message as they connect
+//! - the MCP row counts the servers of the session: those the user set up, and the claude.ai
+//!   connectors that run or failed. claude.ai offers every account its connectors, which wait
+//!   for a sign-in until the user sets one up, so those are offers, which would bury the
+//!   servers the user knows of
+//!
+//! Each of these requests, Claude Code answers from what it holds, with no network traffic.
 //! Ref: <https://www.nngroup.com/articles/gestalt-proximity/>, on grouping by space alone
 //! Ref: <https://data.europa.eu/apps/data-visualisation-guide/table-design-scannability>, on
 //! aligning text left and numbers right
@@ -131,10 +146,18 @@ fn paying(facts: &Facts) -> Line {
 /// How many MCP servers are connected, then how many stand in each other state, so the row's
 /// length follows the states, few, rather than the servers, which `:mcp` names: first those that
 /// need the user, in red when they failed and in orange when they wait for the user to sign in.
+/// The row counts the servers the user set up, and the claude.ai connectors that run or failed:
+/// claude.ai offers every account its connectors, which wait for a sign-in until the user sets
+/// one up, so those are offers rather than servers of the session.
 fn mcp(servers: Option<&[McpServerStatus]>) -> Line {
     let Some(servers) = servers else {
         return known(None);
     };
+    let servers: Vec<&McpServerStatus> = (servers.iter())
+        .filter(|server| {
+            !(server.scope.as_deref() == Some("claudeai") && server.status == "needs-auth")
+        })
+        .collect();
     let connected = (servers.iter())
         .filter(|server| server.status == "connected")
         .count();
@@ -152,7 +175,7 @@ fn mcp(servers: Option<&[McpServerStatus]>) -> Line {
     ];
     let mut by_state: Vec<(&str, &str, &str, Style)> = known.to_vec();
     // A state of a later Claude Code, by its own name
-    for server in servers {
+    for server in &servers {
         let status = server.status.as_str();
         if status != "connected" && !by_state.iter().any(|(name, ..)| *name == status) {
             by_state.push((status, status, status, PLAIN));
@@ -497,6 +520,7 @@ mod tests {
         let server = |name: &str, status: &str| McpServerStatus {
             name: name.to_string(),
             status: status.to_string(),
+            scope: Some("user".to_string()),
         };
         let facts = Facts {
             mcp_servers: Some(vec![
@@ -536,6 +560,28 @@ mod tests {
         assert!(texts.iter().all(|text| text.chars().count() <= 12));
         assert_eq!(texts[0], "Model    cl…");
         assert_eq!(texts[6], "… 6 more ro…");
+    }
+
+    #[test]
+    fn claude_ai_connectors_that_wait_for_a_sign_in_are_offers_left_out() {
+        let connector = |name: &str, status: &str| McpServerStatus {
+            name: name.to_string(),
+            status: status.to_string(),
+            scope: Some("claudeai".to_string()),
+        };
+        let facts = Facts {
+            mcp_servers: Some(vec![
+                connector("claude.ai Gmail", "needs-auth"),
+                connector("claude.ai Meetings", "connected"),
+                connector("claude.ai Slack", "needs-auth"),
+                connector("claude.ai Linear", "failed"),
+            ]),
+            ..facts()
+        };
+        assert_eq!(
+            row_of(&facts, "MCP").text(),
+            "MCP      1 of 2 connected · 1 failed"
+        );
     }
 
     #[test]

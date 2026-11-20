@@ -433,8 +433,9 @@ fn context_usage() -> Value {
 /// The MCP servers, one connected and one that failed.
 fn mcp_status() -> Value {
     json!({"mcpServers": [
-        {"name": "docs", "status": "connected"},
-        {"name": "github", "status": "failed", "error": "connection refused"},
+        {"name": "docs", "status": "connected", "scope": "user"},
+        {"name": "github", "status": "failed", "error": "connection refused", "scope": "project"},
+        {"name": "claude.ai Gmail", "status": "needs-auth", "scope": "claudeai"},
     ]})
 }
 

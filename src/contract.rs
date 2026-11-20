@@ -355,6 +355,7 @@ pub fn init(session: &str) -> String {
         "claude_code_version": claude_code::VERSION,
         "capabilities": ["interrupt_send_now_v1"],
         "slash_commands": COMMANDS,
+        "permissionMode": "default",
     });
     line.to_string()
 }

@@ -18,6 +18,7 @@ pub const INITIALIZE_REQUEST_ID: &str = "initialize";
 const SETTINGS_REQUEST_ID: &str = "settings";
 const CONTEXT_REQUEST_ID: &str = "context";
 const USAGE_REQUEST_ID: &str = "usage";
+const MCP_REQUEST_ID: &str = "mcp";
 
 /// Something Claude Code reported.
 pub enum Event {
@@ -106,6 +107,16 @@ pub enum Event {
     SettingsErrors(Vec<SettingsError>),
     /// The key that pays for the session in place of the subscription, like `ANTHROPIC_API_KEY`.
     PayingKey(String),
+    /// The plan of the account, like `Claude Team`.
+    Plan(String),
+    /// Whether fast mode is on, as `on`, `off` or `cooldown`.
+    FastMode(String),
+    /// The permission mode, which decides what Claude does without asking, like `auto`.
+    PermissionMode(String),
+    /// How hard Claude thinks, like `high`, `default` when the session sets none.
+    Effort(String),
+    /// The MCP servers and how each is connected.
+    McpServers(Vec<McpServerStatus>),
     /// The id of the session, which `--resume` takes.
     SessionId(String),
     /// The version of Claude Code.
@@ -399,6 +410,8 @@ pub enum Command<'a> {
     /// call to the API would only send them along with its reply. The SDK's types mark the
     /// request experimental, with a shape that may change. Seen with Claude Code 2.1.319.
     GetUsage,
+    /// Asks for the MCP servers and how each is connected, which changes as they connect.
+    GetMcpStatus,
     Refuse {
         request_id: &'a str,
         subtype: &'a str,
@@ -498,6 +511,9 @@ impl Command<'_> {
                 USAGE_REQUEST_ID,
                 &json!({"subtype": "get_usage", "skip_behaviors": true}),
             ),
+            Command::GetMcpStatus => {
+                control_request(MCP_REQUEST_ID, &json!({"subtype": "mcp_status"}))
+            }
             Command::Refuse {
                 request_id,
                 subtype,
@@ -734,22 +750,29 @@ fn block_type(index: usize) -> String {
     format!("/message/content/{index}/type")
 }
 
+/// What a session's start tells: its id, Claude Code's version, how Claude works in it, and the
+/// commands it runs.
+fn read_init(init: Init) -> Vec<Event> {
+    [
+        Event::SessionId(init.session_id),
+        Event::Version(init.claude_code_version),
+        Event::PermissionMode(init.permission_mode),
+        Event::Effort(init.effort.unwrap_or_else(|| "default".to_string())),
+        // The docs' examples name them with their `/` and without
+        Event::Commands(
+            (init.slash_commands.iter())
+                .map(|name| name.trim_start_matches('/').to_string())
+                .collect(),
+        ),
+    ]
+    .into_iter()
+    .chain(init.fast_mode_state.map(Event::FastMode))
+    .collect()
+}
+
 fn read_system(system: System, line: &str) -> Class {
     match system {
-        System::Init {
-            session_id,
-            claude_code_version,
-            slash_commands,
-        } => Shown(vec![
-            Event::SessionId(session_id),
-            Event::Version(claude_code_version),
-            // The docs' examples name them with their `/` and without
-            Event::Commands(
-                (slash_commands.iter())
-                    .map(|name| name.trim_start_matches('/').to_string())
-                    .collect(),
-            ),
-        ]),
+        System::Init(init) => Shown(read_init(init)),
         System::SessionStateChanged { state } => Shown(vec![Event::State(state)]),
         System::BackgroundTasksChanged { tasks } => Shown(vec![Event::BackgroundTasks(tasks)]),
         System::TaskStarted {
@@ -818,9 +841,12 @@ fn read_system(system: System, line: &str) -> Class {
             text: content,
             level,
         }]),
-        System::Status => {
-            Skipped("the label row tells what Claude Code does from the session's state")
-        }
+        System::Status {
+            permission_mode: Some(mode),
+        } => Shown(vec![Event::PermissionMode(mode)]),
+        System::Status {
+            permission_mode: None,
+        } => Skipped("the label row tells what Claude Code does from the session's state"),
         System::ThinkingTokens => Skipped("claudio leaves Claude's thinking out"),
         System::SessionTitleChanged => Skipped("claudio shows the session's title nowhere"),
         System::CommandsChanged => {
@@ -867,6 +893,7 @@ fn read_response(request_id: &str, response: Option<Value>) -> Result<Vec<Event>
                 .unwrap_or_else(|error| vec![Event::Incompatible(error)]))
         }
         USAGE_REQUEST_ID => read_plan_usage(response),
+        MCP_REQUEST_ID => read_mcp_status(response),
         // The other requests sent are interrupts, moves to the background and stops of tasks,
         // whose success needs no word
         _ => Ok(vec![]),
@@ -874,7 +901,8 @@ fn read_response(request_id: &str, response: Option<Value>) -> Result<Vec<Event>
 }
 
 /// What the session's start tells: the key that pays for it, none when the subscription does,
-/// and the commands it runs, which the init that comes with the first message tells again.
+/// the plan, fast mode, Claude Code's version, and the commands it runs, which the init that
+/// comes with the first message tells again.
 ///
 /// Undocumented: [`crate::contract::the_paying_key_is_named_by_its_source`],
 /// [`crate::contract::the_start_lists_the_commands`]
@@ -891,6 +919,9 @@ fn read_initialize(response: Option<Value>) -> Result<Vec<Event>, String> {
     Ok(key
         .map(Event::PayingKey)
         .into_iter()
+        .chain(account.subscription_type.map(Event::Plan))
+        .chain(initialize.fast_mode_state.map(Event::FastMode))
+        .chain(initialize.claude_code_version.map(Event::Version))
         .chain([Event::Commands(commands)])
         .collect())
 }
@@ -923,6 +954,13 @@ fn read_context_usage(response: Option<Value>) -> Result<Vec<Event>, String> {
         Event::Model(context.model),
         Event::Ceiling(ceiling),
     ])
+}
+
+/// The MCP servers and how each is connected.
+fn read_mcp_status(response: Option<Value>) -> Result<Vec<Event>, String> {
+    let status: McpStatus = serde_json::from_value(response.unwrap_or_default())
+        .map_err(|error| format!("Unreadable MCP status from Claude Code: {error}"))?;
+    Ok(vec![Event::McpServers(status.mcp_servers)])
 }
 
 /// The plan's usage limits, none when they do not apply, like to a session an API key pays for.
@@ -1109,16 +1147,12 @@ impl From<Window> for Limit {
 #[derive(Deserialize)]
 #[serde(tag = "subtype", rename_all = "snake_case")]
 enum System {
-    /// Carries the id of the session Claude Code runs, Claude Code's version, and the commands
-    /// the session runs, those that need no interactive terminal, built in or the user's own.
+    /// Carries the id of the session Claude Code runs, Claude Code's version, how Claude works
+    /// in it, and the commands the session runs, those that need no interactive terminal, built
+    /// in or the user's own.
     /// Ref: <https://code.claude.com/docs/en/agent-sdk/slash-commands>, on the commands the init
     /// lists
-    Init {
-        session_id: String,
-        claude_code_version: String,
-        #[serde(default)]
-        slash_commands: Vec<String>,
-    },
+    Init(Init),
     /// Sent as a turn starts and ends.
     ///
     /// Undocumented: [`crate::contract::session_state_comes_with_its_variable`]
@@ -1136,8 +1170,11 @@ enum System {
     CompactBoundary {
         compact_metadata: CompactMetadata,
     },
-    /// What Claude Code does, like compacting.
-    Status,
+    /// What Claude Code does, like compacting, with the permission mode when it changes.
+    Status {
+        #[serde(rename = "permissionMode")]
+        permission_mode: Option<String>,
+    },
     /// How far Claude thinks.
     ThinkingTokens,
     /// The title Claude Code gives the session.
@@ -1446,6 +1483,8 @@ struct Initialize {
     account: Account,
     #[serde(default)]
     commands: Vec<CommandName>,
+    fast_mode_state: Option<String>,
+    claude_code_version: Option<String>,
 }
 
 /// A command the session runs, by the name it takes after `/`.
@@ -1459,6 +1498,7 @@ struct CommandName {
 struct Account {
     api_key_source: Option<String>,
     token_source: Option<String>,
+    subscription_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1484,6 +1524,36 @@ struct ContextUsage {
     /// The tokens at which Claude Code compacts the context on its own.
     #[serde(rename = "autoCompactThreshold")]
     auto_compact_threshold: Option<u64>,
+}
+
+/// The start of a session.
+#[derive(Deserialize)]
+struct Init {
+    session_id: String,
+    claude_code_version: String,
+    #[serde(default)]
+    slash_commands: Vec<String>,
+    #[serde(rename = "permissionMode")]
+    permission_mode: String,
+    /// Null when the session sets none, so the model's own applies.
+    #[serde(default)]
+    effort: Option<String>,
+    fast_mode_state: Option<String>,
+}
+
+/// An MCP server, by the name it has in the configuration, and how it is connected.
+/// Ref: `McpServerStatus` in `sdk.d.ts`
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct McpServerStatus {
+    pub name: String,
+    /// `connected`, `failed`, `needs-auth`, `pending` or `disabled`.
+    pub status: String,
+}
+
+#[derive(Deserialize)]
+struct McpStatus {
+    #[serde(rename = "mcpServers")]
+    mcp_servers: Vec<McpServerStatus>,
 }
 
 #[derive(Deserialize)]
@@ -1695,11 +1765,20 @@ mod tests {
 
     fn paying_key(account: &Value) -> Option<String> {
         let events = read_events(&contract::initialize_response(account)).expect("a readable line");
-        match events.as_slice() {
-            [Event::Commands(_)] => None,
-            [Event::PayingKey(key), Event::Commands(_)] => Some(key.clone()),
-            _ => panic!("a paying key at most, then the commands"),
-        }
+        events.into_iter().find_map(|event| match event {
+            Event::PayingKey(key) => Some(key),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn the_start_tells_the_plan() {
+        let line = contract::initialize_response(&contract::subscription_account());
+        let events = read_events(&line).expect("a readable line");
+        assert!(
+            (events.iter())
+                .any(|event| matches!(event, Event::Plan(plan) if plan == "Claude Team"))
+        );
     }
 
     #[test]
@@ -1731,13 +1810,64 @@ mod tests {
             "claude_code_version": "2.1.322",
             "tools": [],
             "slash_commands": ["compact", "/model"],
+            "permissionMode": "auto",
+            "effort": null,
+            "fast_mode_state": "off",
         });
         let events = read_events(&line.to_string()).expect("a readable line");
         assert!(matches!(
             events.as_slice(),
-            [Event::SessionId(id), Event::Version(version), Event::Commands(commands)]
-                if id == "a1" && version == "2.1.322" && commands == &["compact", "model"]
+            [
+                Event::SessionId(id),
+                Event::Version(version),
+                Event::PermissionMode(mode),
+                Event::Effort(effort),
+                Event::Commands(commands),
+                Event::FastMode(fast),
+            ] if id == "a1"
+                && version == "2.1.322"
+                && mode == "auto"
+                && effort == "default"
+                && commands == &["compact", "model"]
+                && fast == "off"
         ));
+    }
+
+    #[test]
+    fn a_changed_permission_mode_comes_with_the_status() {
+        let line = json!({"type": "system", "subtype": "status", "status": null, "permissionMode": "plan"});
+        let events = read_events(&line.to_string()).expect("a readable line");
+        assert!(matches!(events.as_slice(), [Event::PermissionMode(mode)] if mode == "plan"));
+    }
+
+    #[test]
+    fn the_mcp_status_tells_each_server() {
+        let line = json!({
+            "type": "control_response",
+            "response": {"subtype": "success", "request_id": MCP_REQUEST_ID, "response": {
+                "mcpServers": [
+                    {"name": "docs", "status": "connected", "tools": []},
+                    {"name": "github", "status": "failed", "error": "connection refused"},
+                ],
+            }},
+        });
+        let events = read_events(&line.to_string()).expect("a readable line");
+        let [Event::McpServers(servers)] = events.as_slice() else {
+            panic!("the MCP servers");
+        };
+        assert_eq!(
+            servers,
+            &[
+                McpServerStatus {
+                    name: "docs".to_string(),
+                    status: "connected".to_string(),
+                },
+                McpServerStatus {
+                    name: "github".to_string(),
+                    status: "failed".to_string(),
+                },
+            ]
+        );
     }
 
     /// A reply about the context's usage, from Claude Code that compacts the context at

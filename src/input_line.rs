@@ -739,8 +739,9 @@ impl InputLine {
         let lines = {
             let shared = lock(&self.shared);
             status::lines(
-                shared.model.as_deref(),
+                &shared.facts,
                 shared.session_id.as_deref(),
+                shared.claude_code_version.as_deref(),
                 &shared.limits,
                 &shared.context,
                 Instant::now(),

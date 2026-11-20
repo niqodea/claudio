@@ -68,8 +68,8 @@ struct Shared {
     limits: Limits,
     /// The session's id, once Claude Code tells it.
     session_id: Option<String>,
-    /// The session's model, once Claude Code tells it.
-    model: Option<String>,
+    /// What only the status shows of how the session runs and of Claude Code.
+    facts: status::Facts,
     /// The version of Claude Code, once it tells it.
     claude_code_version: Option<String>,
     /// The names of the commands the session runs, in order, which the command line completes.
@@ -147,9 +147,20 @@ impl Shared {
             Event::ToolResult(result) => {
                 self.output.show_tool_result(&mut self.work, &result);
             }
-            Event::TurnEnd { failure } => self.output.show_turn_end(failure.as_deref()),
+            Event::TurnEnd { failure } => {
+                self.output.show_turn_end(failure.as_deref());
+                forward(Input::TurnEnded);
+            }
             Event::SettingsErrors(errors) => self.output.show_settings_errors(&errors),
-            Event::PayingKey(key) => self.output.show_paying_key(&key),
+            Event::PayingKey(key) => {
+                self.output.show_paying_key(&key);
+                self.facts.paying_key = Some(key);
+            }
+            Event::Plan(plan) => self.facts.plan = Some(plan),
+            Event::FastMode(state) => self.facts.fast_mode = Some(state),
+            Event::PermissionMode(mode) => self.facts.permission_mode = Some(mode),
+            Event::Effort(effort) => self.facts.effort = Some(effort),
+            Event::McpServers(servers) => self.facts.mcp_servers = Some(servers),
             Event::SessionId(id) => self.session_id = Some(id),
             Event::Version(version) => self.note_version(version),
             Event::Commands(commands) => self.note_commands(commands),
@@ -189,7 +200,7 @@ impl Shared {
                 self.context.note_call(&usage, Instant::now());
             }
             Event::LastCall(usage) => self.context.note_last_call(usage.as_ref()),
-            Event::Model(model) => self.model = Some(model),
+            Event::Model(model) => self.facts.model = Some(model),
             Event::Ceiling(ceiling) => self.context.note_ceiling(ceiling),
             Event::Ask(ask) => forward(Input::Ask(ask)),
             Event::Incompatible(error) => forward(Input::Incompatible(error)),
@@ -282,7 +293,7 @@ fn run() -> Result<ExitCode, String> {
         context: Context::new(),
         limits: Limits::new(),
         session_id: None,
-        model: None,
+        facts: status::Facts::default(),
         claude_code_version: None,
         commands: Vec::new(),
         work: Work::default(),

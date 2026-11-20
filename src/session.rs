@@ -26,6 +26,8 @@ pub enum Input {
     },
     /// The clear that waited for the tasks in the background goes, since none is left.
     HeldClear,
+    /// A turn ended, over which the MCP servers may have connected or failed.
+    TurnEnded,
     /// Claude Code ended.
     Closed,
     /// Claude Code works in a way claudio was not made for, as this error says, which ends the
@@ -75,6 +77,7 @@ impl<'a> Conversation<'a> {
         // Ref: <https://github.com/jarrodwatts/claude-hud/issues/173>, on the usage endpoint
         // answering a status line with HTTP 429
         self.send(&Command::GetUsage)?;
+        self.send(&Command::GetMcpStatus)?;
         let mut draft = String::new();
         // What Claude asks waits for the user to open it with Ctrl+Y, so no key typed before a
         // question showed can answer it
@@ -101,6 +104,11 @@ impl<'a> Conversation<'a> {
                 }
                 Some(Input::HeldClear) => {
                     self.send(&Command::Run { command: "clear" })?;
+                    continue;
+                }
+                // Claude Code answers from what it holds, with no call to the API
+                Some(Input::TurnEnded) => {
+                    self.send(&Command::GetMcpStatus)?;
                     continue;
                 }
                 Some(Input::Closed) => {
@@ -399,12 +407,14 @@ impl Ending<'_> {
         loop {
             match self.session.next_input() {
                 Some(Input::Closed) => return self.session.close_line(),
-                // The ending clears nothing, so a clear that waited has no session left to clear
+                // The ending clears nothing, so a clear that waited has no session left to clear,
+                // and Claude Code's input is closed, so the end of a turn asks it nothing
                 Some(
                     Input::Ask(_)
                     | Input::Unsupported { .. }
                     | Input::Incompatible(_)
-                    | Input::HeldClear,
+                    | Input::HeldClear
+                    | Input::TurnEnded,
                 )
                 | None => {}
             }

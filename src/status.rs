@@ -1,15 +1,28 @@
-//! The status the user asks for: the model and the session, the plan's usage limits, and the
-//! context with its cache. It is a table whose columns line up: the label, a number
-//! right-aligned, what the number is, and when that changes. Color marks only what needs the
-//! user's attention.
+//! The status the user asks for. It is a table whose columns line up: the label, a number
+//! right-aligned, what the number is, and when that changes, or a text left-aligned. Its groups,
+//! set apart by an empty line, each hold one kind of value, so each aligns as its kind does:
+//!
+//! - how the session runs, as text: the model, its effort and fast mode, the permission mode,
+//!   which says what Claude does without asking for approval, what pays, and the id to resume
+//! - the plan's usage limits, as numbers
+//! - the context, as numbers: its tokens and its cache, and what is left before it compacts
+//! - Claude Code, as text: its version and its MCP servers
+//!
+//! What only a command shows whole stays out: `:context` breaks the context down, and `:mcp`
+//! tells why a server is not connected. Color marks only what needs the user's attention.
+//! Ref: <https://www.nngroup.com/articles/gestalt-proximity/>, on grouping by space alone
+//! Ref: <https://data.europa.eu/apps/data-visualisation-guide/table-design-scannability>, on
+//! aligning text left and numbers right
+//! Ref: <https://developers.openai.com/codex/agent-approvals-security>, whose approval policy
+//! names what the permission mode decides
 //! Ref: <https://clig.dev/#output>, on using color with intention
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::context::{COLD_COLOR, Context};
 use crate::limits::{Limits, level, limit_level};
-use crate::protocol::{Ceiling, Limit};
-use crate::style::{PLAIN, SUBDUED, Style};
+use crate::protocol::{Ceiling, Limit, McpServerStatus};
+use crate::style::{ATTENTION, FAILED_OR_REMOVED, PLAIN, SUBDUED, Style};
 use crate::text::{Line, Span};
 
 /// How long before the cache turns cold its cold-at time shows in yellow.
@@ -26,22 +39,44 @@ const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
+/// What Claude Code tells of how the session runs and of itself, each none until it tells it.
+#[derive(Default)]
+pub struct Facts {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub fast_mode: Option<String>,
+    pub permission_mode: Option<String>,
+    /// The plan of the account, which pays unless a key does.
+    pub plan: Option<String>,
+    /// The key that pays in place of the plan.
+    pub paying_key: Option<String>,
+    pub mcp_servers: Option<Vec<McpServerStatus>>,
+}
+
 /// The status's lines at `now`, which is `wall_now` on the wall clock. What Claude Code has not
 /// told yet shows as `?`. A new session has nothing to resume before its first message, which
 /// starts it.
 pub fn lines(
-    model: Option<&str>,
+    facts: &Facts,
     session_id: Option<&str>,
+    version: Option<&str>,
     limits: &Limits,
     context: &Context,
     now: Instant,
     wall_now: SystemTime,
 ) -> Vec<Line> {
     vec![
-        text_row("Model", model),
+        text_row("Model", known(facts.model.as_deref())),
+        text_row("Effort", known(facts.effort.as_deref())),
+        text_row("Fast", known(facts.fast_mode.as_deref())),
+        text_row(
+            "Approval",
+            known(facts.permission_mode.as_deref().map(permission_mode)),
+        ),
+        text_row("Pays", paying(facts)),
         text_row(
             "Resume",
-            session_id.or(context.is_new().then_some("none yet")),
+            known(session_id.or(context.is_new().then_some("none yet"))),
         ),
         Line::default(),
         limit_row("Session", limits.session(), wall_now),
@@ -49,11 +84,65 @@ pub fn lines(
         Line::default(),
         context_row(context, now, wall_now),
         ceiling_row(context),
+        Line::default(),
+        text_row("Version", known(version)),
+        text_row("MCP", mcp(facts.mcp_servers.as_deref())),
     ]
 }
 
-fn text_row(name: &str, value: Option<&str>) -> Line {
-    Line::from(label(name)).with(value.unwrap_or("?"))
+fn text_row(name: &str, value: Line) -> Line {
+    Line::from(label(name)).with_line(value)
+}
+
+fn known(value: Option<&str>) -> Line {
+    Line::from(value.unwrap_or("?"))
+}
+
+/// The permission mode in the words Claude Code shows it in.
+/// Ref: `PermissionMode` in `sdk.d.ts`
+fn permission_mode(mode: &str) -> &str {
+    match mode {
+        "acceptEdits" => "accept edits",
+        "bypassPermissions" => "bypass permissions",
+        "dontAsk" => "don't ask",
+        mode => mode,
+    }
+}
+
+/// The key that pays in place of the plan, in the color of what the user should know, as the
+/// warning as claudio starts says, or else the plan.
+fn paying(facts: &Facts) -> Line {
+    match (&facts.paying_key, &facts.plan) {
+        (Some(key), _) => Line::from(Span::new(key.as_str(), ATTENTION)),
+        (None, plan) => known(plan.as_deref()),
+    }
+}
+
+/// How many MCP servers are connected, then each one that is not, with how it stands: in red
+/// when it failed, and in orange when it waits for the user to sign in.
+fn mcp(servers: Option<&[McpServerStatus]>) -> Line {
+    let Some(servers) = servers else {
+        return known(None);
+    };
+    let connected = (servers.iter())
+        .filter(|server| server.status == "connected")
+        .count();
+    let mut line = Line::from(match (servers.len(), connected) {
+        (0, _) => "none".to_string(),
+        (all, connected) if connected == all => format!("{all} connected"),
+        (all, connected) => format!("{connected} of {all} connected"),
+    });
+    for server in servers.iter().filter(|server| server.status != "connected") {
+        let (state, style) = match server.status.as_str() {
+            "failed" => ("failed", FAILED_OR_REMOVED),
+            "needs-auth" => ("needs sign-in", ATTENTION),
+            "pending" => ("connecting", PLAIN),
+            status => (status, PLAIN),
+        };
+        line.push(" · ");
+        line.push(Span::new(format!("{} {state}", server.name), style));
+    }
+    line
 }
 
 fn limit_row(name: &str, limit: Option<Limit>, wall_now: SystemTime) -> Line {
@@ -229,6 +318,18 @@ mod tests {
 
     const HOUR: Duration = Duration::from_hours(1);
 
+    fn facts() -> Facts {
+        Facts {
+            model: Some("claude-opus-5-5".to_string()),
+            effort: Some("high".to_string()),
+            fast_mode: Some("off".to_string()),
+            permission_mode: Some("acceptEdits".to_string()),
+            plan: Some("Claude Team".to_string()),
+            paying_key: None,
+            mcp_servers: Some(vec![]),
+        }
+    }
+
     /// The lines of a status, without their styles.
     fn plain_lines(
         context: &Context,
@@ -237,8 +338,9 @@ mod tests {
         wall_now: SystemTime,
     ) -> Vec<String> {
         lines(
-            Some("claude-opus-5-5"),
+            &facts(),
             Some("a1"),
+            Some("2.1.322"),
             limits,
             context,
             now,
@@ -247,6 +349,23 @@ mod tests {
         .iter()
         .map(Line::text)
         .collect()
+    }
+
+    /// The line of `name` in the status of `facts`.
+    fn row_of(facts: &Facts, name: &str) -> Line {
+        let status = lines(
+            facts,
+            None,
+            None,
+            &Limits::new(),
+            &Context::new(),
+            Instant::now(),
+            SystemTime::now(),
+        );
+        status
+            .into_iter()
+            .find(|line| line.text().starts_with(name))
+            .expect("the row")
     }
 
     fn context_with(tokens: u64, cache_ttl: Duration, ceiling: u64, now: Instant) -> Context {
@@ -285,6 +404,10 @@ mod tests {
             plain_lines(&context, &limits, now, wall_now),
             [
                 "Model    claude-opus-5-5".to_string(),
+                "Effort   high".to_string(),
+                "Fast     off".to_string(),
+                "Approval accept edits".to_string(),
+                "Pays     Claude Team".to_string(),
                 "Resume   a1".to_string(),
                 String::new(),
                 format!("Session        62%  used  resets at {in_an_hour}"),
@@ -292,6 +415,9 @@ mod tests {
                 String::new(),
                 format!("Context     41,203  warm    cold at {in_an_hour}"),
                 "Compact    925,797  left".to_string(),
+                String::new(),
+                "Version  2.1.322".to_string(),
+                "MCP      none".to_string(),
             ]
         );
     }
@@ -299,6 +425,7 @@ mod tests {
     #[test]
     fn what_claude_code_has_not_told_shows_as_unknown() {
         let status = lines(
+            &Facts::default(),
             None,
             None,
             &Limits::new(),
@@ -310,6 +437,10 @@ mod tests {
             status.iter().map(Line::text).collect::<Vec<_>>(),
             [
                 "Model    ?",
+                "Effort   ?",
+                "Fast     ?",
+                "Approval ?",
+                "Pays     ?",
                 "Resume   ?",
                 "",
                 "Session          ?",
@@ -317,18 +448,63 @@ mod tests {
                 "",
                 "Context          ?",
                 "Compact          ?",
+                "",
+                "Version  ?",
+                "MCP      ?",
             ]
         );
+    }
+
+    #[test]
+    fn a_key_that_pays_shows_in_place_of_the_plan_in_orange() {
+        let facts = Facts {
+            paying_key: Some("ANTHROPIC_API_KEY".to_string()),
+            ..facts()
+        };
+        let row = row_of(&facts, "Pays");
+        assert_eq!(row.text(), "Pays     ANTHROPIC_API_KEY");
+        assert_eq!(row.style_of("ANTHROPIC_API_KEY"), Some(ATTENTION));
+    }
+
+    #[test]
+    fn each_mcp_server_not_connected_follows_the_count() {
+        let server = |name: &str, status: &str| McpServerStatus {
+            name: name.to_string(),
+            status: status.to_string(),
+        };
+        let facts = Facts {
+            mcp_servers: Some(vec![
+                server("docs", "connected"),
+                server("github", "failed"),
+                server("linear", "needs-auth"),
+            ]),
+            ..facts()
+        };
+        let row = row_of(&facts, "MCP");
+        assert_eq!(
+            row.text(),
+            "MCP      1 of 3 connected · github failed · linear needs sign-in"
+        );
+        assert_eq!(row.style_of("github failed"), Some(FAILED_OR_REMOVED));
+        assert_eq!(row.style_of("linear needs sign-in"), Some(ATTENTION));
     }
 
     #[test]
     fn a_cache_about_to_turn_cold_shows_its_time_in_yellow() {
         let (now, wall_now) = (Instant::now(), SystemTime::now());
         let context = context_with(41_203, NEAR_COLD, 967_000, now);
-        let status = lines(None, None, &Limits::new(), &context, now, wall_now);
+        let status = lines(
+            &facts(),
+            None,
+            None,
+            &Limits::new(),
+            &context,
+            now,
+            wall_now,
+        );
         let cold_at = clock(wall_now + NEAR_COLD, wall_now);
         assert_eq!(
-            status[6].style_of(&format!("  cold at {cold_at}")),
+            status[10].style_of(&format!("  cold at {cold_at}")),
             Some(COLD_COLOR)
         );
     }
@@ -337,10 +513,18 @@ mod tests {
     fn a_context_near_its_ceiling_shows_what_is_left_in_the_color_of_its_level() {
         let now = Instant::now();
         let context = context_with(900_000, HOUR, 967_000, now);
-        let status = lines(None, None, &Limits::new(), &context, now, SystemTime::now());
+        let status = lines(
+            &facts(),
+            None,
+            None,
+            &Limits::new(),
+            &context,
+            now,
+            SystemTime::now(),
+        );
         let color = level(900_000.0 / 967_000.0, false)
             .color()
             .expect("a level near its end has a color");
-        assert_eq!(status[7].style_of("   67,000"), Some(color));
+        assert_eq!(status[11].style_of("   67,000"), Some(color));
     }
 }

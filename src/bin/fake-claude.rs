@@ -89,6 +89,7 @@ impl Fake {
         match message["request"]["subtype"].as_str() {
             Some("initialize") => send(&contract::initialize_response(&account())),
             Some("get_context_usage") => respond(message, &context_usage()),
+            Some("mcp_status") => respond(message, &mcp_status()),
             Some("get_usage") => respond(message, &plan_usage()),
             Some("interrupt") if !self.on_interrupt.is_empty() => {
                 for line in std::mem::take(&mut self.on_interrupt) {
@@ -420,6 +421,14 @@ fn context_usage() -> Value {
         "autoCompactThreshold": 967_000,
         "apiUsage": null,
     })
+}
+
+/// The MCP servers, one connected and one that failed.
+fn mcp_status() -> Value {
+    json!({"mcpServers": [
+        {"name": "docs", "status": "connected"},
+        {"name": "github", "status": "failed", "error": "connection refused"},
+    ]})
 }
 
 /// The plan's usage, with limits that reset in two hours and in four days.

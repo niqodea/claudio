@@ -28,6 +28,9 @@ pub enum Event {
     /// The end of a block of the reply, with the block's whole text, whose pieces arrived as
     /// `Text`, unless Claude Code made the block itself, as for a command's output.
     TextEnd(String),
+    /// A narration, text Claude wrote for the user between tool calls, which arrives whole, and
+    /// only as the API's summary of it, in a thinking block.
+    Narration(String),
     /// The context was compacted, from as many tokens as it held to as many as it holds after,
     /// when Claude Code tells.
     Compacted {
@@ -582,6 +585,7 @@ pub fn read_events(line: &str) -> Result<Vec<Event>, String> {
             parent_tool_use_id: None,
             error: Some(_),
             agent_id: _,
+            narration_block_indexes: _,
         } => Shown(vec![Event::ApiError(message.content.into_text())]),
         // Claude Code sends each block whole once it has streamed it
         Message::Assistant {
@@ -589,9 +593,11 @@ pub fn read_events(line: &str) -> Result<Vec<Event>, String> {
             parent_tool_use_id: _,
             agent_id,
             error: _,
+            narration_block_indexes,
         } => Shown(read_assistant(
             message,
             agent_id.map(SubagentId::new).as_ref(),
+            &narration_block_indexes,
             line,
         )),
         Message::User {
@@ -681,14 +687,32 @@ fn read_stream_event(event: StreamEvent, is_subagent: bool, line: &str) -> Class
 /// The events of a reply's blocks, from `line`, those of `subagent` when it is some, which the
 /// message's `agent_id` names: as `SDKAssistantMessage` in `sdk.d.ts` says, the id of the
 /// subagent that produced it, the same as its task's, and absent on Claude's own messages.
-fn read_assistant(message: Body, subagent: Option<&SubagentId>, line: &str) -> Vec<Event> {
-    let is_subagent = subagent.is_some();
+///
+/// A thinking block shows as a narration when `narrations`, the message's
+/// `narration_block_indexes`, lists it and it holds text, as Claude Code's own interface shows
+/// one. Claude Code tells a narration by a mark in the block's signature, and lists it so that
+/// an interface like claudio need not decode the signature. Showing any thinking block with text
+/// would be simpler, and would show the same today, since the API sends Claude's own thinking
+/// without text, but would no longer match Claude Code once the API sends a summary of it.
+/// Undocumented: [`crate::contract::a_narration_is_listed`]
+fn read_assistant(
+    message: Body,
+    subagent: Option<&SubagentId>,
+    narrations: &[usize],
+    line: &str,
+) -> Vec<Event> {
+    let class_of = |event| match subagent {
+        None => Shown(vec![event]),
+        Some(_) => Skipped("a subagent's text shows in what it reports back to Claude"),
+    };
     (message.content.into_blocks().into_iter().enumerate())
         .flat_map(|(index, block)| {
             let class = match block {
-                Block::Text { text } if !is_subagent => Shown(vec![Event::TextEnd(text)]),
-                Block::Text { .. } => {
-                    Skipped("a subagent's text shows in what it reports back to Claude")
+                Block::Text { text } => class_of(Event::TextEnd(text)),
+                Block::Thinking { thinking }
+                    if narrations.contains(&index) && !thinking.is_empty() =>
+                {
+                    class_of(Event::Narration(thinking))
                 }
                 Block::ToolUse { id, name, input } => Shown(vec![Event::ToolUse(ToolUse {
                     id,
@@ -696,7 +720,7 @@ fn read_assistant(message: Body, subagent: Option<&SubagentId>, line: &str) -> V
                     input,
                     subagent: subagent.cloned(),
                 })]),
-                Block::Thinking => Skipped("claudio leaves Claude's thinking out"),
+                Block::Thinking { .. } => Skipped("claudio leaves Claude's thinking out"),
                 Block::ToolResult { .. } => Skipped("a tool's result comes in a user message"),
                 Block::Unknown => Flagged(unknown(line, "content block", &block_type(index))),
             };
@@ -733,7 +757,7 @@ fn read_user(message: Body, subagent: Option<&SubagentId>, line: &str) -> Vec<Ev
                     .collect()
             }
             Block::Text { .. } => vec![Skipped("the user's own text shows as they sent it")],
-            Block::Thinking | Block::ToolUse { .. } => {
+            Block::Thinking { .. } | Block::ToolUse { .. } => {
                 vec![Skipped("only Claude's messages carry them")]
             }
             Block::Unknown => vec![Flagged(unknown(line, "content block", &block_type(index)))],
@@ -1088,6 +1112,9 @@ enum Message {
         agent_id: Option<String>,
         /// The kind of API error the message reports, on a message Claude Code makes for one.
         error: Option<String>,
+        /// The indexes of the message's blocks that are narrations, none when it holds none.
+        #[serde(default)]
+        narration_block_indexes: Vec<usize>,
     },
     User {
         message: Body,
@@ -1416,7 +1443,7 @@ impl Content {
             .into_iter()
             .filter_map(|block| match block {
                 Block::Text { text } => Some(text),
-                Block::Thinking
+                Block::Thinking { .. }
                 | Block::ToolUse { .. }
                 | Block::ToolResult { .. }
                 | Block::Unknown => None,
@@ -1443,8 +1470,11 @@ enum Block {
         #[serde(default)]
         is_error: bool,
     },
-    /// Claude's thinking.
-    Thinking,
+    /// Claude's thinking, or a narration, which the message lists apart.
+    Thinking {
+        #[serde(default)]
+        thinking: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -2129,6 +2159,36 @@ mod tests {
             panic!("a resumed call");
         };
         assert_eq!(usage.tokens, 22_039);
+    }
+
+    #[test]
+    fn a_narration_shows_as_one() {
+        let events: Vec<Event> = (contract::narration().iter())
+            .flat_map(|line| read_events(line).expect("a readable line"))
+            .collect();
+        assert!(matches!(
+            events.as_slice(),
+            [Event::Narration(narration), Event::TextEnd(text)] if narration == "ok" && text == "done"
+        ));
+    }
+
+    #[test]
+    fn a_thinking_block_shows_only_when_listed_with_text() {
+        let line = |thinking: &str, indexes: Value| {
+            json!({
+                "type": "assistant",
+                "message": {"content": [{"type": "thinking", "thinking": thinking, "signature": ""}]},
+                "parent_tool_use_id": null,
+                "narration_block_indexes": indexes,
+            })
+            .to_string()
+        };
+        for line in [line("a thought", json!([])), line("", json!([0]))] {
+            assert!(
+                read_events(&line).expect("a readable line").is_empty(),
+                "{line}"
+            );
+        }
     }
 
     #[test]

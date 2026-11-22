@@ -15,6 +15,9 @@
 //!   `SendMessage` to the subagent, whose message says `Reply ok`
 //! - a turn whose last user message asks `Stop <task id> with TaskStop` gets a call of `TaskStop`
 //!   with the task's id
+//! - a turn whose last user message says `Narrate ok` gets the narration `ok`, a thinking block
+//!   signed with [`NARRATION_SIGNATURE`], then the text `done`, since Claude Code asks again when
+//!   a reply holds only thinking
 //! - a turn whose last user message says `Reply ok`, holds a tool's result, Claude Code's
 //!   notification that a background task ended, or a subagent's report, gets the text `ok`
 //! - the question of the auto mode classifier, the one request that stops at `</severity>`, gets
@@ -36,6 +39,10 @@ use std::thread;
 use std::time::Duration;
 
 use serde_json::{Value, json};
+
+/// The signature of the fake's narrations: protobuf in base64 that holds only the mark of a
+/// narration.
+pub const NARRATION_SIGNATURE: &str = "Eg0KC0IJbmFycmF0aW9u";
 
 /// The fake, which answers each request on a thread of its own. The thread that waits for
 /// requests outlives the check, until the process ends.
@@ -94,10 +101,10 @@ fn answer(stream: &TcpStream, classifier_delay: Duration, errors: &Sender<String
         }
         let request: Value = serde_json::from_slice(&body)
             .map_err(|error| format!("a call's body is no JSON: {error}"))?;
-        let (block, stop_reason) = reply(&request, classifier_delay)?;
-        let message = message(&block, stop_reason);
+        let (blocks, stop_reason) = reply(&request, classifier_delay)?;
+        let message = message(&blocks, stop_reason);
         if request["stream"] == true {
-            write(stream, &streamed(&message, &block))
+            write(stream, &streamed(&message, &blocks))
         } else {
             let body = message.to_string();
             write(
@@ -118,16 +125,19 @@ fn answer(stream: &TcpStream, classifier_delay: Duration, errors: &Sender<String
     }
 }
 
-/// The one content block of Claude's reply to `request`, by the rules of the module's doc, and
+/// The content blocks of Claude's reply to `request`, by the rules of the module's doc, and
 /// why Claude stopped.
-fn reply(request: &Value, classifier_delay: Duration) -> Result<(Value, &'static str), String> {
+fn reply(
+    request: &Value,
+    classifier_delay: Duration,
+) -> Result<(Vec<Value>, &'static str), String> {
     let is_classifier = request["stop_sequences"]
         .as_array()
         .is_some_and(|stops| stops.contains(&json!("</severity>")));
     if is_classifier {
         thread::sleep(classifier_delay);
         return Ok((
-            json!({"type": "text", "text": "<severity>5"}),
+            vec![json!({"type": "text", "text": "<severity>5"})],
             "stop_sequence",
         ));
     }
@@ -153,11 +163,11 @@ fn reply(request: &Value, classifier_delay: Duration) -> Result<(Value, &'static
     if let Some(agent) = request("Resume ", " with SendMessage") {
         let input = json!({"to": agent, "summary": "Reply ok", "message": "Reply ok"});
         let call = json!({"type": "tool_use", "id": id, "name": "SendMessage", "input": input});
-        return Ok((call, "tool_use"));
+        return Ok((vec![call], "tool_use"));
     }
     if let Some(task_id) = request("Stop ", " with TaskStop") {
         let call = json!({"type": "tool_use", "id": id, "name": "TaskStop", "input": {"task_id": task_id}});
-        return Ok((call, "tool_use"));
+        return Ok((vec![call], "tool_use"));
     }
     let subagent = (request("", " in a subagent").map(|prompt| (prompt, false)))
         .or_else(|| request("", " in a background subagent").map(|prompt| (prompt, true)));
@@ -169,7 +179,7 @@ fn reply(request: &Value, classifier_delay: Duration) -> Result<(Value, &'static
             "run_in_background": is_backgrounded,
         });
         let call = json!({"type": "tool_use", "id": id, "name": "Agent", "input": input});
-        return Ok((call, "tool_use"));
+        return Ok((vec![call], "tool_use"));
     }
     if let Some(command) = request("Run ", " with Bash") {
         let mut input = json!({"command": command, "description": format!("Run {command}")});
@@ -181,29 +191,35 @@ fn reply(request: &Value, classifier_delay: Duration) -> Result<(Value, &'static
             });
         }
         let call = json!({"type": "tool_use", "id": id, "name": "Bash", "input": input});
-        return Ok((call, "tool_use"));
+        return Ok((vec![call], "tool_use"));
     }
     let says = |words: &str| texts.iter().any(|text| text.trim() == words);
+    if says("Narrate ok") {
+        let narration =
+            json!({"type": "thinking", "thinking": "ok", "signature": NARRATION_SIGNATURE});
+        let text = json!({"type": "text", "text": "done"});
+        return Ok((vec![narration, text], "end_turn"));
+    }
     let says_ok = says("Reply ok");
     // A message sent to a subagent comes inside a block that names its sender
     let is_sent_ok = texts.iter().any(|text| text.contains("Reply ok"));
     let has_result = blocks.iter().any(|block| block["type"] == "tool_result");
     if hands_back && (is_sent_ok || has_result) {
         let call = json!({"type": "tool_use", "id": id, "name": "SubagentHandback", "input": {"message": "ok"}});
-        return Ok((call, "tool_use"));
+        return Ok((vec![call], "tool_use"));
     }
     let is_notification = texts
         .iter()
         .any(|text| text.contains("<task-notification>") || text.contains("<agent-message "));
     if says_ok || has_result || is_notification {
-        return Ok((json!({"type": "text", "text": "ok"}), "end_turn"));
+        return Ok((vec![json!({"type": "text", "text": "ok"})], "end_turn"));
     }
     Err("Claude Code made a call that no rule of the fake covers".to_string())
 }
 
-/// The reply of `block`, with an id of its own, since Claude Code takes the blocks of replies
+/// The reply of `blocks`, with an id of its own, since Claude Code takes the blocks of replies
 /// with the same id for one message.
-fn message(block: &Value, stop_reason: &str) -> Value {
+fn message(blocks: &[Value], stop_reason: &str) -> Value {
     static COUNT: AtomicU64 = AtomicU64::new(0);
     let count = COUNT.fetch_add(1, Ordering::Relaxed);
     json!({
@@ -211,41 +227,32 @@ fn message(block: &Value, stop_reason: &str) -> Value {
         "type": "message",
         "role": "assistant",
         "model": "fake",
-        "content": [block],
+        "content": blocks,
         "stop_reason": stop_reason,
         "stop_sequence": null,
         "usage": {"input_tokens": 1, "output_tokens": 1},
     })
 }
 
-/// The HTTP response that streams `message`, whose one content block is `block`. The block
-/// starts empty, and its one delta fills it. Closing the connection ends the response.
-fn streamed(message: &Value, block: &Value) -> String {
-    let (start, delta) = if block["type"] == "tool_use" {
-        let mut start = block.clone();
-        start["input"] = json!({});
-        let delta = json!({"type": "input_json_delta", "partial_json": block["input"].to_string()});
-        (start, delta)
-    } else {
-        let delta = json!({"type": "text_delta", "text": block["text"]});
-        (json!({"type": "text", "text": ""}), delta)
-    };
+/// The HTTP response that streams `message`, whose content blocks are `blocks`. Closing the
+/// connection ends the response.
+fn streamed(message: &Value, blocks: &[Value]) -> String {
     let mut empty = message.clone();
     empty["content"] = json!([]);
     empty["stop_reason"] = Value::Null;
-    let events = [
-        json!({"type": "message_start", "message": empty}),
-        json!({"type": "content_block_start", "index": 0, "content_block": start}),
-        json!({"type": "content_block_delta", "index": 0, "delta": delta}),
-        json!({"type": "content_block_stop", "index": 0}),
-        json!({
-            "type": "message_delta",
-            "delta": {"stop_reason": message["stop_reason"], "stop_sequence": null},
-            "usage": {"output_tokens": 1},
-        }),
-        json!({"type": "message_stop"}),
-    ];
-    let events = events.iter().map(|event| {
+    let blocks = (blocks.iter().enumerate()).flat_map(|(index, block)| block_events(index, block));
+    let events = [json!({"type": "message_start", "message": empty})]
+        .into_iter()
+        .chain(blocks)
+        .chain([
+            json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": message["stop_reason"], "stop_sequence": null},
+                "usage": {"output_tokens": 1},
+            }),
+            json!({"type": "message_stop"}),
+        ]);
+    let events = events.map(|event| {
         let name = event["type"].as_str().unwrap_or_default();
         format!("event: {name}\ndata: {event}\n\n")
     });
@@ -255,6 +262,38 @@ fn streamed(message: &Value, block: &Value) -> String {
         .chain(events)
         .collect::<Vec<_>>()
         .concat()
+}
+
+/// The events that stream `block`, the content block at `index`: the block starts empty, and
+/// its deltas fill it.
+fn block_events(index: usize, block: &Value) -> Vec<Value> {
+    let (start, deltas) = match block["type"].as_str() {
+        Some("tool_use") => {
+            let mut start = block.clone();
+            start["input"] = json!({});
+            let delta =
+                json!({"type": "input_json_delta", "partial_json": block["input"].to_string()});
+            (start, vec![delta])
+        }
+        Some("thinking") => (
+            json!({"type": "thinking", "thinking": "", "signature": ""}),
+            vec![
+                json!({"type": "thinking_delta", "thinking": block["thinking"]}),
+                json!({"type": "signature_delta", "signature": block["signature"]}),
+            ],
+        ),
+        _ => (
+            json!({"type": "text", "text": ""}),
+            vec![json!({"type": "text_delta", "text": block["text"]})],
+        ),
+    };
+    let deltas = (deltas.into_iter())
+        .map(|delta| json!({"type": "content_block_delta", "index": index, "delta": delta}));
+    [json!({"type": "content_block_start", "index": index, "content_block": start})]
+        .into_iter()
+        .chain(deltas)
+        .chain([json!({"type": "content_block_stop", "index": index})])
+        .collect()
 }
 
 /// The first line of the HTTP request on `stream`, like `POST /v1/messages HTTP/1.1`, and its

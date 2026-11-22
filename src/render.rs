@@ -26,7 +26,7 @@ use crate::style::{DONE_OR_ADDED, FAILED_OR_REMOVED, STRONG, SUBDUED, Style, YOU
 use crate::text::{Line, Row, Span, Text, Wrap};
 use crate::wording::{
     CallMark, Hint, Notice, NoticeMark, SessionEnd, answer_label, marks, part, parts, reply_mark,
-    session_end, user_line, with_hint,
+    session_end, summarized_reply_mark, user_line, with_hint,
 };
 
 /// The tools whose input carries a `description` of the call in Claude's words, which sums it up
@@ -78,6 +78,8 @@ pub struct Output {
     text_ended: bool,
     /// Whether pieces of the text block that runs arrived, which its end then repeats.
     has_streamed: bool,
+    /// Whether the text that shows is a narration, whose mark then says it is a summary.
+    is_narration: bool,
     /// The kinds of what Claude Code sends that claudio knows nothing of, and said so once.
     unknown_kinds: HashSet<(&'static str, String)>,
     status: Status,
@@ -173,6 +175,7 @@ impl Output {
             pending_break: None,
             text_ended: false,
             has_streamed: false,
+            is_narration: false,
             unknown_kinds: HashSet::new(),
             status: Status::Idle,
             hidden_results: HashSet::new(),
@@ -396,6 +399,14 @@ impl Output {
         self.end_text();
         self.text_ended = true;
         self.set_status(Status::Working);
+    }
+
+    /// Shows a narration, which comes whole, and only as the API's summary of what Claude wrote.
+    /// Being a block of its own, it starts with a mark, which says so.
+    pub fn show_narration(&mut self, text: &str) {
+        self.is_narration = true;
+        self.show_text_end(text);
+        self.is_narration = false;
     }
 
     /// Ends the conversation, since Claude Code ended. The text Claude was writing ends where it
@@ -808,13 +819,21 @@ impl Output {
 
     fn write_break(&mut self) {
         match self.pending_break.take() {
-            Some(Break::Reply) => self.emit(reply_mark()),
+            Some(Break::Reply) => self.emit(self.reply_mark()),
             Some(Break::Prose) => {
                 self.emit(Line::default());
-                self.emit(reply_mark());
+                self.emit(self.reply_mark());
             }
             Some(Break::Blank) => self.emit(Line::default()),
             None => {}
+        }
+    }
+
+    fn reply_mark(&self) -> Line {
+        if self.is_narration {
+            summarized_reply_mark()
+        } else {
+            reply_mark()
         }
     }
 
@@ -1806,6 +1825,23 @@ mod tests {
         let mut output = output_after_message();
         output.show_text_end("Usage");
         assert_eq!(output.take_lines(), [reply_mark(), Line::from("Usage")]);
+    }
+
+    #[test]
+    fn a_narration_s_mark_says_it_is_a_summary_and_the_next_text_s_does_not() {
+        let mut output = output_after_message();
+        output.show_narration("Running the tests.");
+        output.show_text_end("Done.");
+        assert_eq!(
+            output.take_lines(),
+            [
+                summarized_reply_mark(),
+                Line::from("Running the tests."),
+                Line::default(),
+                reply_mark(),
+                Line::from("Done.")
+            ]
+        );
     }
 
     #[test]

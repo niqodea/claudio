@@ -1,6 +1,7 @@
 //! The grammar of the conversation as claudio writes it: the marks that set apart what the user
-//! and Claude write, which shows as written, and the lines claudio writes itself. `AGENTS.md`'s
-//! Lines section gives each rule's source and reason.
+//! and Claude write, which shows as written, and the lines claudio writes itself. This is the
+//! one place the grammar is written out. The rules for its lines, with their reasons and
+//! sources, are in `AGENTS.md`'s Lines section, which the types here keep.
 //!
 //! ```text
 //! conversation = (message │ user line │ answer │ decision │ reply │ detail line │ boundary)*
@@ -8,7 +9,7 @@
 //! user line    = "›› " what                                    a command, like `/compact`, on the bar
 //! answer       = question " › " text                           your answer to a question, on the bar
 //! decision     = verb " " part                                 like `allowed #01 Bash: Run the tests`, on the bar
-//! reply        = "‹‹" "\n" text                                Claude's text
+//! reply        = "‹‹" [" summarized"] "\n" text                Claude's text, or the API's summary of it
 //! detail line  = call line │ notice
 //! call line    = ("○" │ "◌" │ "✓" │ "✗") " " body              a call, running, and how it ended
 //! notice       = ("-" │ "!") " " header ("\n" quoted)*         noted, or needs the user
@@ -24,19 +25,15 @@
 //!
 //! The types keep the grammar by construction:
 //!
-//! - `marks`, `reply_mark`, `user_line` and `answer_label` write the marks of who speaks: `››`
-//!   for the user, `‹‹` for Claude, and `›` before an answer.
-//! - A call's line takes a `CallMark`, which gives no color, so a call that failed, which
-//!   Claude deals with, stays grey after its `✗`.
-//! - A notice takes a `NoticeMark`, which only a `Notice` writes, and which gives the notice its
-//!   color, so red and orange only ever follow `!`, for what needs the user. A color never tells
-//!   two lines apart by itself, since the marks do too.
-//! - `Notice` takes its header from claudio and anything else as quoted text, which it keeps as
-//!   written, unmarked, under the header, so claudio's words and others' never mix on a line,
-//!   and the next mark ends a block.
+//! - `marks`, `reply_mark`, `summarized_reply_mark`, `user_line` and `answer_label` write the
+//!   marks of who speaks.
+//! - A call's line takes a `CallMark`, which gives no color.
+//! - A notice takes a `NoticeMark`, which only a `Notice` writes, and which gives the only color
+//!   a mark gives.
+//! - `Notice` takes its header from claudio and anything else as quoted text.
 //! - `part`, `parts`, `Hint` and `GROUP` join the pieces of a line.
-//! - Every line here is as wide as its text, whatever the terminal's width, since the scrollback
-//!   keeps a line long after the width it was written at changed.
+//! - Every line here is as wide as its text, whatever the terminal's width, as the README's
+//!   Design section asks.
 
 use crate::style::{
     ATTENTION, CODE, FAILED_OR_REMOVED, MARK, PLAIN, STRONG, SUBDUED, SUBDUED_ON_BAR, Style, YOURS,
@@ -51,9 +48,8 @@ pub const GROUP: &str = " │ ";
 /// The rule on each side of a boundary, of a fixed length.
 const RULE: &str = "───";
 
-/// The mark in front of a call's line, which says how far the call got. It leaves the line's
-/// colors to the line, which keeps them out of the way, since a call is Claude's work and needs
-/// nothing of the user, even when it fails.
+/// The mark in front of a call's line, which says how far the call got, and leaves the line's
+/// colors to the line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallMark {
     /// A call Claude makes.
@@ -130,11 +126,9 @@ impl NoticeMark {
     }
 }
 
-/// A notice: a header after its mark, in claudio's words, which follow this grammar, and the
-/// text it quotes, like a hook's error output or what Claude Code says, under it as written, so
-/// it copies as it was and is never mistaken for claudio's. Right under its header, the quoted
-/// text reads as one block with it, and the next mark ends the block. A notice is the only way
-/// to write a line with a notice's mark.
+/// A notice: a header after its mark, in claudio's words, and the text it quotes, like a hook's
+/// error output or what Claude Code says, under it as written. A notice is the only way to
+/// write a line with a notice's mark.
 pub struct Notice {
     mark: NoticeMark,
     header: Line,
@@ -197,10 +191,15 @@ pub fn marks() -> Span {
     Span::new("››", MARK)
 }
 
-/// The marks in front of what Claude writes, on a row of their own, in the color of the user's
-/// marks, since both say who starts.
+/// The marks in front of what Claude writes, on a row of their own.
 pub fn reply_mark() -> Line {
     Line::from(Span::new("‹‹", MARK))
+}
+
+/// The marks in front of a narration, which the API sends only as a summary of what Claude
+/// wrote, on a row of their own.
+pub fn summarized_reply_mark() -> Line {
+    Line::from([Span::new("‹‹", MARK), Span::new(" summarized", SUBDUED)])
 }
 
 /// The question in front of an answer.

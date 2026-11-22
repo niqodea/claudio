@@ -276,6 +276,10 @@ Color never carries meaning alone: whatever a color says, a character says too, 
 A tool call's line, for one, shows Claude's description of the call for a tool that has one, like Bash, and otherwise the call's input as code, in backticks, as Markdown marks literal text.
 Ctrl+O shows the whole input, like Bash's command.
 
+`‹‹ summarized` starts a narration, a message Claude wrote to you between tool calls that the API sends only as its own summary, in a thinking block, so you never read Claude's exact words.
+Claude Code's interface shows it too, followed by ` · summarized`.
+claudio knows a narration by the `narration_block_indexes` Claude Code lists, which nothing documents, so a contract check sees it.
+
 Each tool call's line starts with its tag, like `#0a`, which its result line repeats.
 
 A subagent shows as the call of Claude's that starts it, named by that call's tag, and a line as it ends, which counts its calls, like `✓ #0a Agent: completed · 12 calls`, or `✗` with `failed` or `stopped`.

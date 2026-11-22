@@ -132,6 +132,7 @@ impl Shared {
         match event {
             Event::Text(text) => self.output.show_text(&text),
             Event::TextEnd(text) => self.output.show_text_end(&text),
+            Event::Narration(text) => self.output.show_narration(&text),
             Event::Compacted { before, after } => self.output.show_compacted(before, after),
             Event::Unknown { part, name, line } => {
                 self.output.show_unknown(part, &name, &line);

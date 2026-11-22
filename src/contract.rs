@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use crate::claude_code;
-use crate::fake_api::FakeApi;
+use crate::fake_api::{self, FakeApi};
 use crate::protocol::{self, Event, read_events};
 
 /// A check, which fails with what Claude Code did instead.
@@ -97,10 +97,14 @@ impl Setup {
 }
 
 /// The checks, by setup.
-pub const CHECKS: [Check; 19] = [
+pub const CHECKS: [Check; 20] = [
     Check {
         name: "a slow permission check is told",
         setup: Setup::Hermetic(a_slow_permission_check_is_told),
+    },
+    Check {
+        name: "a narration is listed",
+        setup: Setup::Hermetic(a_narration_is_listed),
     },
     Check {
         name: "a background task is told from start to end",
@@ -475,6 +479,48 @@ pub fn slow_permission_check() -> Vec<String> {
         }),
     ];
     lines.iter().map(Value::to_string).collect()
+}
+
+/// Seen with Claude Code 2.1.322: a narration, text Claude wrote for the user between tool
+/// calls, comes as a thinking block that holds the API's summary of the text, and the line that
+/// carries it lists the block's index in `narration_block_indexes`. Claude Code's schema marks
+/// the field `@internal`, and says it lists the thinking blocks whose signature the API marks as
+/// a narration, "so a renderer can label them as summaries without decoding the signature
+/// envelope". The fake signs its narration with that mark, as learned from 5,313 thinking blocks
+/// of real sessions: the 592 that held text were all marked so.
+pub(crate) fn a_narration_is_listed(fake: &Hermetic) -> Result<(), String> {
+    let lines = fake.run(|run| {
+        run.send_message(NARRATION_MESSAGE)?;
+        Ok(Vec::new())
+    })?;
+    compare(&["narration", "text end"], &lines, &narration())
+}
+
+/// The message that the check of a narration sends, which `fake-claude` answers with
+/// [`narration`].
+pub const NARRATION_MESSAGE: &str = "Narrate ok";
+
+/// What Claude Code writes for a narration and the text after it, as 2.1.322 did, without the
+/// turn's other lines.
+#[must_use]
+pub fn narration() -> Vec<String> {
+    let narration = json!({
+        "type": "thinking",
+        "thinking": "ok",
+        "signature": fake_api::NARRATION_SIGNATURE,
+    });
+    let text = json!({"type": "text", "text": "done"});
+    vec![
+        json!({
+            "type": "assistant",
+            "message": {"content": [narration]},
+            "parent_tool_use_id": null,
+            "narration_block_indexes": [0],
+        })
+        .to_string(),
+        json!({"type": "assistant", "message": {"content": [text]}, "parent_tool_use_id": null})
+            .to_string(),
+    ]
 }
 
 /// Seen with Claude Code 2.1.322: a command that Claude runs in the background gets a
@@ -1405,6 +1451,8 @@ fn summary(kinds: &[&str], events: &[Event]) -> Vec<String> {
         .filter_map(|event| {
             let (kind, ids, rest): (&str, Vec<&str>, String) = match event {
                 Event::State(state) => ("state", vec![], format!("{state:?}")),
+                Event::TextEnd(text) => ("text end", vec![], text.clone()),
+                Event::Narration(text) => ("narration", vec![], text.clone()),
                 Event::PayingKey(key) => ("paying", vec![], key.clone()),
                 Event::Reset { previous_session } => {
                     ("reset", vec![previous_session], String::new())

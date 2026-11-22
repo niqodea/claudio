@@ -11,8 +11,8 @@
 //! message `ask all` sends one request of each kind at once, to see them side by side: the two
 //! questions, a plan, and calls to allow of Bash, Edit, Write, `WebFetch` and an MCP tool. A turn
 //! that asks ends once all its requests are answered. The messages of the checks of a slow
-//! permission check and of tasks get those checks' lines, and an interrupt, send now's too, gets
-//! the rest of a call that waits for one.
+//! permission check, of a narration and of tasks get those checks' lines, and an interrupt, send
+//! now's too, gets the rest of a call that waits for one.
 //! `/clear` starts a new session, and `/compact` and `/cost` answer as Claude Code does.
 //! `FAKE_DELAY` is how many seconds each answer waits before it starts, none when unset.
 //! The message `Write a long line` gets a line of 200 words, streamed in two parts: when
@@ -176,6 +176,7 @@ impl Fake {
             contract::SLOW_PERMISSION_CHECK_MESSAGE => {
                 return self.send_turn(&contract::slow_permission_check());
             }
+            contract::NARRATION_MESSAGE => return self.send_turn(&contract::narration()),
             contract::BACKGROUND_TASK_MESSAGE => {
                 return self.send_task(&contract::background_task("completed"), 4);
             }

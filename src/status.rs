@@ -96,8 +96,8 @@ pub fn lines(
             known(session_id.or(context.is_new().then_some("none yet"))),
         ),
         Line::default(),
-        limit_row("Session", limits.session(), wall_now),
-        limit_row("Week", limits.week(), wall_now),
+        limit_row("Session", limits.session(wall_now), wall_now),
+        limit_row("Week", limits.week(wall_now), wall_now),
         Line::default(),
         context_row(context, now, wall_now),
         ceiling_row(context),
@@ -354,6 +354,7 @@ fn to_f64(tokens: u64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::limits::Source;
     use crate::protocol::Usage;
 
     const HOUR: Duration = Duration::from_hours(1);
@@ -436,6 +437,9 @@ mod tests {
                 is_reached: false,
                 resets_at: Some(wall_now + 4 * 24 * HOUR),
             }),
+            Source::Reply {
+                arrived_at: wall_now,
+            },
         );
         let context = context_with(41_203, HOUR, 967_000, now);
         let in_an_hour = clock(wall_now + HOUR, wall_now);

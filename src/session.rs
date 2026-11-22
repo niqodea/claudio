@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::claude_input::ClaudeInput;
 use crate::input_line::{InputLine, Outcome};
 use crate::keys::{OnEnding, OnMessage, OnQuestion, TurnStop};
+use crate::limits;
 use crate::picker::Draft;
 use crate::protocol::{Answer, Ask, AskKind, Command};
 use crate::questions::{Questions, Sent};
@@ -72,12 +73,11 @@ impl<'a> Conversation<'a> {
         self.send(&Command::Initialize)?;
         self.send(&Command::GetSettings)?;
         self.send(&Command::GetContext)?;
-        // Claude Code reads the plan's usage from the claude.ai usage endpoint, apart from the API
-        // that Claude answers through. The endpoint can fail while the API works, so the
-        // conversation starts before the answer arrives
-        // Ref: <https://github.com/jarrodwatts/claude-hud/issues/173>, on the usage endpoint
-        // answering a status line with HTTP 429
-        self.send(&Command::GetUsage)?;
+        let (to_claude, shared) = (self.to_claude.clone(), Arc::clone(&self.session.shared));
+        limits::keep_current(
+            move || to_claude.send(&Command::GetUsage),
+            move |session, week, source| lock(&shared).limits.note(session, week, source),
+        );
         let mut draft = String::new();
         // What Claude asks waits for the user to open it with Ctrl+Y, so no key typed before a
         // question showed can answer it

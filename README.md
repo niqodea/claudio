@@ -65,6 +65,10 @@ What claudio shows, it relies on, and each thing it relies on is either promised
 - promised: the types of the Agent SDK of the same version, `sdk.d.ts`, declare it, as Anthropic's published contract for what Claude Code sends
 - observed: nothing declares it, so a contract check sees it in the real Claude Code, and the code that relies on it links to the check with `Undocumented:`
 
+One thing claudio reads apart from what Claude Code sends: Claude Code's copy of your plan's usage in its config file, observed by a check like the rest.
+Claude Code's answer to `get_usage` leaves out when it fetched its numbers, and falls back to old ones without a word when the usage endpoint fails, while its own `/usage` says so.
+The copy holds when it was fetched, by your machine's clock, which brings claudio to parity with `/usage`: where `/usage` warns that its numbers are old, claudio shows the limit as unknown.
+
 Each check runs Claude Code in one of three setups, which trade hermeticity, a result that depends on nothing but the check, for fidelity to your sessions, as [Software Engineering at Google](https://abseil.io/resources/swe-book/html/ch14.html#the_system_under_test) weighs them:
 
 - hermetic: Claude Code runs against a fake of the API on localhost, with a config directory of its own, for a check that needs an answer the API gives only now and then, like a slow one. The check is free, works offline, and gives the same result on every run

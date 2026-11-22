@@ -17,7 +17,7 @@ use crate::work::{Kind, Place, SubagentId};
 pub const INITIALIZE_REQUEST_ID: &str = "initialize";
 const SETTINGS_REQUEST_ID: &str = "settings";
 const CONTEXT_REQUEST_ID: &str = "context";
-const USAGE_REQUEST_ID: &str = "usage";
+pub(crate) const USAGE_REQUEST_ID: &str = "usage";
 const MCP_REQUEST_ID: &str = "mcp";
 const EFFORT_REQUEST_ID: &str = "effort";
 
@@ -94,8 +94,8 @@ pub enum Event {
         status: TaskStatus,
         summary: String,
     },
-    /// How much of the plan's usage limits the account used, each none when Claude Code left it
-    /// out.
+    /// How much of the plan's usage limits the account used as a reply of Claude's arrives, each
+    /// none when Claude Code left it out.
     Limits {
         /// The limit over five hours.
         session: Option<Limit>,
@@ -930,10 +930,10 @@ fn read_response(request_id: &str, response: Option<Value>) -> Result<Vec<Event>
             Ok(read_context_usage(response)
                 .unwrap_or_else(|error| vec![Event::Incompatible(error)]))
         }
-        USAGE_REQUEST_ID => read_plan_usage(response),
         MCP_REQUEST_ID => read_mcp_status(response),
         // The other requests sent are interrupts, moves to the background and stops of tasks,
-        // whose success needs no word
+        // whose success needs no word, and asks for the plan's usage, whose answer can hold an old
+        // share with nothing to tell so
         _ => Ok(vec![]),
     }
 }
@@ -1021,17 +1021,20 @@ fn read_mcp_status(response: Option<Value>) -> Result<Vec<Event>, String> {
     Ok(vec![Event::McpServers(status.mcp_servers)])
 }
 
-/// The plan's usage limits, none when they do not apply, like to a session an API key pays for.
-fn read_plan_usage(response: Option<Value>) -> Result<Vec<Event>, String> {
-    let usage: PlanUsage = serde_json::from_value(response.unwrap_or_default())
-        .map_err(|error| format!("Unreadable usage from Claude Code: {error}"))?;
-    let Some(limits) = usage.rate_limits else {
-        return Ok(vec![]);
-    };
-    Ok(vec![Event::Limits {
-        session: read_plan_limit(limits.five_hour)?,
-        week: read_plan_limit(limits.seven_day)?,
-    }])
+/// Claude Code's copy of its last fetch of the plan's usage, from `config`, the text of its
+/// config file, none when the file holds no readable copy, as for a session an API key pays for.
+/// Claude Code writes the time of the fetch by this machine's clock.
+///
+/// Undocumented: [`crate::contract::the_usage_is_shared_for_a_minute`]
+pub fn read_usage_copy(config: &str) -> Option<UsageCopy> {
+    let copy = serde_json::from_str::<ConfigFile>(config)
+        .ok()?
+        .usage_copy?;
+    Some(UsageCopy {
+        session: read_plan_limit(copy.limits.five_hour).ok()?,
+        week: read_plan_limit(copy.limits.seven_day).ok()?,
+        fetched_at: UNIX_EPOCH + Duration::from_millis(copy.fetched_at_ms),
+    })
 }
 
 /// A limit of the plan's usage, none when Claude Code leaves out how much of it the account
@@ -1637,10 +1640,27 @@ struct McpStatus {
     mcp_servers: Vec<McpServerStatus>,
 }
 
+/// Claude Code's last fetch of the plan's usage, with when it fetched it.
+pub struct UsageCopy {
+    /// The limit over five hours.
+    pub session: Option<Limit>,
+    /// The limit over seven days.
+    pub week: Option<Limit>,
+    pub fetched_at: SystemTime,
+}
+
 #[derive(Deserialize)]
-struct PlanUsage {
-    /// Absent when the plan's limits do not apply.
-    rate_limits: Option<PlanLimits>,
+struct ConfigFile {
+    #[serde(rename = "cachedUsageUtilization")]
+    usage_copy: Option<CachedUsage>,
+}
+
+#[derive(Deserialize)]
+struct CachedUsage {
+    #[serde(rename = "fetchedAtMs")]
+    fetched_at_ms: u64,
+    #[serde(rename = "utilization")]
+    limits: PlanLimits,
 }
 
 #[derive(Deserialize)]
@@ -2017,30 +2037,30 @@ mod tests {
         .to_string()
     }
 
-    fn usage_response(rate_limits: &Value) -> String {
-        json!({
-            "type": "control_response",
-            "response": {"subtype": "success", "request_id": USAGE_REQUEST_ID, "response": {
-                "subscription_type": "team",
-                "rate_limits_available": !rate_limits.is_null(),
-                "rate_limits": rate_limits,
-            }},
-        })
-        .to_string()
-    }
-
     #[test]
-    fn the_plans_usage_tells_both_limits_with_when_they_reset() {
-        let rate_limits = json!({
-            "five_hour": {"utilization": 46, "resets_at": "2026-11-08T17:00:00.486618+00:00"},
-            "seven_day": {"utilization": 100, "resets_at": "2026-11-11T16:00:00+01:00"},
+    fn the_usage_copy_tells_both_limits_with_when_they_reset_and_when_it_was_fetched() {
+        let config = json!({
+            "numStartups": 7,
+            "cachedUsageUtilization": {
+                "fetchedAtMs": 1_794_150_000_123_u64,
+                "accountUuid": "a",
+                "utilization": {
+                    "five_hour": {"utilization": 46, "resets_at": "2026-11-08T17:00:00.486618+00:00"},
+                    "seven_day": {"utilization": 100, "resets_at": "2026-11-11T16:00:00+01:00"},
+                },
+            },
         });
-        let events = read_events(&usage_response(&rate_limits)).expect("a readable line");
-        let [Event::Limits { session, week }] = events.as_slice() else {
-            panic!("limits");
-        };
+        let UsageCopy {
+            session,
+            week,
+            fetched_at,
+        } = read_usage_copy(&config.to_string()).expect("a copy");
         assert_eq!(
-            *session,
+            fetched_at,
+            since_epoch(1_794_150_000) + Duration::from_millis(123)
+        );
+        assert_eq!(
+            session,
             Some(Limit {
                 utilization: 0.46,
                 is_reached: false,
@@ -2048,7 +2068,7 @@ mod tests {
             })
         );
         assert_eq!(
-            *week,
+            week,
             Some(Limit {
                 utilization: 1.0,
                 is_reached: true,
@@ -2058,9 +2078,8 @@ mod tests {
     }
 
     #[test]
-    fn a_session_without_the_plans_limits_tells_none() {
-        let events = read_events(&usage_response(&Value::Null)).expect("a readable line");
-        assert!(events.is_empty());
+    fn a_config_without_a_usage_copy_tells_none() {
+        assert!(read_usage_copy(&json!({"numStartups": 7}).to_string()).is_none());
     }
 
     #[test]

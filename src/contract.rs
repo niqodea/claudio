@@ -20,13 +20,14 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use crate::claude_code;
 use crate::fake_api::{self, FakeApi};
+use crate::limits;
 use crate::protocol::{self, Event, read_events};
 
 /// A check, which fails with what Claude Code did instead.
@@ -97,7 +98,7 @@ impl Setup {
 }
 
 /// The checks, by setup.
-pub const CHECKS: [Check; 20] = [
+pub const CHECKS: [Check; 21] = [
     Check {
         name: "a slow permission check is told",
         setup: Setup::Hermetic(a_slow_permission_check_is_told),
@@ -165,6 +166,10 @@ pub const CHECKS: [Check; 20] = [
     Check {
         name: "a rate limit event has every window",
         setup: Setup::LivePaid(a_rate_limit_event_has_every_window),
+    },
+    Check {
+        name: "the usage is shared for a minute",
+        setup: Setup::Live(the_usage_is_shared_for_a_minute),
     },
     Check {
         name: "a permission after the input closes fails",
@@ -1235,6 +1240,75 @@ pub(crate) fn a_rate_limit_event_has_every_window(claude: &Live) -> Result<(), S
     // A turn can tell the limits more than once, each time whole
     real.dedup();
     same(&real, &summary(&["limits"], &events(&[rate_limit_event()])))
+}
+
+/// Seen with Claude Code 2.1.322: it keeps its last fetch of the plan's usage, with when it
+/// fetched it by this machine's clock, as `cachedUsageUtilization` in its config file, which all
+/// its processes share, and saves a new fetch a few milliseconds after it answers `get_usage`. It
+/// answers `get_usage` from that copy, without a new fetch, until the copy is a minute old.
+/// `sdk.d.ts` says nothing of the copy. The check needs a login to the subscription, whose plan
+/// has the limits.
+///
+/// The check tells a fetch by the copy's time changing in the file. After the second answer, it
+/// reads the file once Claude Code exited, which takes Claude Code about a second, while a save
+/// lands a few milliseconds after its answer. A Claude Code that exited before it saved would
+/// hide a second fetch, and the check would pass.
+///
+/// Counting the fetches instead would take a fake of the usage endpoint, which Claude Code asks
+/// only with a subscription's login, and only on Anthropic's own host: a proxy that Claude Code
+/// connects through, a certificate for that host that Claude Code trusts, and a fake login that
+/// Claude Code accepts, too much for one check.
+pub(crate) fn the_usage_is_shared_for_a_minute(claude: &Live) -> Result<(), String> {
+    let mut run = claude.start()?;
+    run.send(&protocol::Command::Initialize)?;
+    let config = limits::config_path().ok_or("Claude Code's config directory is unknown")?;
+    ask_usage(&mut run)?;
+    let deadline = Instant::now() + claude.timeout;
+    let first = loop {
+        if let Some(copy) = limits::read_copy(&config)
+            && SystemTime::now()
+                .duration_since(copy.fetched_at)
+                .unwrap_or_default()
+                < MINUTE
+        {
+            break copy;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "Claude Code kept no copy of the usage under a minute old in {:?}",
+                claude.timeout
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    if first.session.is_none() || first.week.is_none() {
+        return Err(
+            "Claude Code's copy of the usage tells no limit over five hours or seven days"
+                .to_string(),
+        );
+    }
+    ask_usage(&mut run)?;
+    run.close_input();
+    run.read_to_end()?;
+    let second = limits::read_copy(&config).ok_or("Claude Code's copy of the usage went away")?;
+    // A new fetch replaces the first only once the first is a minute old
+    if second.fetched_at != first.fetched_at && second.fetched_at < first.fetched_at + MINUTE {
+        return Err(format!(
+            "Claude Code fetched the usage again {:?} after the first fetch, where claudio \
+             assumes a minute",
+            (second.fetched_at.duration_since(first.fetched_at)).unwrap_or_default()
+        ));
+    }
+    Ok(())
+}
+
+const MINUTE: Duration = Duration::from_mins(1);
+
+/// Asks for the plan's usage, and waits for the answer.
+fn ask_usage(run: &mut Run) -> Result<(), String> {
+    run.send(&protocol::Command::GetUsage)?;
+    run.read_until(|line| line["response"]["request_id"] == protocol::USAGE_REQUEST_ID)?;
+    Ok(())
 }
 
 /// A rate limit event, as Claude Code 2.1.316 sent it.

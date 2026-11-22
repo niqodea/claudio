@@ -1255,7 +1255,7 @@ impl InputLine {
         let shared = lock(&self.shared);
         match &shared.phase {
             Phase::Writing(Writing { waiting }) => {
-                let now = Instant::now();
+                let (now, wall_now) = (Instant::now(), SystemTime::now());
                 let level = shared.context.level();
                 let is_cold = shared.context.is_cold(now);
                 // On a cold cache, the space in front of T becomes *, which shows the cold cache
@@ -1268,9 +1268,9 @@ impl InputLine {
                 let budgets = Line::from([
                     Span::new(format!("{cold_mark}T{}", show_level(level)), level_color),
                     " ".into(),
-                    limit_indicator('S', shared.limits.session().map(limit_level)),
+                    limit_indicator('S', shared.limits.session(wall_now).map(limit_level)),
                     " ".into(),
-                    limit_indicator('W', shared.limits.week().map(limit_level)),
+                    limit_indicator('W', shared.limits.week(wall_now).map(limit_level)),
                 ]);
                 // A subagent counts in A alone, as it runs in the background or not
                 let commands = (shared.work.listed().iter())

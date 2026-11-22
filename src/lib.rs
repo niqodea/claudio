@@ -46,14 +46,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use claude_input::ClaudeInput;
 use config::{Config, ProseWrap};
 use context::Context;
 use input_line::InputLine;
 use keys::{Phase, Writing};
-use limits::Limits;
+use limits::{Limits, Source};
 use protocol::{Event, read_events, repeats_a_message};
 use render::Output;
 use session::{Conversation, Ending, Input};
@@ -179,7 +179,11 @@ impl Shared {
                 tool_use_id,
                 is_checking,
             } => self.output.note_permission_check(&tool_use_id, is_checking),
-            Event::Limits { session, week } => self.limits.note(session, week),
+            Event::Limits { session, week } => {
+                let arrived_at = SystemTime::now();
+                self.limits
+                    .note(session, week, Source::Reply { arrived_at });
+            }
             Event::BackgroundTasks(tasks) => {
                 if self.note_background_tasks(tasks) {
                     forward(Input::HeldClear);

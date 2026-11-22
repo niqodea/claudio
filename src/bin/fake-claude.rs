@@ -21,10 +21,13 @@
 //! The message `Write tables` gets a table that fits as a grid, then one too wide for it.
 //! The message `Write prose and code` gets a heading, a paragraph, a list item and a quote, each
 //! long enough to wrap, then a code block with a long command, to see which lines wrap at spaces.
+//! The plan's usage limits show only with `CLAUDE_CONFIG_DIR` set, since the fake keeps its copy
+//! of them only in a config directory it is given.
 
 use std::env;
 use std::fs;
 use std::io::{self, BufRead};
+use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -102,7 +105,10 @@ impl Fake {
             Some("get_settings") => respond(message, &settings()),
             Some("get_context_usage") => respond(message, &context_usage()),
             Some("mcp_status") => respond(message, &mcp_status()),
-            Some("get_usage") => respond(message, &plan_usage()),
+            Some("get_usage") => {
+                note_usage_fetch();
+                respond(message, &plan_usage());
+            }
             Some("interrupt") if !self.on_interrupt.is_empty() => {
                 for line in std::mem::take(&mut self.on_interrupt) {
                     send(&line);
@@ -450,6 +456,32 @@ fn mcp_status() -> Value {
         {"name": "github", "status": "failed", "error": "connection refused", "scope": "project"},
         {"name": "claude.ai Gmail", "status": "needs-auth", "scope": "claudeai"},
     ]})
+}
+
+/// Keeps a copy of a fetch of the plan's usage, with its time, in `.claude.json` in
+/// `$CLAUDE_CONFIG_DIR`, as Claude Code does, unless a copy under a minute old is there. The
+/// user's own config stays untouched, since only a directory given to the fake gets the copy.
+fn note_usage_fetch() {
+    let Some(directory) = env::var_os("CLAUDE_CONFIG_DIR") else {
+        return;
+    };
+    let path = PathBuf::from(directory).join(".claude.json");
+    let mut config: Value = (fs::read_to_string(&path).ok())
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_else(|| json!({}));
+    let millis = |time: SystemTime| {
+        let since_epoch = time.duration_since(UNIX_EPOCH).expect("a time after 1970");
+        u64::try_from(since_epoch.as_millis()).expect("a time before the year 500 million")
+    };
+    let now = millis(now());
+    let fetched_at =
+        (config.pointer("/cachedUsageUtilization/fetchedAtMs")).and_then(Value::as_u64);
+    if fetched_at.is_some_and(|at| now.saturating_sub(at) < 60_000) {
+        return;
+    }
+    config["cachedUsageUtilization"] =
+        json!({"fetchedAtMs": now, "utilization": plan_usage()["rate_limits"]});
+    fs::write(&path, config.to_string()).expect("a writable config directory");
 }
 
 /// The plan's usage, with limits that reset in two hours and in four days.

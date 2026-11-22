@@ -894,6 +894,9 @@ fn read_system(system: System, line: &str) -> Class {
             Skipped("how a hook ends tells all that matters of it")
         }
         System::PermissionDenied => Skipped("the tool's failed result shows the refusal"),
+        System::VcsStateChanged | System::CodeChangePublished => {
+            Skipped("the call's command and output show what changed")
+        }
         System::Unknown => Flagged(unknown(line, "system message", "/subtype")),
     }
 }
@@ -1287,6 +1290,11 @@ enum System {
     },
     /// A tool use that auto mode refused.
     PermissionDenied,
+    /// Sent after a command of Claude's commits, pushes, merges or rebases.
+    VcsStateChanged,
+    /// Sent after a command of Claude's creates or changes a pull request, like by a push to
+    /// its branch.
+    CodeChangePublished,
     /// Sent once the auto mode classifier has not answered for 4 seconds whether a tool use
     /// needs the user's approval, and again as it answers, so the wait shows as a check rather
     /// than as a slow tool.
@@ -2350,6 +2358,15 @@ mod tests {
                 "stderr": "",
             }),
             json!({"type": "system", "subtype": "permission_denied", "tool_name": "Bash"}),
+            json!({"type": "system", "subtype": "vcs_state_changed", "kind": "push", "cwd": "/repo"}),
+            json!({
+                "type": "system",
+                "subtype": "code_change_published",
+                "provider": "github",
+                "url": "https://github.com/owner/name/pull/1",
+                "repo": "owner/name",
+                "identifier": "1",
+            }),
             json!({"type": "tool_progress", "tool_name": "Bash", "elapsed_time_seconds": 3}),
         ];
         for line in lines {

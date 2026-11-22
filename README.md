@@ -361,9 +361,14 @@ If it cannot, claudio says so in orange and marks nothing, so such a terminal se
 Only [a patched tmux](https://github.com/niqodea/tmux/tree/niqodea) can so far, kept for claudio's own use rather than maintained for others.
 
 Only prose, since its line breaks mean nothing, so it reads the same wherever it breaks.
+Inline code wraps at its spaces like the prose around it, as [github-markdown-css](https://github.com/sindresorhus/github-markdown-css/blob/main/github-markdown.css), a copy of GitHub's style, wraps it with `white-space: break-spaces`.
+Keeping inline code on one row would need claudio to mark where the code starts and ends inside the line, besides the `OSC 2029` at the line's start.
+A word wider than a row breaks at the edge, as CSS breaks it with [`overflow-wrap: break-word`](https://www.w3.org/TR/css-text-3/#valdef-overflow-wrap-break-word).
+
 In a code block, a line break means something, and a row wrapped at a space ends early, like a line that ended: a long command would look like two.
-A row wrapped at the edge fills the screen's width, which shows that its line goes on, as an editor shows it with a mark like vim's [`showbreak`](https://vimhelp.org/options.txt.html#%27showbreak%27), which a terminal has no way to draw.
-So code, and every other line claudio lays out itself, like a table, wraps at the edge.
+GitHub's style keeps each line of a code block on one row with [`white-space: pre`](https://www.w3.org/TR/css-text-3/#valdef-white-space-pre) and lets the reader scroll the block sideways, but a terminal's scrollback cannot scroll sideways.
+So a code block wraps at the edge, as vim does by default, with [`wrap`](https://vimhelp.org/options.txt.html#%27wrap%27) on and [`linebreak`](https://vimhelp.org/options.txt.html#%27linebreak%27) off: a row wrapped there fills the screen's width, which shows that its line goes on, as vim's [`showbreak`](https://vimhelp.org/options.txt.html#%27showbreak%27) does with a mark a terminal has no way to draw.
+Every other line claudio lays out itself, like a table, wraps at the edge too.
 
 claudio writes the spaces of prose as Claude wrote them, as [CSS's `pre-wrap`](https://www.w3.org/TR/css-text-3/#valdef-white-space-pre-wrap) keeps them, rather than showing a run of spaces as one, as a web page shows Markdown.
 A run means something in inline code, whose spaces [CommonMark keeps](https://spec.commonmark.org/0.31.2/#code-spans), and in text about spacing, while elsewhere Claude rarely writes one, so showing it as one would gain little.

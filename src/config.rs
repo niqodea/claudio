@@ -10,6 +10,8 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+use crate::text::Wrap;
+
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -23,6 +25,8 @@ pub struct Config {
     pub max_table_columns: NonZeroUsize,
     /// How Claude's text shows while Claude writes it.
     pub stream: Stream,
+    /// Where the terminal breaks Claude's prose, as the README's Wrapping at spaces tells.
+    pub prose_wrap: Wrap,
 }
 
 /// How Claude's text shows while Claude writes it.
@@ -49,6 +53,7 @@ impl Default for Config {
             // The width of a noisy line, so Claude's tables and the tools' lines end together
             max_table_columns: NonZeroUsize::new(88).expect("88 is not zero"),
             stream: Stream::Chunk,
+            prose_wrap: Wrap::Edge,
         }
     }
 }
@@ -88,6 +93,13 @@ mod tests {
         let config: Config = toml::from_str("stream = \"line\"").expect("the file reads");
         assert_eq!(config.stream, Stream::Line);
         assert!(toml::from_str::<Config>("stream = \"paragraph\"").is_err());
+    }
+
+    #[test]
+    fn the_prose_wrap_reads_as_a_word() {
+        let config: Config = toml::from_str("prose_wrap = \"ask-spaces\"").expect("the file reads");
+        assert_eq!(config.prose_wrap, Wrap::Spaces);
+        assert!(toml::from_str::<Config>("prose_wrap = \"spaces\"").is_err());
     }
 
     #[test]

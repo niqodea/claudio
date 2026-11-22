@@ -19,6 +19,8 @@
 //! `FAKE_GATE` names a pipe, the second part waits until someone writes to it, so a test can
 //! act while the line is unfinished.
 //! The message `Write tables` gets a table that fits as a grid, then one too wide for it.
+//! The message `Write prose and code` gets a heading, a paragraph, a list item and a quote, each
+//! long enough to wrap, then a code block with a long command, to see which lines wrap at spaces.
 
 use std::env;
 use std::fs;
@@ -44,6 +46,15 @@ const TABLES: &str = "A narrow table:\n\n\
     | Redis | fast | Keeps everything in memory, so it is fast, and needs a server of its own to run beside the program |\n\
     | SQLite | | A single file next to the program, with no server to run at all |";
 const LONG_LINE_END: &str = " and that is the end of the long line.";
+
+const PROSE_AND_CODE_MESSAGE: &str = "Write prose and code";
+const PROSE_AND_CODE: &str = "## A heading long enough to wrap on a narrow screen\n\n\
+    A paragraph that goes on for a while, so that it wraps on a narrow screen more than once.\n\n\
+    - A list item that goes on for a while too, so that it wraps on a narrow screen.\n\n\
+    > A quote that goes on for a while too, so that it wraps on a narrow screen.\n\n\
+    ```sh\n\
+    git log --oneline --graph --decorate --all --since=yesterday -- src/text.rs src/markdown.rs\n\
+    ```";
 
 const ASK_REQUEST_ID: &str = "fake-ask";
 
@@ -180,6 +191,7 @@ impl Fake {
             contract::REPLY_OK_MESSAGE => return self.send_turn(&[text_line("ok")]),
             LONG_LINE_MESSAGE => return self.send_long_line(),
             TABLES_MESSAGE => return self.send_turn(&[text_line(TABLES)]),
+            PROSE_AND_CODE_MESSAGE => return self.send_turn(&[text_line(PROSE_AND_CODE)]),
             contract::MOVED_CALL_MESSAGE => {
                 return self.wait_for_interrupt(&contract::moved_call());
             }

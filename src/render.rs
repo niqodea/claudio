@@ -23,7 +23,7 @@ use crate::status::grouped;
 use crate::work::{Call, End, Resulted, Work};
 
 use crate::style::{DONE_OR_ADDED, FAILED_OR_REMOVED, STRONG, SUBDUED, Style, YOURS};
-use crate::text::{Line, Row, Span, Text};
+use crate::text::{Line, Row, Span, Text, Wrap};
 use crate::wording::{
     CallMark, Hint, Notice, NoticeMark, SessionEnd, answer_label, marks, part, parts, reply_mark,
     session_end, user_line, with_hint,
@@ -163,6 +163,7 @@ impl Output {
         full_view: File,
         max_noisy_line_columns: NonZeroUsize,
         max_table_columns: NonZeroUsize,
+        prose_wrap: Wrap,
     ) -> Self {
         Output {
             text: Text::default(),
@@ -178,7 +179,7 @@ impl Output {
             max_noisy_line_columns,
             max_table_columns,
             interruption: None,
-            highlighter: Highlighter::new(max_table_columns.get()),
+            highlighter: Highlighter::new(max_table_columns.get(), prose_wrap),
             waiting_stderr: Vec::new(),
             stderr_end: None,
         }
@@ -879,7 +880,7 @@ impl Output {
 
 /// The lines of Markdown, highlighted, with its tables as grids up to `max_table_columns`.
 pub fn markdown_lines(markdown: &str, max_table_columns: usize) -> Vec<Line> {
-    let mut highlighter = Highlighter::new(max_table_columns);
+    let mut highlighter = Highlighter::new(max_table_columns, Wrap::Edge);
     let mut colored = highlighter.push(markdown.trim());
     colored.append(highlighter.finish());
     colored
@@ -1000,6 +1001,7 @@ mod tests {
                     full_view,
                     Config::default().max_noisy_line_columns,
                     Config::default().max_table_columns,
+                    Config::default().prose_wrap,
                 ),
                 work: Work::default(),
             }

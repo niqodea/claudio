@@ -8,6 +8,7 @@
 use std::fmt::{self, Display, Formatter};
 use std::mem;
 
+use serde::Deserialize;
 use unicode_width::UnicodeWidthStr;
 
 use crate::style::{PLAIN, Style};
@@ -15,6 +16,22 @@ use crate::style::{PLAIN, Style};
 /// Erases to the end of the row in the background that is set, which fills the row's rest with it
 /// without writing spaces into the text.
 const FILL_ROW: &str = "\x1b[K";
+
+/// Asks the terminal to wrap the cursor's line at spaces, as the README's Wrapping at spaces tells.
+const WRAP_AT_SPACES: &str = "\x1b]2029\x1b\\";
+
+/// Where the terminal breaks a line too wide for the screen.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Wrap {
+    /// At the screen's edge, as every terminal does.
+    #[default]
+    Edge,
+    /// At the last space before the edge, in a terminal that knows `OSC 2029`, and at the edge in
+    /// any other, which ignores it. The config names it `ask-spaces`, since claudio only asks.
+    #[serde(rename = "ask-spaces")]
+    Spaces,
+}
 
 /// A piece of text in one style. The text holds no control character, like a line break or an
 /// escape, so each character takes the columns its width says: claudio splits lines at their
@@ -140,6 +157,7 @@ impl Display for Line {
 pub struct Row {
     line: Line,
     background: Option<Style>,
+    wrap: Wrap,
 }
 
 impl Row {
@@ -163,17 +181,27 @@ impl Row {
         Row {
             line,
             background: self.background.or(Some(background)),
+            wrap: self.wrap,
         }
     }
 
     /// The row as the terminal shows it, its background filling the row before the line and after
     /// it, so it fills the first row and the last when the terminal wraps the line.
     pub fn to_terminal(&self) -> String {
+        let wrap = match self.wrap {
+            Wrap::Edge => "",
+            Wrap::Spaces => WRAP_AT_SPACES,
+        };
         let Some(background) = self.background else {
-            return self.line.to_string();
+            return format!("{wrap}{}", self.line);
         };
         let fill = format!("{}{FILL_ROW}", background.code());
-        format!("{fill}{}{fill}{}", self.line, PLAIN.code())
+        format!("{wrap}{fill}{}{fill}{}", self.line, PLAIN.code())
+    }
+
+    #[cfg(test)]
+    pub fn wrap(&self) -> Wrap {
+        self.wrap
     }
 
     /// The row as a pager shows it, which reads only the codes of colors, so the row's rest
@@ -188,6 +216,7 @@ impl From<Line> for Row {
         Row {
             line,
             background: None,
+            wrap: Wrap::Edge,
         }
     }
 }
@@ -251,9 +280,13 @@ impl Text {
         self.open.push(span);
     }
 
-    /// Ends the open line, and opens an empty one.
-    pub fn end_line(&mut self) {
-        self.ended.push(Row::from(mem::take(&mut self.open)));
+    /// Ends the open line as a row the terminal wraps at `wrap`, and opens an empty one.
+    pub fn end_line(&mut self, wrap: Wrap) {
+        let line = mem::take(&mut self.open);
+        self.ended.push(Row {
+            wrap,
+            ..Row::from(line)
+        });
     }
 
     /// Ends the open line with `row` after it, which ends the row and so keeps its background.
@@ -366,6 +399,19 @@ mod tests {
     }
 
     #[test]
+    fn only_a_row_that_wraps_at_spaces_asks_the_terminal_to() {
+        let mut text = Text::default();
+        text.push("a b");
+        text.end_line(Wrap::Spaces);
+        text.push("a b");
+        text.end_line(Wrap::Edge);
+        let rows = text.take_ended();
+        assert_eq!(rows[0].to_terminal(), "\x1b]2029\x1b\\a b");
+        assert_eq!(rows[0].to_pager(), "a b");
+        assert_eq!(rows[1].to_terminal(), "a b");
+    }
+
+    #[test]
     fn a_row_keeps_its_own_background_on_another() {
         let row = Line::from("a").on(YOURS).on(STRONG);
         assert_eq!(row.background, Some(YOURS));
@@ -381,7 +427,8 @@ mod tests {
             text.take_ended(),
             [Row {
                 line: row,
-                background: Some(YOURS)
+                background: Some(YOURS),
+                wrap: Wrap::Edge,
             }]
         );
     }
@@ -401,11 +448,11 @@ mod tests {
         let mut pieces = Text::default();
         let mut first = Text::default();
         first.push("a");
-        first.end_line();
+        first.end_line(Wrap::Edge);
         first.push("b");
         let mut second = Text::default();
         second.push("c");
-        second.end_line();
+        second.end_line(Wrap::Edge);
         pieces.append(first);
         pieces.append(second);
         let mut whole = Text::default();

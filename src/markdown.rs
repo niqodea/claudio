@@ -18,7 +18,7 @@ use crate::code;
 use crate::table::Table;
 
 use crate::style::{CODE, PLAIN, STRONG, SUBDUED, Style};
-use crate::text::{Line, Span, Text};
+use crate::text::{Line, Span, Text, Wrap};
 
 // Opens a code block, and closes it
 const FENCE: &str = "```";
@@ -36,6 +36,10 @@ pub struct Highlighter {
     table: Vec<String>,
     /// The columns a table takes at most as a grid, past which it shows as records.
     max_table_columns: usize,
+    /// Where the terminal breaks prose: headings, paragraphs, list items and quotes. Every other
+    /// line, a code block's or a table's, breaks at the edge, since its line breaks mean something
+    /// and a row wrapped at a space would look like one.
+    prose_wrap: Wrap,
     line: Open,
 }
 
@@ -77,11 +81,12 @@ enum Kind {
 }
 
 impl Highlighter {
-    pub fn new(max_table_columns: usize) -> Self {
+    pub fn new(max_table_columns: usize, prose_wrap: Wrap) -> Self {
         Highlighter {
             code_block: None,
             table: Vec::new(),
             max_table_columns,
+            prose_wrap,
             line: Open::Start(String::new()),
         }
     }
@@ -109,7 +114,7 @@ impl Highlighter {
     pub fn finish(&mut self) -> Text {
         let mut colored = self.end_line();
         self.take_table(&mut colored);
-        *self = Highlighter::new(self.max_table_columns);
+        *self = Highlighter::new(self.max_table_columns, self.prose_wrap);
         colored
     }
 
@@ -137,10 +142,10 @@ impl Highlighter {
                         let code = std::mem::take(code);
                         colored.push_line(self.color_code(&code));
                     }
-                    Settled::Heading => colored.end_line(),
+                    Settled::Heading => colored.end_line(self.prose_wrap),
                     Settled::Prose(inline) => {
                         std::mem::take(inline).end(colored);
-                        colored.end_line();
+                        colored.end_line(self.prose_wrap);
                     }
                 }
                 self.line = Open::Start(String::new());
@@ -577,9 +582,10 @@ mod tests {
         assert_eq!(color(&["2 * 3 = 6"]), [Line::from("2 * 3 = 6")]);
     }
 
-    /// Colors the Markdown that arrives in `pieces`, one after the other.
+    /// Colors the Markdown that arrives in `pieces`, one after the other, with prose wrapped at
+    /// spaces.
     fn color_in_pieces<S: AsRef<str>>(pieces: &[S]) -> Text {
-        let mut highlighter = Highlighter::new(MAX_TABLE_COLUMNS);
+        let mut highlighter = Highlighter::new(MAX_TABLE_COLUMNS, Wrap::Spaces);
         let mut colored = Text::default();
         for piece in pieces {
             colored.append(highlighter.push(piece.as_ref()));
@@ -592,6 +598,20 @@ mod tests {
     const SAMPLE: &str = "## Title\n\nText with **bold**, `code`, 2 * 3 and ***.\n- item\n  12. item\n\
         12) item\n> quote\n-1 and #2\n**b** c\n   \n| a | b |\n|---|---|\n| `x` | **y** |\n\
         After\n```python\nimport os\n```\n  ```\n# not a heading\n```\n``x``\nends with *";
+
+    #[test]
+    fn only_prose_wraps_at_spaces() {
+        let rows = color_in_pieces(&[
+            "# Title\nText\n- item\n> quote\n```\ncode\n```\n| a |\n|---|\n| b |",
+        ])
+        .into_rows();
+        let at_spaces: Vec<String> = (rows.iter())
+            .filter(|row| row.wrap() == Wrap::Spaces)
+            .map(|row| row.line().text())
+            .collect();
+        assert_eq!(at_spaces, ["# Title", "Text", "- item", "> quote"]);
+        assert!(rows.iter().any(|row| row.line().text() == "code"));
+    }
 
     #[test]
     fn the_colors_do_not_depend_on_how_the_text_arrives() {
@@ -611,12 +631,12 @@ mod tests {
     /// Asserts that each piece, pushed in turn, settles the text paired with it, a text and its
     /// style for each span, with `\n` where a line ends.
     fn assert_settles(pieces: &[(&str, &[(&str, Style)])]) {
-        let mut highlighter = Highlighter::new(MAX_TABLE_COLUMNS);
+        let mut highlighter = Highlighter::new(MAX_TABLE_COLUMNS, Wrap::Edge);
         for (piece, settled) in pieces {
             let mut expected = Text::default();
             for &(text, style) in *settled {
                 if text == "\n" {
-                    expected.end_line();
+                    expected.end_line(Wrap::Edge);
                 } else {
                     expected.push(Span::new(text, style));
                 }

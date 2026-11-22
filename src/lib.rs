@@ -292,6 +292,7 @@ fn run() -> Result<ExitCode, String> {
                 .map_err(|error| format!("cannot open the file of the full view: {error}"))?,
             config.max_noisy_line_columns,
             config.max_table_columns,
+            config.prose_wrap,
         ),
         context: Context::new(),
         limits: Limits::new(),

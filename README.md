@@ -100,6 +100,9 @@ max_table_columns = 88
 # How Claude's text shows while Claude writes it: "chunk", each piece as Claude Code sends it,
 # or "line", each line once it ends
 stream = "chunk"
+# Where the terminal breaks Claude's prose too wide for the screen: "edge", as every terminal
+# does, or "ask-spaces", which asks it to break at spaces, as only a patched tmux does so far
+prose_wrap = "edge"
 ```
 
 A noisy line wider than that loses its end to `…`, and Ctrl+O shows it whole.
@@ -344,6 +347,29 @@ The way out is in the terminal, which applies the resize and so knows where ever
 kitty, for one, [erases a shell's prompt itself on a resize](https://sw.kovidgoyal.net/kitty/shell-integration/), from the marks of [OSC 133](https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md), so the shell draws it again with no race.
 A terminal that did the same for a program's live rows, or that could move the cursor to the end of a wrapped line, would lift the limit.
 [Resizes reported in band](https://gist.github.com/rockorager/e695fb2924d36b2bcf1fff4a3704bd83), mode 2048, would not: they reach the program in order with the keys typed, but its output can still be on its way when the terminal resizes.
+
+## Wrapping at spaces
+
+A terminal wraps a line at the screen's edge, so a word can break across two rows.
+claudio never breaks a line itself, since a line in the scrollback never depends on the screen's size, as [Design](#design) tells, but it can ask the terminal to.
+With `prose_wrap = "ask-spaces"` in the config, claudio starts each line of Claude's prose, a heading, a paragraph, a list item or a quote, with `OSC 2029`, which asks the terminal to wrap that line at spaces instead, again on every resize, and to copy it as one line.
+Only a patched tmux knows it so far.
+
+Only prose, since its line breaks mean nothing, so it reads the same wherever it breaks.
+In a code block, a line break means something, and a row wrapped at a space ends early, like a line that ended: a long command would look like two.
+A row wrapped at the edge fills the screen's width, which shows that its line goes on, as an editor shows it with a mark like vim's [`showbreak`](https://vimhelp.org/options.txt.html#%27showbreak%27), which a terminal has no way to draw.
+So code, and every other line claudio lays out itself, like a table, wraps at the edge.
+
+It is a mark on each line rather than a mode, like autowrap's `?7`, since a mode holds for everything written while it is on: claudio would have to turn it off around the live rows, and a claudio that crashed would leave it on for the shell after it.
+A mark holds for its line alone, as the marks of [OSC 133](https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md) hold for a shell's prompt and output, and erasing the line drops it.
+
+It is off by default, since no standard reserves 2029, so claudio's default output stays standard, and a terminal that later gives 2029 another meaning never sees it from claudio unasked.
+A sequence few terminals know starts as opt-in: `ls` prints hyperlinks only with [`--hyperlink`](https://www.gnu.org/software/coreutils/manual/html_node/General-output-formatting.html#index-_002d_002dhyperlink), and none is its default.
+
+Once terminals adopt it, claudio can ask the terminal rather than the config.
+A mode can be asked about with DECRQM, as [synchronized output](https://github.com/contour-terminal/vt-extensions/blob/master/synchronized-output.md#feature-detection), mode 2026, is, but no general question exists for an OSC.
+So `OSC 2029` comes with a question of its own, as [OSC 10 and 11 answer `?`](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h3-Operating-System-Commands) with the current color: the terminal answers `OSC 2029 ; ?` with `OSC 2029 ; 1`.
+A terminal that does not know it stays silent, so claudio follows the question with a request for the primary device attributes, which every terminal answers: that answer arriving alone means no support, with no timeout to wait for, as the [kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/#detection-of-support-for-this-protocol) detects itself.
 
 ## Colors
 

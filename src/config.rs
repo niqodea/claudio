@@ -10,8 +10,6 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::text::Wrap;
-
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -25,8 +23,18 @@ pub struct Config {
     pub max_table_columns: NonZeroUsize,
     /// How Claude's text shows while Claude writes it.
     pub stream: Stream,
-    /// Where the terminal breaks Claude's prose, as the README's Wrapping at spaces tells.
-    pub prose_wrap: Wrap,
+    /// Where the terminal breaks Claude's prose.
+    pub prose_wrap: ProseWrap,
+}
+
+/// Where the terminal breaks Claude's prose, as the README's Wrapping at spaces tells.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProseWrap {
+    /// At the screen's edge, as every terminal does.
+    Edge,
+    /// At spaces, once claudio asked the terminal and it said it can.
+    AskSpaces,
 }
 
 /// How Claude's text shows while Claude writes it.
@@ -53,7 +61,7 @@ impl Default for Config {
             // The width of a noisy line, so Claude's tables and the tools' lines end together
             max_table_columns: NonZeroUsize::new(88).expect("88 is not zero"),
             stream: Stream::Chunk,
-            prose_wrap: Wrap::Edge,
+            prose_wrap: ProseWrap::Edge,
         }
     }
 }
@@ -98,7 +106,7 @@ mod tests {
     #[test]
     fn the_prose_wrap_reads_as_a_word() {
         let config: Config = toml::from_str("prose_wrap = \"ask-spaces\"").expect("the file reads");
-        assert_eq!(config.prose_wrap, Wrap::Spaces);
+        assert_eq!(config.prose_wrap, ProseWrap::AskSpaces);
         assert!(toml::from_str::<Config>("prose_wrap = \"spaces\"").is_err());
     }
 

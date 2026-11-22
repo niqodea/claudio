@@ -665,6 +665,13 @@ impl Output {
         ));
     }
 
+    pub fn show_no_wrap_at_spaces(&mut self) {
+        self.show_notice(Notice::new(
+            NoticeMark::Warning,
+            "the terminal cannot wrap Claude's prose at spaces, so it wraps at the edge",
+        ));
+    }
+
     pub fn show_paying_key(&mut self, key: &str) {
         let warning = format!("{key} pays for this session, not the subscription");
         self.show_notice(Notice::new(NoticeMark::Warning, warning));
@@ -1001,7 +1008,7 @@ mod tests {
                     full_view,
                     Config::default().max_noisy_line_columns,
                     Config::default().max_table_columns,
-                    Config::default().prose_wrap,
+                    Wrap::Edge,
                 ),
                 work: Work::default(),
             }

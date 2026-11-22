@@ -101,7 +101,7 @@ max_table_columns = 88
 # or "line", each line once it ends
 stream = "chunk"
 # Where the terminal breaks Claude's prose too wide for the screen: "edge", as every terminal
-# does, or "ask-spaces", which asks it to break at spaces, as only a patched tmux does so far
+# does, or "ask-spaces", which asks it to break at spaces, as only a patched tmux can so far
 prose_wrap = "edge"
 ```
 
@@ -352,8 +352,9 @@ A terminal that did the same for a program's live rows, or that could move the c
 
 A terminal wraps a line at the screen's edge, so a word can break across two rows.
 claudio never breaks a line itself, since a line in the scrollback never depends on the screen's size, as [Design](#design) tells, but it can ask the terminal to.
-With `prose_wrap = "ask-spaces"` in the config, claudio starts each line of Claude's prose, a heading, a paragraph, a list item or a quote, with `OSC 2029`, which asks the terminal to wrap that line at spaces instead, again on every resize, and to copy it as one line.
-Only a patched tmux knows it so far.
+With `prose_wrap = "ask-spaces"` in the config, claudio asks the terminal as it starts whether it can wrap at spaces, and if it can, starts each line of Claude's prose, a heading, a paragraph, a list item or a quote, with `OSC 2029`, which asks the terminal to wrap that line at spaces instead, again on every resize, and to copy it as one line.
+If it cannot, claudio says so in orange and marks nothing, so such a terminal sees only the question.
+Only [a patched tmux](https://github.com/niqodea/tmux/tree/niqodea) can so far.
 
 Only prose, since its line breaks mean nothing, so it reads the same wherever it breaks.
 In a code block, a line break means something, and a row wrapped at a space ends early, like a line that ended: a long command would look like two.
@@ -366,10 +367,8 @@ A mark holds for its line alone, as the marks of [OSC 133](https://gitlab.freede
 It is off by default, since no standard reserves 2029, so claudio's default output stays standard, and a terminal that later gives 2029 another meaning never sees it from claudio unasked.
 A sequence few terminals know starts as opt-in: `ls` prints hyperlinks only with [`--hyperlink`](https://www.gnu.org/software/coreutils/manual/html_node/General-output-formatting.html#index-_002d_002dhyperlink), and none is its default.
 
-Once terminals adopt it, claudio can ask the terminal rather than the config.
 A mode can be asked about with DECRQM, as [synchronized output](https://github.com/contour-terminal/vt-extensions/blob/master/synchronized-output.md#feature-detection), mode 2026, is, but no general question exists for an OSC.
-So `OSC 2029` comes with a question of its own, as [OSC 10 and 11 answer `?`](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h3-Operating-System-Commands) with the current color: the terminal answers `OSC 2029 ; ?` with `OSC 2029 ; 1`.
-A terminal that does not know it stays silent, so claudio follows the question with a request for the primary device attributes, which every terminal answers: that answer arriving alone means no support, with no timeout to wait for, as the [kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/#detection-of-support-for-this-protocol) detects itself.
+So `OSC 2029` comes with a question of its own, as [OSC 10 and 11 answer `?`](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h3-Operating-System-Commands) with the current color, and `src/terminal.rs` tells how claudio asks it.
 
 ## Colors
 

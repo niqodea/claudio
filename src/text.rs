@@ -8,7 +8,6 @@
 use std::fmt::{self, Display, Formatter};
 use std::mem;
 
-use serde::Deserialize;
 use unicode_width::UnicodeWidthStr;
 
 use crate::style::{PLAIN, Style};
@@ -17,19 +16,16 @@ use crate::style::{PLAIN, Style};
 /// without writing spaces into the text.
 const FILL_ROW: &str = "\x1b[K";
 
-/// Asks the terminal to wrap the cursor's line at spaces, as the README's Wrapping at spaces tells.
+/// Marks the cursor's line to wrap at spaces, `OSC 2029`.
 const WRAP_AT_SPACES: &str = "\x1b]2029\x1b\\";
 
 /// Where the terminal breaks a line too wide for the screen.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Wrap {
     /// At the screen's edge, as every terminal does.
     #[default]
     Edge,
-    /// At the last space before the edge, in a terminal that knows `OSC 2029`, and at the edge in
-    /// any other, which ignores it. The config names it `ask-spaces`, since claudio only asks.
-    #[serde(rename = "ask-spaces")]
+    /// At the last space before the edge, which only a terminal that said it can is asked for.
     Spaces,
 }
 

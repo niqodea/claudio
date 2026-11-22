@@ -49,7 +49,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use claude_input::ClaudeInput;
-use config::Config;
+use config::{Config, ProseWrap};
 use context::Context;
 use input_line::InputLine;
 use keys::{Phase, Writing};
@@ -58,6 +58,7 @@ use protocol::{Event, read_events, repeats_a_message};
 use render::Output;
 use session::{Conversation, Ending, Input};
 use terminal::QuietTerminal;
+use text::Wrap;
 use wording::SessionEnd;
 use work::Work;
 
@@ -259,6 +260,8 @@ fn run() -> Result<ExitCode, String> {
     }
     let program = claude_code::program()?;
     let config = Config::read()?;
+    let quiet_terminal = QuietTerminal::new()?;
+    let prose_wrap = terminal::prose_wrap(config.prose_wrap)?;
     // vi when EDITOR is unset or empty, since POSIX requires a vi on every system it covers
     let editor_command = env::var("EDITOR")
         .ok()
@@ -292,7 +295,7 @@ fn run() -> Result<ExitCode, String> {
                 .map_err(|error| format!("cannot open the file of the full view: {error}"))?,
             config.max_noisy_line_columns,
             config.max_table_columns,
-            config.prose_wrap,
+            prose_wrap,
         ),
         context: Context::new(),
         limits: Limits::new(),
@@ -320,8 +323,10 @@ fn run() -> Result<ExitCode, String> {
         read_claude_errors(errors_from_claude, &errors_shared);
     });
 
+    if config.prose_wrap == ProseWrap::AskSpaces && prose_wrap == Wrap::Edge {
+        lock(&shared).output.show_no_wrap_at_spaces();
+    }
     let to_claude = ClaudeInput::new(to_claude);
-    let quiet_terminal = QuietTerminal::new()?;
     let input = InputLine::new(
         editor_command,
         full_view.path().to_path_buf(),

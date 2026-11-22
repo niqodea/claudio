@@ -361,6 +361,10 @@ In a code block, a line break means something, and a row wrapped at a space ends
 A row wrapped at the edge fills the screen's width, which shows that its line goes on, as an editor shows it with a mark like vim's [`showbreak`](https://vimhelp.org/options.txt.html#%27showbreak%27), which a terminal has no way to draw.
 So code, and every other line claudio lays out itself, like a table, wraps at the edge.
 
+claudio writes the spaces of prose as Claude wrote them, as [CSS's `pre-wrap`](https://www.w3.org/TR/css-text-3/#valdef-white-space-pre-wrap) keeps them, rather than showing a run of spaces as one, as a web page shows Markdown.
+A run means something in inline code, whose spaces [CommonMark keeps](https://spec.commonmark.org/0.31.2/#code-spans), and in text about spacing, while elsewhere Claude rarely writes one, so showing it as one would gain little.
+Inside a row, a run shows as the gap it is, and at a break it hides as the spaces at any line's end do, while a copy keeps it whole.
+
 It is a mark on each line rather than a mode, like autowrap's `?7`, since a mode holds for everything written while it is on: claudio would have to turn it off around the live rows, and a claudio that crashed would leave it on for the shell after it.
 A mark holds for its line alone, as the marks of [OSC 133](https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md) hold for a shell's prompt and output, and erasing the line drops it.
 

@@ -354,7 +354,7 @@ A terminal wraps a line at the screen's edge, so a word can break across two row
 claudio never breaks a line itself, since a line in the scrollback never depends on the screen's size, as [Design](#design) tells, but it can ask the terminal to.
 With `prose_wrap = "ask-spaces"` in the config, claudio asks the terminal as it starts whether it can wrap at spaces, and if it can, starts each line of Claude's prose, a heading, a paragraph, a list item or a quote, with `OSC 2029`, which asks the terminal to wrap that line at spaces instead, again on every resize, and to copy it as one line.
 If it cannot, claudio says so in orange and marks nothing, so such a terminal sees only the question.
-Only [a patched tmux](https://github.com/niqodea/tmux/tree/niqodea) can so far.
+Only [a patched tmux](https://github.com/niqodea/tmux/tree/niqodea) can so far, kept for claudio's own use rather than maintained for others.
 
 Only prose, since its line breaks mean nothing, so it reads the same wherever it breaks.
 In a code block, a line break means something, and a row wrapped at a space ends early, like a line that ended: a long command would look like two.

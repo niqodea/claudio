@@ -128,6 +128,21 @@ impl Request {
             .collect()
     }
 
+    /// What Claude does while the request waits, as the label row says it: a verb, then what
+    /// varies, like the tool's name, last.
+    fn asking(&self) -> String {
+        match &self.ask.kind {
+            AskKind::Questions(questions_asked) if questions_asked.len() == 1 => {
+                "asking a question".to_string()
+            }
+            AskKind::Questions(questions_asked) => {
+                format!("asking {} questions", questions_asked.len())
+            }
+            AskKind::Plan(_) => "asking to carry out a plan".to_string(),
+            AskKind::Permission(permission) => format!("asking to run {}", permission.name),
+        }
+    }
+
     /// The title of every request of its kind, and nothing else, so the title reads the same on
     /// every request of a kind: what is particular to one request is on the label row, which
     /// names it, and in the block, which shows it.
@@ -522,6 +537,11 @@ impl Questions {
     /// How many requests wait. A call's questions count as one request.
     pub fn count(&self) -> usize {
         self.requests.len()
+    }
+
+    /// What Claude does while the oldest request waits, none while none waits.
+    pub fn asking(&self) -> Option<String> {
+        self.requests.first().map(Request::asking)
     }
 
     /// Opens the question view on the request it showed last, or on the last request when that
@@ -1026,6 +1046,42 @@ mod tests {
         assert_eq!(questions.view().label, "Database");
         assert_eq!(questions.remove_shown().tool_use_id, "a");
         assert!(!questions.open());
+    }
+
+    #[test]
+    fn claude_asks_as_the_oldest_request_that_waits_says_with_its_tool_last() {
+        let plan = json!({
+            "subtype": "can_use_tool",
+            "tool_name": "ExitPlanMode",
+            "input": {"plan": "# Plan"},
+            "tool_use_id": "d",
+        });
+        let Ok(crate::protocol::Event::Ask(plan)) = read_request("request-d".to_string(), plan)
+        else {
+            panic!("a plan");
+        };
+        let mut questions = Questions::default();
+        assert_eq!(questions.asking(), None);
+        questions.add(one_question("a"), None, vec![1]);
+        questions.add(two_questions("b"), None, vec![2, 3]);
+        questions.add(permission("c", false), None, vec![4]);
+        questions.add(*plan, None, vec![5]);
+        let mut asked = Vec::new();
+        while let Some(asking) = questions.asking() {
+            asked.push(asking);
+            questions.open();
+            questions.go(Move::ToRequest(0));
+            questions.remove_shown();
+        }
+        assert_eq!(
+            asked,
+            [
+                "asking a question",
+                "asking 2 questions",
+                "asking to run Bash",
+                "asking to carry out a plan",
+            ]
+        );
     }
 
     #[test]

@@ -155,7 +155,7 @@ Ctrl+D waits for them to end, and names them on the label row meanwhile, and Ctr
 
 Ctrl+L starts a new session, as Claude Code's `/clear` does, and keeps your text in the box, ready to be the new session's first message.
 That is why claudio clears rather than leaving it to a restart: you often decide on a fresh context with the message already written, and Ctrl+L sends it there without retyping it.
-While tasks run in the background, it waits for them to end before it clears, so their ends, and what Claude does with them, stay in the session that started them, and the label row says so, like `clear waits for 2 tasks · Ctrl+K stops`.
+While tasks run in the background, it waits for them to end before it clears, so their ends, and what Claude does with them, stay in the session that started them, and the label row says so in place of what Claude does, as `clear waits for background tasks · Ctrl+K stops`.
 Meanwhile Enter and Ctrl+L wait too, and Ctrl+K stops the tasks, after which the clear goes through.
 The session that ended closes with `- resume with claudio --resume <id>`, which goes back to it, when it holds anything to go back to, and a boundary, `─── cleared ───`, starts the new one.
 When claudio ends, the session closes the same way, with `─── ended ───`.
@@ -178,6 +178,7 @@ Enter waits for a second press as on a message: while questions wait, which a co
 Claude asks in three kinds of requests: the questions of a call of `AskUserQuestion`, a plan to carry out, from plan mode, and a call to allow, which Claude Code asks you about when its permission mode and rules leave it to you.
 Each request waits until you open it, so no key meant for your message answers one.
 `Y` on the label row counts them, a call's questions as one request, up to 9 and then `+`, reversed while any waits.
+While any waits, the label row says what the oldest one asks in place of what Claude does, like `asking a question`, `asking 2 questions`, `asking to carry out a plan` or `asking to run Bash`.
 Meanwhile, Enter on a message refuses them, so it waits for a second press.
 Ctrl+Y shows them one at a time, and Ctrl+Y goes back to the message, as Esc does on the list.
 Each part of the screen says one thing about the request.

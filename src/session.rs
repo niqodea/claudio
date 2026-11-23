@@ -130,7 +130,10 @@ impl<'a> Conversation<'a> {
                     None => return self.end_input(&mut questions),
                 }
             } else {
-                let outcome = self.session.input.read(questions.count(), &draft)?;
+                let outcome =
+                    self.session
+                        .input
+                        .read(questions.count(), questions.asking(), &draft)?;
                 match self.act_on_message(outcome, &mut questions)? {
                     Some(next) => (draft, is_open) = next,
                     None => return self.end_input(&mut questions),

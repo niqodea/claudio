@@ -178,6 +178,9 @@ pub struct InputLine {
     /// Whether the last key's answer answered nothing, so the question view held it back, which
     /// the label row says.
     is_empty_warned: bool,
+    /// What Claude does while the oldest request waits, which the label row says while the user
+    /// writes, none while none waits.
+    asking: Option<String>,
     /// The confirmation every key passes, which holds the key pressed once that waits for its
     /// second press in a row, which the label row says.
     gate: Gate,
@@ -256,6 +259,7 @@ impl InputLine {
             completion: None,
             pick: Draft::new().pick,
             is_empty_warned: false,
+            asking: None,
             gate: Gate::default(),
             layout,
             scroll: 0,
@@ -272,13 +276,15 @@ impl InputLine {
         })
     }
 
-    /// Reads a message, starting from `draft`, while `waiting` questions of Claude's wait and the
-    /// conversation goes on above it.
+    /// Reads a message, starting from `draft`, while `waiting` requests of Claude's wait, the
+    /// oldest of them `asking`, and the conversation goes on above it.
     pub fn read(
         &mut self,
         waiting: usize,
+        asking: Option<String>,
         draft: &str,
     ) -> Result<Outcome<String, OnMessage>, String> {
+        self.asking = asking;
         self.read_text(&Writing { waiting }, draft)
     }
 
@@ -1249,8 +1255,9 @@ impl InputLine {
     /// rules for the label row group them. The budgets are the context's level, marked and red
     /// on a cold cache, and the levels of the plan's usage limits. The activity is the questions
     /// that wait, in the color of a warning since only the user moves them on, the tasks that run
-    /// in the background, the subagents that run, and what Claude does, `idle` too, so the user always sees whether it is
-    /// their turn. For an answer, the question; at the end, the work Claude still does.
+    /// in the background, the subagents that run, and then what the session waits on, the user
+    /// or Claude, `idle` too, so the user always sees whether it is their turn. For an answer,
+    /// the question; at the end, the work Claude still does.
     fn make_label(&self) -> Line {
         let shared = lock(&self.shared);
         match &shared.phase {
@@ -1283,21 +1290,18 @@ impl InputLine {
                     " ".into(),
                     agents_indicator(shared.work.running_subagents(None)),
                 ]);
-                let work = describe_work(&shared.output, &shared.work)
-                    .unwrap_or_else(|| "idle".to_string());
-                let state =
-                    (self.confirmation()).unwrap_or_else(|| Span::new(work, SUBDUED_ON_BAR));
-                let mut label = Line::from(marks())
+                let waits_on = waits_on(
+                    self.gate.label(),
+                    shared.is_clear_waiting,
+                    self.asking.clone(),
+                    describe_work(&shared.output, &shared.work),
+                );
+                Line::from(marks())
                     .with_line(budgets)
                     .with(Span::new(GROUP, SUBDUED_ON_BAR))
                     .with_line(activity)
                     .with(Span::new(GROUP, SUBDUED_ON_BAR))
-                    .with(state);
-                if shared.is_clear_waiting {
-                    label.push(Span::new(GROUP, SUBDUED_ON_BAR));
-                    label.push(clear_wait(shared.work.listed().len()));
-                }
-                label
+                    .with(waits_on.span())
             }
             Phase::Answering(Answering { view }) => {
                 let hint = self.answering_hint(view);
@@ -1630,18 +1634,52 @@ fn agents_indicator(agents: usize) -> Span {
     Span::new(format!("A{}", show_count(agents)), SUBDUED_ON_BAR)
 }
 
-/// What the label row says while a clear waits for `tasks` tasks in the background to end, in
-/// the color of a warning, since it waits for the user too, and the key that ends the wait.
-fn clear_wait(tasks: usize) -> Span {
-    let tasks = match tasks {
-        1 => "1 task".to_string(),
-        count => format!("{count} tasks"),
-    };
-    let stop = Hint::new("Ctrl+K", "stops");
-    Span::new(
-        with_hint(&format!("clear waits for {tasks}"), &stop),
-        ATTENTION,
-    )
+/// What the session waits on, which the label row's last item names, so its width varies at the
+/// row's end and moves nothing else. Each variant holds the text, a verb first and what varies,
+/// like a tool's name, last.
+#[derive(Debug, PartialEq)]
+enum WaitsOn {
+    /// The user to finish an action of theirs: a key that waits for its second press, or a
+    /// clear that waits for the tasks in the background.
+    YourAction(String),
+    /// The user to answer the oldest request of Claude's that waits.
+    YourAnswer(String),
+    /// Claude, which works, or waits for the user's next message as `idle`.
+    Claude(String),
+}
+
+impl WaitsOn {
+    /// The text, in the color of a warning for the user's own action, which only the user
+    /// finishes.
+    fn span(self) -> Span {
+        match self {
+            WaitsOn::YourAction(text) => Span::new(text, ATTENTION),
+            WaitsOn::YourAnswer(text) | WaitsOn::Claude(text) => Span::new(text, SUBDUED_ON_BAR),
+        }
+    }
+}
+
+/// What the session waits on: the first of `WaitsOn`'s variants that holds, in their order. A
+/// key that waits for its second press, `second_press`, comes before a clear that waits, since
+/// the key is the user's latest. `asking` is the oldest request that waits, and `work` what
+/// Claude does, none while it is idle.
+fn waits_on(
+    second_press: Option<String>,
+    is_clear_waiting: bool,
+    asking: Option<String>,
+    work: Option<String>,
+) -> WaitsOn {
+    if let Some(second_press) = second_press {
+        WaitsOn::YourAction(second_press)
+    } else if is_clear_waiting {
+        // B and A count the tasks, so the text holds no count and keeps its width
+        let stop = Hint::new("Ctrl+K", "stops");
+        WaitsOn::YourAction(with_hint("clear waits for background tasks", &stop))
+    } else if let Some(asking) = asking {
+        WaitsOn::YourAnswer(asking)
+    } else {
+        WaitsOn::Claude(work.unwrap_or_else(|| "idle".to_string()))
+    }
 }
 
 /// A count up to 9, and + for more, which keeps one character for the count, so the label's
@@ -2046,6 +2084,33 @@ fn describe_work(output: &Output, work: &Work) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_session_waits_on_the_users_action_then_their_answer_then_claude() {
+        let press = || Some("Ctrl+L again clears the context".to_string());
+        let asking = || Some("asking to run Bash".to_string());
+        let work = || Some("running Bash #03".to_string());
+        assert_eq!(
+            waits_on(press(), true, asking(), work()),
+            WaitsOn::YourAction("Ctrl+L again clears the context".to_string())
+        );
+        assert_eq!(
+            waits_on(None, true, asking(), work()),
+            WaitsOn::YourAction("clear waits for background tasks · Ctrl+K stops".to_string())
+        );
+        assert_eq!(
+            waits_on(None, false, asking(), work()),
+            WaitsOn::YourAnswer("asking to run Bash".to_string())
+        );
+        assert_eq!(
+            waits_on(None, false, None, work()),
+            WaitsOn::Claude("running Bash #03".to_string())
+        );
+        assert_eq!(
+            waits_on(None, false, None, None),
+            WaitsOn::Claude("idle".to_string())
+        );
+    }
 
     #[test]
     fn the_command_line_starts_with_its_prompt() {

@@ -259,12 +259,15 @@ impl Editor {
         self.keys.clear();
     }
 
-    /// Replaces the text with `text`, as one change, in insert mode with the cursor at its end.
+    /// Replaces the text with `text`, as one change, in insert mode with the cursor at its end,
+    /// and with no insert session, as a new editor has, so Ctrl+W and Ctrl+U stop at no place
+    /// of the text before.
     pub fn replace(&mut self, text: &str) {
         self.keys.clear();
         self.begin_change();
         self.text = text.chars().collect();
         self.cursor = self.text.len();
+        self.insert_start = None;
         self.mode = Mode::Insert;
     }
 
@@ -1505,6 +1508,20 @@ mod tests {
     fn change_word_changes_to_the_word_end() {
         assert_eq!(shown(&after("foo bar baz", "cwX<Esc>")), "|X bar baz");
         assert_eq!(shown(&after("foo bar", "llcwX<Esc>")), "fo|X bar");
+    }
+
+    #[test]
+    fn a_replaced_text_has_no_insert_start_for_ctrl_w_to_stop_at() {
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let mut editor = Editor::new("abc");
+        // The cursor keys start an insert session where they leave the cursor, after "ab"
+        editor.press(&key(KeyCode::Left));
+        editor.replace("");
+        for character in "something".chars() {
+            editor.press(&key(KeyCode::Char(character)));
+        }
+        editor.press(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(editor.text(), "");
     }
 
     #[test]

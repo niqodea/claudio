@@ -67,9 +67,10 @@ impl<'a> Conversation<'a> {
         }
     }
 
-    /// Runs the conversation until Claude Code ends, or until the user has nothing more to say,
-    /// which the ending follows.
-    pub fn run(mut self) -> Result<Option<Ending<'a>>, String> {
+    /// Runs the conversation, which starts with `command` when the session started with one,
+    /// until Claude Code ends, or until the user has nothing more to say, which the ending
+    /// follows.
+    pub fn run(mut self, command: Option<&str>) -> Result<Option<Ending<'a>>, String> {
         self.send(&Command::Initialize)?;
         self.send(&Command::GetSettings)?;
         self.send(&Command::GetContext)?;
@@ -78,6 +79,9 @@ impl<'a> Conversation<'a> {
             move || to_claude.send(&Command::GetUsage),
             move |session, week, source| lock(&shared).limits.note(session, week, source),
         );
+        if let Some(command) = command {
+            self.run_command(command)?;
+        }
         let mut draft = String::new();
         // What Claude asks waits for the user to open it with Ctrl+Y, so no key typed before a
         // question showed can answer it
@@ -165,15 +169,8 @@ impl<'a> Conversation<'a> {
             // Claude Code runs a command once the turn that runs ends, and cancels the questions
             // that wait for it, as for a message
             OnMessage::Run(sending) => {
-                let command = sending.text.trim();
                 self.refuse_questions(questions)?;
-                lock(&self.session.shared).output.show_command(command);
-                // A clear waits for the background, however the user asks for it
-                if command == "clear" {
-                    self.clear()?;
-                } else {
-                    self.send(&Command::Run { command })?;
-                }
+                self.run_command(&sending.text)?;
             }
             OnMessage::Stop(stop) => self.stop_turn(*stop, questions)?,
             OnMessage::Kill { stop, tasks } => {
@@ -198,6 +195,18 @@ impl<'a> Conversation<'a> {
             OnMessage::End => return Ok(None),
         }
         Ok(Some((text, false)))
+    }
+
+    /// Runs one of Claude Code's commands, written without its `/`, and marks it as the user's. A
+    /// clear waits for the background, however the user asks for it.
+    fn run_command(&mut self, command: &str) -> Result<(), String> {
+        let command = command.trim();
+        lock(&self.session.shared).output.show_command(command);
+        if command == "clear" {
+            self.clear()
+        } else {
+            self.send(&Command::Run { command })
+        }
     }
 
     /// Clears the context now, or once no task runs in the background, as `Shared::hold_clear`

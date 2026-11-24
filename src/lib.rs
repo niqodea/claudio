@@ -40,6 +40,7 @@ mod wrap;
 
 use std::env;
 use std::io::{BufRead, BufReader};
+use std::iter::Peekable;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{self, ChildStderr, ChildStdout, ExitCode, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -245,24 +246,13 @@ pub fn main() -> ExitCode {
 
 fn run() -> Result<ExitCode, String> {
     let mut args = env::args().skip(1).peekable();
-    if args.peek().map(String::as_str) == Some(claude_code::INSTALL_COMMAND) {
-        if args.nth(1).is_some() {
-            return Err(format!(
-                "claudio {} takes no arguments",
-                claude_code::INSTALL_COMMAND
-            ));
-        }
-        claude_code::install()?;
+    if let Some(code) = run_subcommand(&mut args)? {
+        return Ok(code);
+    }
+    let Some(start) = parse(args)? else {
+        println!("{USAGE}");
         return Ok(ExitCode::SUCCESS);
-    }
-    if args.peek().map(String::as_str) == Some(CHECK_COMMAND) {
-        let is_paid = match args.nth(1).as_deref() {
-            None => false,
-            Some("--paid") if args.next().is_none() => true,
-            Some(_) => return Err(format!("usage: claudio {CHECK_COMMAND} [--paid]")),
-        };
-        return check_claude_code(is_paid);
-    }
+    };
     let program = claude_code::program()?;
     let config = Config::read()?;
     let quiet_terminal = QuietTerminal::new()?;
@@ -273,7 +263,7 @@ fn run() -> Result<ExitCode, String> {
         .filter(|editor| !editor.is_empty())
         .unwrap_or_else(|| "vi".to_string());
     let mut claude = claude_code::command(&program)
-        .args(args)
+        .args(&start.options)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         // Its error output reaches the terminal through the output, above the input line
@@ -350,9 +340,79 @@ fn run() -> Result<ExitCode, String> {
         &claude,
     );
     let result = conversation
-        .run()
+        .run(start.command.as_deref())
         .and_then(|ending| ending.map_or(Ok(()), Ending::run));
     end(claude, [reader, errors_reader], &shared, result)
+}
+
+/// Runs the subcommand of claudio's own that `args` start with, if any, and returns the exit
+/// code it ends with.
+fn run_subcommand(
+    args: &mut Peekable<impl Iterator<Item = String>>,
+) -> Result<Option<ExitCode>, String> {
+    if args.peek().map(String::as_str) == Some(claude_code::INSTALL_COMMAND) {
+        if args.nth(1).is_some() {
+            return Err(format!(
+                "claudio {} takes no arguments",
+                claude_code::INSTALL_COMMAND
+            ));
+        }
+        claude_code::install()?;
+        return Ok(Some(ExitCode::SUCCESS));
+    }
+    if args.peek().map(String::as_str) == Some(CHECK_COMMAND) {
+        let is_paid = match args.nth(1).as_deref() {
+            None => false,
+            Some("--paid") if args.next().is_none() => true,
+            Some(_) => return Err(format!("usage: claudio {CHECK_COMMAND} [--paid]")),
+        };
+        return check_claude_code(is_paid).map(Some);
+    }
+    Ok(None)
+}
+
+/// How claudio starts the session, by its arguments.
+#[derive(Debug, PartialEq)]
+struct Start {
+    /// The options claudio passes on to Claude Code, each followed by its value.
+    options: Vec<String>,
+    /// The command the session starts with, written without its `/`.
+    command: Option<String>,
+}
+
+/// The options of `claude`'s that claudio takes, under the same names, and passes on, each with
+/// its value.
+const CLAUDE_OPTIONS: [&str; 3] = ["--resume", "--settings", "--plugin-dir"];
+
+const USAGE: &str = "\
+usage: claudio [--resume <id>] [--settings <file>] [--plugin-dir <dir>] [--command <command>]
+       claudio install-claude-code
+       claudio check-claude-code [--paid]";
+
+/// Reads how to start the session from claudio's arguments, or none when they ask for the usage.
+fn parse(mut args: impl Iterator<Item = String>) -> Result<Option<Start>, String> {
+    let mut start = Start {
+        options: Vec::new(),
+        command: None,
+    };
+    while let Some(arg) = args.next() {
+        if arg == "-h" || arg == "--help" {
+            return Ok(None);
+        }
+        let is_command = arg == "--command";
+        if !is_command && !CLAUDE_OPTIONS.contains(&arg.as_str()) {
+            return Err(format!("unknown argument {arg}\n{USAGE}"));
+        }
+        let value = (args.next())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("{arg} takes a value\n{USAGE}"))?;
+        if !is_command {
+            start.options.extend([arg, value]);
+        } else if start.command.replace(value).is_some() {
+            return Err(format!("--command comes at most once\n{USAGE}"));
+        }
+    }
+    Ok(Some(start))
 }
 
 /// The subcommand that checks what claudio assumes of Claude Code.
@@ -502,4 +562,62 @@ fn read_claude_errors(errors_from_claude: ChildStderr, shared: &Mutex<Shared>) {
 /// anyway.
 fn lock<T>(shared: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     shared.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_args(args: &[&str]) -> Result<Option<Start>, String> {
+        parse(args.iter().map(ToString::to_string))
+    }
+
+    #[test]
+    fn options_pass_on_and_the_command_stays_in_any_order() {
+        assert_eq!(
+            parse_args(&[
+                "--command",
+                "loop 30m",
+                "--settings",
+                "a.json",
+                "--plugin-dir",
+                "mod"
+            ]),
+            Ok(Some(Start {
+                options: ["--settings", "a.json", "--plugin-dir", "mod"]
+                    .map(String::from)
+                    .to_vec(),
+                command: Some("loop 30m".into()),
+            }))
+        );
+    }
+
+    #[test]
+    fn an_argument_claudio_does_not_take_fails_with_the_usage() {
+        for args in [&["--model", "opus"][..], &["hello"], &["--resume=abc"]] {
+            let error = parse_args(args).expect_err("an unknown argument");
+            assert!(error.starts_with(&format!("unknown argument {}\n", args[0])));
+            assert!(error.ends_with(USAGE));
+        }
+    }
+
+    #[test]
+    fn an_option_without_its_value_fails() {
+        for args in [&["--resume"][..], &["--command", ""]] {
+            let error = parse_args(args).expect_err("a missing value");
+            assert!(error.starts_with(&format!("{} takes a value\n", args[0])));
+        }
+    }
+
+    #[test]
+    fn a_second_command_fails() {
+        let error = parse_args(&["--command", "a", "--command", "b"]).expect_err("two commands");
+        assert!(error.starts_with("--command comes at most once\n"));
+    }
+
+    #[test]
+    fn help_asks_for_the_usage() {
+        assert_eq!(parse_args(&["--help"]), Ok(None));
+        assert_eq!(parse_args(&["--resume", "abc", "-h"]), Ok(None));
+    }
 }

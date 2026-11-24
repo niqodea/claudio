@@ -11,7 +11,13 @@ claudio install-claude-code
 
 ## Claude Code
 
-claudio drives `claude -p`, and passes its arguments on to `claude`.
+claudio drives `claude -p`, and takes a few of `claude`'s options, under the same names, which it passes on: `--resume <id>`, `--settings <file>` and `--plugin-dir <dir>`.
+Any other argument fails with the usage line, which `--help` shows.
+An option keeps `claude`'s name so that it means what it means in `claude`, as [clig.dev](https://clig.dev/#arguments-and-flags) asks to "follow that existing pattern" when another command uses a flag name.
+claudio takes only a subset, as `uv pip` takes a subset of `pip`'s options and prioritizes the missing ones "based on user demand" ([uv](https://docs.astral.sh/uv/pip/compatibility/)): it adds an option when someone needs it, once checked with the Claude Code it runs, and an option it passed on unread could break its talk with Claude Code, like `--output-format`.
+
+`--command <command>` runs one of Claude Code's commands as the session starts, written without its `/` as on the [command line](#commands), like `claudio --command "loop 30m"`.
+It follows vim's `-c`, which runs a command as vim starts, and has no short form, since `claude -c` continues the last session.
 
 claudio runs its own copy of Claude Code, of the one version it was checked against, since it relies on what is only observed, as [What claudio relies on](#what-claudio-relies-on) tells.
 `claudio install-claude-code` downloads that copy into `claudio/claude-code` in `$XDG_DATA_HOME`, or in `~/.local/share` when that is unset, checks its sha256, and removes the copies of other versions.

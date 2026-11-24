@@ -17,13 +17,36 @@ pub enum Mode {
     VisualLine,
 }
 
+/// The mode, holding the state that only this mode uses, so leaving the mode drops that state: the
+/// insert session in insert mode, and the selection's anchor in visual mode.
+enum State {
+    Insert(Session),
+    Normal,
+    /// Selecting from `anchor`, the end that stays where `v` or `V` left it, to the cursor, by
+    /// characters, or by whole lines when `is_linewise`.
+    Visual {
+        anchor: usize,
+        is_linewise: bool,
+    },
+}
+
+/// The typing from entering insert mode to leaving it.
+#[derive(Default)]
+struct Session {
+    /// Where Ctrl+W and Ctrl+U stop once, as in vim: where the session began, or where the
+    /// cursor keys last left the cursor. None when no key began the session, as when the editor
+    /// gets a new text.
+    stop: Option<usize>,
+    /// The command that began the session, with the keys typed since, which `.` repeats once
+    /// the session ends. None for a session that no command began, which `.` never repeats.
+    change: Option<Change>,
+}
+
 pub struct Editor {
     text: Vec<char>,
     /// An index into the text, which in insert mode can be its length.
     cursor: usize,
-    mode: Mode,
-    /// The end of the visual selection that stays where `v` or `V` left it.
-    anchor: usize,
+    state: State,
     /// The keys of the command being typed in normal or visual mode.
     keys: Vec<Key>,
     /// The column `j` and `k` keep across lines of other lengths.
@@ -33,17 +56,13 @@ pub struct Editor {
     /// the time, so a whole copy of it per change costs nothing worth saving.
     undo: Vec<Vec<char>>,
     redo: Vec<Vec<char>>,
-    /// Whether a change is under way, which an insert session keeps until Escape, so that one
+    /// Whether a change is under way, which an insert session keeps until it ends, so that one
     /// undo takes the whole session back.
     is_changing: bool,
     /// The last `f`, `F`, `t` or `T`, which `;` and `,` repeat.
     last_find: Option<(Find, char)>,
     /// The last change, which `.` repeats.
     last_change: Option<Change>,
-    /// The change whose insert session runs, with the keys typed in it so far.
-    typing: Option<Change>,
-    /// Where the insert session began, or where the cursor keys last moved it to.
-    insert_start: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -206,8 +225,7 @@ impl Editor {
         Editor {
             cursor: text.len(),
             text,
-            mode: Mode::Insert,
-            anchor: 0,
+            state: State::Insert(Session::default()),
             keys: Vec::new(),
             column: None,
             register: Register::default(),
@@ -216,8 +234,6 @@ impl Editor {
             is_changing: false,
             last_find: None,
             last_change: None,
-            typing: None,
-            insert_start: None,
         }
     }
 
@@ -226,7 +242,16 @@ impl Editor {
     }
 
     pub fn mode(&self) -> Mode {
-        self.mode
+        match self.state {
+            State::Insert(_) => Mode::Insert,
+            State::Normal => Mode::Normal,
+            State::Visual {
+                is_linewise: false, ..
+            } => Mode::Visual,
+            State::Visual {
+                is_linewise: true, ..
+            } => Mode::VisualLine,
+        }
     }
 
     /// The cursor's index among the text's characters.
@@ -259,16 +284,17 @@ impl Editor {
         self.keys.clear();
     }
 
-    /// Replaces the text with `text`, as one change, in insert mode with the cursor at its end,
-    /// and with no insert session, as a new editor has, so Ctrl+W and Ctrl+U stop at no place
-    /// of the text before.
+    /// Ends the running insert session, as Escape does, then replaces the text with `text` as
+    /// one undo step of its own. The cursor goes to the end, in an insert session that no key
+    /// began, like a new editor's.
     pub fn replace(&mut self, text: &str) {
         self.keys.clear();
+        self.end_session();
         self.begin_change();
         self.text = text.chars().collect();
         self.cursor = self.text.len();
-        self.insert_start = None;
-        self.mode = Mode::Insert;
+        self.is_changing = false;
+        self.state = State::Insert(Session::default());
     }
 
     /// Inserts pasted text at the cursor, with its line breaks as `\n`.
@@ -283,7 +309,7 @@ impl Editor {
         let at = self.cursor;
         self.text.splice(at..at, characters.iter().copied());
         self.cursor = at + characters.len();
-        if self.mode != Mode::Insert {
+        if !self.is_inserting() {
             self.cursor -= 1;
             self.is_changing = false;
         }
@@ -293,7 +319,7 @@ impl Editor {
         let Some(key) = key_of(event) else {
             return;
         };
-        if self.mode == Mode::Insert {
+        if self.is_inserting() {
             self.type_key(key);
             return;
         }
@@ -308,8 +334,32 @@ impl Editor {
         }
     }
 
+    fn is_inserting(&self) -> bool {
+        matches!(self.state, State::Insert(_))
+    }
+
     fn is_visual(&self) -> bool {
-        matches!(self.mode, Mode::Visual | Mode::VisualLine)
+        matches!(self.state, State::Visual { .. })
+    }
+
+    /// Begins an insert session at the cursor, where Ctrl+W and Ctrl+U stop once.
+    fn begin_session(&mut self) {
+        self.state = State::Insert(Session {
+            stop: Some(self.cursor),
+            change: None,
+        });
+    }
+
+    /// Ends the running insert session and switches to normal mode. `.` then repeats the
+    /// session's change, and one undo takes back all the session's typing.
+    fn end_session(&mut self) {
+        if let State::Insert(session) = &mut self.state {
+            if let Some(change) = session.change.take() {
+                self.last_change = Some(change);
+            }
+            self.state = State::Normal;
+            self.is_changing = false;
+        }
     }
 
     fn execute(&mut self, command: Command) {
@@ -343,18 +393,27 @@ impl Editor {
             Command::Put { before, count } => self.put(before, count.unwrap_or(1)),
             Command::Insert(insert) => self.insert(insert),
             Command::Visual(mode) => {
-                if self.mode == mode {
-                    self.mode = Mode::Normal;
-                } else {
-                    if !self.is_visual() {
-                        self.anchor = self.cursor;
-                    }
-                    self.mode = mode;
-                }
+                // Switching between visual modes keeps the selection's anchor
+                let anchor = match self.state {
+                    State::Visual { anchor, .. } => anchor,
+                    State::Insert(_) | State::Normal => self.cursor,
+                };
+                self.state = match mode {
+                    _ if mode == self.mode() => State::Normal,
+                    Mode::Visual => State::Visual {
+                        anchor,
+                        is_linewise: false,
+                    },
+                    Mode::VisualLine => State::Visual {
+                        anchor,
+                        is_linewise: true,
+                    },
+                    Mode::Insert | Mode::Normal => State::Normal,
+                };
             }
             Command::VisualOperate(operator) => {
                 if let Some(range) = self.visual_range() {
-                    self.mode = Mode::Normal;
+                    self.state = State::Normal;
                     self.operate(operator, range);
                 }
             }
@@ -362,23 +421,25 @@ impl Editor {
                 if let Some(range) = self.visual_range() {
                     self.toggle_case(range.start, range.end);
                     self.cursor = range.start;
-                    self.mode = Mode::Normal;
+                    self.state = State::Normal;
                 }
             }
             Command::VisualJoin => {
                 if let Some(range) = self.visual_range() {
                     let lines = self.line_of(range.end) - self.line_of(range.start);
                     self.cursor = range.start;
-                    self.mode = Mode::Normal;
+                    self.state = State::Normal;
                     self.join(lines.max(1));
                 }
             }
             Command::VisualPut => self.put_over_selection(),
             Command::VisualObject(object) => {
                 if let Some(range) = self.object_range(object) {
-                    self.anchor = range.start;
                     self.cursor = range.end.saturating_sub(1).max(range.start);
-                    self.mode = Mode::Visual;
+                    self.state = State::Visual {
+                        anchor: range.start,
+                        is_linewise: false,
+                    };
                 }
             }
             Command::Undo => self.undo(),
@@ -394,13 +455,14 @@ impl Editor {
                 command,
                 typed: Vec::new(),
             };
-            if self.mode == Mode::Insert {
-                self.typing = Some(change);
-            } else {
-                self.last_change = Some(change);
+            // A change that enters insert mode stays in the session, which adds each typed key
+            // to the change
+            match &mut self.state {
+                State::Insert(session) => session.change = Some(change),
+                State::Normal | State::Visual { .. } => self.last_change = Some(change),
             }
         }
-        if self.mode != Mode::Insert {
+        if !self.is_inserting() {
             self.is_changing = false;
             self.clamp();
         }
@@ -409,17 +471,17 @@ impl Editor {
     /// Acts on a key in insert mode.
     fn type_key(&mut self, key: Key) {
         if key == Key::Escape {
-            self.is_changing = false;
-            self.mode = Mode::Normal;
+            self.end_session();
             if self.cursor > self.line_start(self.cursor) {
                 self.cursor -= 1;
             }
-            if let Some(change) = self.typing.take() {
-                self.last_change = Some(change);
-            }
             return;
         }
-        if let Some(change) = &mut self.typing {
+        if let State::Insert(Session {
+            change: Some(change),
+            ..
+        }) = &mut self.state
+        {
             change.typed.push(key);
         }
         match key {
@@ -441,10 +503,10 @@ impl Editor {
                 } else {
                     self.word_back(self.cursor, false).max(line_start)
                 };
-                self.delete(self.stop_at_insert_start(start), self.cursor);
+                self.delete(self.stop_once(start), self.cursor);
             }
             Key::Control('u') => {
-                let start = self.stop_at_insert_start(self.line_start(self.cursor));
+                let start = self.stop_once(self.line_start(self.cursor));
                 self.delete(start, self.cursor);
             }
             Key::Left => {
@@ -471,20 +533,23 @@ impl Editor {
             Key::End => self.cursor = self.line_end(self.cursor),
             Key::Control(_) | Key::Escape => {}
         }
-        // The cursor keys start the insert again where they leave the cursor, as in vim
+        // The cursor keys move the session's stop to where they leave the cursor, as in vim
         if matches!(
             key,
             Key::Left | Key::Right | Key::Up | Key::Down | Key::Home | Key::End
-        ) {
-            self.insert_start = Some(self.cursor);
+        ) && let State::Insert(session) = &mut self.state
+        {
+            session.stop = Some(self.cursor);
         }
     }
 
-    /// Where Ctrl+W or Ctrl+U deleting back to `start` stops: once at the insert session's
-    /// start, which the next press goes past, as in vim.
-    fn stop_at_insert_start(&self, start: usize) -> usize {
-        match self.insert_start {
-            Some(insert_start) if self.cursor > insert_start => start.max(insert_start),
+    /// Where Ctrl+W or Ctrl+U deleting back to `start` stops: once at the session's stop,
+    /// which the next press goes past, as in vim.
+    fn stop_once(&self, start: usize) -> usize {
+        match self.state {
+            State::Insert(Session {
+                stop: Some(stop), ..
+            }) if self.cursor > stop => start.max(stop),
             _ => start,
         }
     }
@@ -554,7 +619,7 @@ impl Editor {
             (command, _) => command,
         };
         self.execute(command);
-        if self.mode == Mode::Insert {
+        if self.is_inserting() {
             for key in change.typed {
                 self.type_key(key);
             }
@@ -613,8 +678,7 @@ impl Editor {
                 self.begin_change();
                 self.text.drain(start..range.end);
                 self.cursor = start;
-                self.insert_start = Some(start);
-                self.mode = Mode::Insert;
+                self.begin_session();
             }
         }
     }
@@ -686,15 +750,22 @@ impl Editor {
     }
 
     fn visual_range(&self) -> Option<Range> {
-        let (start, end) = (self.anchor.min(self.cursor), self.anchor.max(self.cursor));
-        match self.mode {
-            Mode::Visual => Some(Range {
+        let State::Visual {
+            anchor,
+            is_linewise,
+        } = self.state
+        else {
+            return None;
+        };
+        let (start, end) = (anchor.min(self.cursor), anchor.max(self.cursor));
+        if is_linewise {
+            Some(self.lines_between(start, end))
+        } else {
+            Some(Range {
                 start,
                 end: (end + 1).min(self.text.len()),
                 is_linewise: false,
-            }),
-            Mode::VisualLine => Some(self.lines_between(start, end)),
-            Mode::Insert | Mode::Normal => None,
+            })
         }
     }
 
@@ -1030,7 +1101,7 @@ impl Editor {
             return;
         };
         let register = self.register.clone();
-        self.mode = Mode::Normal;
+        self.state = State::Normal;
         self.begin_change();
         let removed = self
             .text
@@ -1060,8 +1131,7 @@ impl Editor {
                 start
             }
         };
-        self.insert_start = Some(self.cursor);
-        self.mode = Mode::Insert;
+        self.begin_session();
     }
 
     /// The start of the next word from `at`, or the start of an empty line, or the text's end.
@@ -1469,7 +1539,7 @@ mod tests {
     /// An editor in normal mode on `text` at its first character, after `keys`.
     pub(super) fn after(text: &str, keys: &str) -> Editor {
         let mut editor = Editor::new(text);
-        editor.mode = Mode::Normal;
+        editor.state = State::Normal;
         editor.cursor = 0;
         for event in events(keys) {
             editor.press(&event);
@@ -1511,10 +1581,10 @@ mod tests {
     }
 
     #[test]
-    fn a_replaced_text_has_no_insert_start_for_ctrl_w_to_stop_at() {
+    fn a_replaced_text_has_no_stop_for_ctrl_w() {
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
         let mut editor = Editor::new("abc");
-        // The cursor keys start an insert session where they leave the cursor, after "ab"
+        // The cursor keys move the session's stop to where they leave the cursor, after "ab"
         editor.press(&key(KeyCode::Left));
         editor.replace("");
         for character in "something".chars() {
@@ -1522,6 +1592,37 @@ mod tests {
         }
         editor.press(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
         assert_eq!(editor.text(), "");
+    }
+
+    #[test]
+    fn a_replaced_text_ends_the_session_so_dot_repeats_only_its_own_change() {
+        let mut editor = Editor::new("");
+        for event in events("<Esc>Afoo") {
+            editor.press(&event);
+        }
+        editor.replace("");
+        for event in events("bar<Esc>.") {
+            editor.press(&event);
+        }
+        // `.` repeats `Afoo`, the last command: "bar" is typing in the session the replace began
+        assert_eq!(editor.text(), "barfoo");
+    }
+
+    #[test]
+    fn a_replaced_text_is_one_undo_step_apart_from_the_typing_around_it() {
+        let mut editor = Editor::new("");
+        for event in events("hello") {
+            editor.press(&event);
+        }
+        editor.replace("x");
+        for event in events("y<Esc>u") {
+            editor.press(&event);
+        }
+        assert_eq!(editor.text(), "x");
+        for event in events("u") {
+            editor.press(&event);
+        }
+        assert_eq!(editor.text(), "hello");
     }
 
     #[test]
@@ -1793,7 +1894,7 @@ mod tests {
     /// The same as `vim`, from the editor.
     fn ours(text: &str, keys: &str) -> String {
         let mut editor = Editor::new(text);
-        editor.mode = Mode::Normal;
+        editor.state = State::Normal;
         editor.cursor = 0;
         for key in keys.chars() {
             let event = match key {

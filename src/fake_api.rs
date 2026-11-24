@@ -15,9 +15,10 @@
 //!   `SendMessage` to the subagent, whose message says `Reply ok`
 //! - a turn whose last user message asks `Stop <task id> with TaskStop` gets a call of `TaskStop`
 //!   with the task's id
-//! - a turn whose last user message says `Narrate ok` gets the narration `ok`, a thinking block
-//!   signed with [`NARRATION_SIGNATURE`], then the text `done`, since Claude Code asks again when
-//!   a reply holds only thinking
+//! - a turn whose last user message says `Narrate ok` gets a thinking block signed with
+//!   [`NARRATION_SIGNATURE`] that holds the narration `ok` and an empty line, as the API ends
+//!   each summary with one, then the text `done`, since Claude Code asks again when a reply holds
+//!   only thinking
 //! - a turn whose last user message says `Reply ok`, holds a tool's result, Claude Code's
 //!   notification that a background task ended, or a subagent's report, gets the text `ok`
 //! - the question of the auto mode classifier, the one request that stops at `</severity>`, gets
@@ -196,7 +197,7 @@ fn reply(
     let says = |words: &str| texts.iter().any(|text| text.trim() == words);
     if says("Narrate ok") {
         let narration =
-            json!({"type": "thinking", "thinking": "ok", "signature": NARRATION_SIGNATURE});
+            json!({"type": "thinking", "thinking": "ok\n\n", "signature": NARRATION_SIGNATURE});
         let text = json!({"type": "text", "text": "done"});
         return Ok((vec![narration, text], "end_turn"));
     }

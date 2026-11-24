@@ -390,8 +390,10 @@ impl Output {
     }
 
     /// Ends a block of Claude's text, whose whole `text` shows here when none of it streamed,
-    /// as for a command's output, which Claude Code writes itself.
+    /// as for a command's output, which Claude Code writes itself. The output puts its own empty
+    /// row between blocks, so it drops the whitespace at the end of `text`.
     pub fn show_text_end(&mut self, text: &str) {
+        let text = text.trim_end();
         if !std::mem::take(&mut self.has_streamed) && !text.is_empty() {
             self.show_text(text);
             self.has_streamed = false;
@@ -1831,6 +1833,24 @@ mod tests {
     fn a_narration_s_mark_says_it_is_a_summary_and_the_next_text_s_does_not() {
         let mut output = output_after_message();
         output.show_narration("Running the tests.");
+        output.show_text_end("Done.");
+        assert_eq!(
+            output.take_lines(),
+            [
+                summarized_reply_mark(),
+                Line::from("Running the tests."),
+                Line::default(),
+                reply_mark(),
+                Line::from("Done.")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_narration_ends_at_its_text_since_the_output_sets_blocks_apart() {
+        let mut output = output_after_message();
+        // The API ends each summary of Claude's thinking with an empty line
+        output.show_narration("Running the tests.\n\n");
         output.show_text_end("Done.");
         assert_eq!(
             output.take_lines(),

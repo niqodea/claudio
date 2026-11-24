@@ -492,7 +492,8 @@ pub fn slow_permission_check() -> Vec<String> {
 /// the field `@internal`, and says it lists the thinking blocks whose signature the API marks as
 /// a narration, "so a renderer can label them as summaries without decoding the signature
 /// envelope". The fake signs its narration with that mark, as learned from 5,313 thinking blocks
-/// of real sessions: the 592 that held text were all marked so.
+/// of real sessions: the 592 that held text were all marked so. The narration ends in an empty
+/// line, as all 199 summaries in real sessions did.
 pub(crate) fn a_narration_is_listed(fake: &Hermetic) -> Result<(), String> {
     let lines = fake.run(|run| {
         run.send_message(NARRATION_MESSAGE)?;
@@ -511,7 +512,7 @@ pub const NARRATION_MESSAGE: &str = "Narrate ok";
 pub fn narration() -> Vec<String> {
     let narration = json!({
         "type": "thinking",
-        "thinking": "ok",
+        "thinking": "ok\n\n",
         "signature": fake_api::NARRATION_SIGNATURE,
     });
     let text = json!({"type": "text", "text": "done"});

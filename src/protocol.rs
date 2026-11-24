@@ -2195,7 +2195,7 @@ mod tests {
             .collect();
         assert!(matches!(
             events.as_slice(),
-            [Event::Narration(narration), Event::TextEnd(text)] if narration == "ok" && text == "done"
+            [Event::Narration(narration), Event::TextEnd(text)] if narration == "ok\n\n" && text == "done"
         ));
     }
 

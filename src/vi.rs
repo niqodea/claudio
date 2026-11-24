@@ -6,6 +6,28 @@
 //! Ref: <https://github.com/nushell/reedline/blob/main/src/edit_mode/vi/parser.rs>, on parsing
 //! the keys typed so far at each key
 //! Ref: <https://vimhelp.org/motion.txt.html>, on the motions and their special cases
+//!
+//! The editor does what vim does with its default options, and every difference from vim not
+//! listed below is a bug. vim's help leaves out many special cases, which vim's source decides.
+//! So the motions, the text objects, and the rules for what text an operator takes and where it
+//! leaves the cursor are ported from vim's source: each is translated step by step from the
+//! function its `Ref:` names. The rest is claudio's own design, like parsing the keys again at
+//! each key instead of vim's state machine, and the undo, the register and insert mode.
+//! `the_editor_does_what_vim_does` checks both kinds of code by running the same keys in vim.
+//! Ref: <https://github.com/zed-industries/zed/blob/main/crates/vim/README.md>, whose vim mode
+//! "mostly tries to copy vim exactly" in a design of its own, and checks a change against
+//! neovim run on the same keys
+//! Ref: <https://github.com/vim/vim/blob/master/src/textobject.c>, on the word motions
+//! Ref: <https://github.com/vim/vim/blob/master/src/normal.c>, on the commands that run them
+//! Ref: <https://github.com/vim/vim/blob/master/src/ops.c>, on how an operator takes a motion
+//!
+//! Known differences from vim, all to fix:
+//! - What makes a word: vim gives CJK text and emoji classes of their own, and takes the
+//!   Latin-1 letters by its 'iskeyword', which `class` does not follow
+//! - `$` in visual mode selects the line break in vim, and here stops at the last character
+//! - The motions other than the word motions, and the text objects, are written from vim's
+//!   help rather than ported, and Ctrl+W in insert mode uses `b`, where vim has a function of
+//!   its own
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -146,8 +168,12 @@ enum Motion {
     Up,
     /// `w`, or `W` for a WORD, which only whitespace ends.
     WordStart(bool),
+    /// `b`, or `B`.
     WordBack(bool),
+    /// `e`, or `E`.
     WordEnd(bool),
+    /// `ge`, or `gE`.
+    WordEndBack(bool),
     LineStart,
     FirstNonBlank,
     LineEnd,
@@ -209,6 +235,11 @@ struct Range {
     start: usize,
     end: usize,
     is_linewise: bool,
+    /// Where the operated text starts, at the column the motion or the selection gave, even
+    /// when the range takes whole lines and `start` is the line's start. vim leaves the cursor
+    /// there after a yank.
+    /// Ref: `oap->start` in `do_pending` in vim's src/ops.c
+    origin: usize,
 }
 
 #[derive(Debug, PartialEq)]
@@ -365,7 +396,7 @@ impl Editor {
     fn execute(&mut self, command: Command) {
         match command {
             Command::Move(motion, count) => {
-                if let Some((to, _)) = self.target(motion, count) {
+                if let Some((to, _)) = self.target(motion, count, None) {
                     self.cursor = to;
                 }
             }
@@ -501,7 +532,9 @@ impl Editor {
                 let start = if self.cursor == line_start {
                     self.cursor.saturating_sub(1)
                 } else {
-                    self.word_back(self.cursor, false).max(line_start)
+                    walk_back_to_word_start(&self.text, self.cursor, 1, false)
+                        .to
+                        .max(line_start)
                 };
                 self.delete(self.stop_once(start), self.cursor);
             }
@@ -525,7 +558,7 @@ impl Editor {
                 } else {
                     Motion::Down
                 };
-                if let Some((to, _)) = self.target(motion, None) {
+                if let Some((to, _)) = self.target(motion, None, None) {
                     self.cursor = to;
                 }
             }
@@ -627,10 +660,15 @@ impl Editor {
         }
     }
 
-    /// Keeps the cursor on a character outside insert mode: on the last one of its line, at
-    /// most, or at the start of an empty line.
+    /// Keeps the cursor on a character in normal mode: on the last character of its line at
+    /// most, or at the start of an empty line. In visual mode the cursor may also stand past the
+    /// last character, which selects the line break, as in vim with the default 'selection'.
+    /// Ref: `adjust_cursor` and `nv_right` in vim's src/normal.c
     fn clamp(&mut self) {
         self.cursor = self.cursor.min(self.text.len());
+        if self.is_visual() {
+            return;
+        }
         let start = self.line_start(self.cursor);
         let end = self.line_end(self.cursor);
         if self.cursor >= end && end > start {
@@ -644,16 +682,7 @@ impl Editor {
             is_linewise: range.is_linewise,
         };
         match operator {
-            Operator::Yank => {
-                if range.is_linewise {
-                    self.cursor = self.cursor.max(range.start).min(range.end);
-                    if self.line_of(range.start) < self.line_of(self.cursor) {
-                        self.cursor = self.first_non_blank(range.start);
-                    }
-                } else {
-                    self.cursor = range.start;
-                }
-            }
+            Operator::Yank => self.cursor = range.origin,
             Operator::Delete if range.is_linewise => {
                 // The lines go with one line break: the one after them, or before them at the
                 // end of the text
@@ -691,48 +720,55 @@ impl Editor {
         count: Option<usize>,
     ) -> Option<Range> {
         let from = self.cursor;
-        let (mut to, mut kind) = self.target(motion, count)?;
-        if let Motion::WordStart(is_big) = motion {
-            let is_on_word = self.text.get(from).is_some_and(|c| !c.is_whitespace());
-            if operator == Operator::Change && is_on_word {
-                // cw and cW change to the end of the word, as ce and cE
-                to = from;
-                for step in 0..count.unwrap_or(1) {
-                    let ends_here = self
-                        .text
-                        .get(to + 1)
-                        .is_none_or(|&next| class(next, is_big) != class(self.text[to], is_big));
-                    if !(step == 0 && ends_here) {
-                        to = self.word_end(to, is_big);
-                    }
-                }
-                kind = Kind::Inclusive;
-            } else {
-                // The last word moved over ends the text at its line's end, not at the next
-                // line's first word
-                let mut word_end = to;
-                while word_end > from && self.text[word_end - 1].is_whitespace() {
-                    word_end -= 1;
-                }
-                if word_end > from && self.line_of(to) > self.line_of(word_end - 1) {
-                    to = self.line_end(word_end - 1);
-                }
-            }
-        }
+        let (to, kind) = self.target(motion, count, Some(operator))?;
         let (start, end) = (from.min(to), from.max(to));
-        Some(match kind {
-            Kind::Linewise => self.lines_between(start, end),
-            Kind::Inclusive => Range {
-                start,
-                end: (end + 1).min(self.line_end(end)),
-                is_linewise: false,
-            },
-            Kind::Exclusive => Range {
-                start,
-                end,
-                is_linewise: false,
-            },
+        let mut end = match kind {
+            Kind::Linewise => return Some(self.lines_between(start, end)),
+            Kind::Inclusive => (end + 1).min(self.line_end(end)),
+            Kind::Exclusive => end,
+        };
+        // When an exclusive motion ends at the start of a line, the range ends at the end of the
+        // line before. When the range also starts in the indentation, it takes whole lines.
+        // Ref: :help exclusive-linewise, and `do_pending` in vim's src/ops.c
+        if kind == Kind::Exclusive
+            && end == self.line_start(end)
+            && self.line_of(end) > self.line_of(start)
+        {
+            if self.is_in_indent(start) {
+                return Some(self.lines_between(start, end - 1));
+            }
+            end -= 1;
+        }
+        // A delete over more than one line takes whole lines when it starts in the indentation
+        // and only blanks follow its end on the end's line, as vi's delete does.
+        // Ref: `op_delete` in vim's src/ops.c
+        if operator == Operator::Delete
+            && self.line_of(end) > self.line_of(start)
+            && self.is_in_indent(start)
+            && self.is_blank_to_line_end(end)
+        {
+            return Some(self.lines_between(start, end));
+        }
+        Some(Range {
+            start,
+            end,
+            is_linewise: false,
+            origin: start,
         })
+    }
+
+    /// Whether only blanks come from `at` to its line's end.
+    fn is_blank_to_line_end(&self, at: usize) -> bool {
+        self.text[at..self.line_end(at)]
+            .iter()
+            .all(|&character| matches!(character, ' ' | '\t'))
+    }
+
+    /// Whether only blanks come before `at` in its line, vim's `inindent(0)`.
+    fn is_in_indent(&self, at: usize) -> bool {
+        self.text[self.line_start(at)..at]
+            .iter()
+            .all(|&character| matches!(character, ' ' | '\t'))
     }
 
     /// The lines from the cursor's on, `count` of them.
@@ -746,6 +782,7 @@ impl Editor {
             start: self.line_start(first),
             end: self.line_end(last),
             is_linewise: true,
+            origin: first,
         }
     }
 
@@ -759,19 +796,32 @@ impl Editor {
         };
         let (start, end) = (anchor.min(self.cursor), anchor.max(self.cursor));
         if is_linewise {
-            Some(self.lines_between(start, end))
+            // When the anchor comes first, the operated text starts at the start of the anchor's
+            // line, and else at the cursor. Ref: `do_pending` in vim's src/ops.c
+            Some(Range {
+                origin: self.line_start(anchor).min(self.cursor),
+                ..self.lines_between(start, end)
+            })
         } else {
             Some(Range {
                 start,
                 end: (end + 1).min(self.text.len()),
                 is_linewise: false,
+                origin: start,
             })
         }
     }
 
     /// Where `motion` takes the cursor, `count` times, with how an operator takes the text
-    /// between. None when the motion goes nowhere, like `f` to a character the line lacks.
-    fn target(&mut self, motion: Motion, count: Option<usize>) -> Option<(usize, Kind)> {
+    /// between. None when the motion fails, like `f` to a character the line lacks: the cursor
+    /// stays and the operator is cancelled. `operator` is the pending operator, since in vim
+    /// some motions, like `w`, stop somewhere else when an operator is pending.
+    fn target(
+        &mut self,
+        motion: Motion,
+        count: Option<usize>,
+        operator: Option<Operator>,
+    ) -> Option<(usize, Kind)> {
         let times = count.unwrap_or(1);
         let at = self.cursor;
         let start = self.line_start(at);
@@ -801,16 +851,33 @@ impl Editor {
                 return Some(((target_start + column).min(last), Kind::Linewise));
             }
             Motion::WordStart(is_big) => {
-                let to = (0..times).fold(at, |to, _| self.word_start(to, is_big));
-                return (to > at).then_some((to, Kind::Exclusive));
-            }
-            Motion::WordBack(is_big) => {
-                let to = (0..times).fold(at, |to, _| self.word_back(to, is_big));
-                return (to < at).then_some((to, Kind::Exclusive));
+                // `cw` on a word changes to the word's end, as `ce` does, but when the cursor is
+                // on the word's last character, it changes only that character. On blanks, `cw`
+                // takes the same text as `dw`.
+                // Ref: cpo-z, which vim sets by default, and cpo-w, which it does not
+                let is_on_word = (self.text.get(at))
+                    .is_some_and(|&character| !matches!(character, '\n' | ' ' | '\t'));
+                let (walk, kind) = if operator == Some(Operator::Change) && is_on_word {
+                    let walk = walk_to_word_end(&self.text, at, times, is_big, true);
+                    (walk, Kind::Inclusive)
+                } else {
+                    let walk =
+                        walk_to_word_start(&self.text, at, times, is_big, operator.is_some());
+                    (walk, Kind::Exclusive)
+                };
+                return Some(self.forward_word_target(walk, kind));
             }
             Motion::WordEnd(is_big) => {
-                let to = (0..times).fold(at, |to, _| self.word_end(to, is_big));
-                return (to > at).then_some((to, Kind::Inclusive));
+                let walk = walk_to_word_end(&self.text, at, times, is_big, false);
+                return Some(self.forward_word_target(walk, Kind::Inclusive));
+            }
+            Motion::WordBack(is_big) => {
+                let walk = walk_back_to_word_start(&self.text, at, times, is_big);
+                return backward_word_target(walk, Kind::Exclusive, operator);
+            }
+            Motion::WordEndBack(is_big) => {
+                let walk = walk_back_to_word_end(&self.text, at, times, is_big);
+                return backward_word_target(walk, Kind::Inclusive, operator);
             }
             Motion::LineStart => return Some((start, Kind::Exclusive)),
             Motion::FirstNonBlank => return Some((self.first_non_blank(start), Kind::Exclusive)),
@@ -909,6 +976,7 @@ impl Editor {
             start,
             end,
             is_linewise: false,
+            origin: start,
         })
     }
 
@@ -1134,58 +1202,20 @@ impl Editor {
         self.begin_session();
     }
 
-    /// The start of the next word from `at`, or the start of an empty line, or the text's end.
-    fn word_start(&self, at: usize, is_big: bool) -> usize {
-        let length = self.text.len();
-        let mut index = at;
-        let kind = class_of(&self.text, at, is_big);
-        if kind != Class::Blank {
-            while index < length && class(self.text[index], is_big) == kind {
-                index += 1;
-            }
+    /// Where `w` or `e` takes the cursor from `walk`, with how an operator takes the text
+    /// between. They never fail: when the text ends first, the cursor stays where the walk
+    /// stopped, and an operator takes the text up to there.
+    /// Ref: `nv_wordcmd` and `adjust_cursor` in vim's src/normal.c
+    fn forward_word_target(&self, walk: Walk, kind: Kind) -> (usize, Kind) {
+        // When the walk stops past the last character of a line, the cursor moves back onto
+        // that character, and an operator includes it. In visual mode the cursor stays past the
+        // character, which selects the line break.
+        let to = walk.to;
+        let is_past_line = to > self.line_start(to) && to == self.line_end(to);
+        if to > self.cursor && is_past_line && !self.is_visual() {
+            return (to - 1, Kind::Inclusive);
         }
-        while index < length && class(self.text[index], is_big) == Class::Blank {
-            if self.text[index] == '\n' && self.text.get(index + 1) == Some(&'\n') {
-                return index + 1;
-            }
-            index += 1;
-        }
-        index
-    }
-
-    /// The start of the word before `at`, or of an empty line between them.
-    fn word_back(&self, at: usize, is_big: bool) -> usize {
-        let Some(mut index) = at.checked_sub(1) else {
-            return 0;
-        };
-        while index > 0 && class(self.text[index], is_big) == Class::Blank {
-            if self.text[index] == '\n' && self.text[index - 1] == '\n' {
-                return index;
-            }
-            index -= 1;
-        }
-        let kind = class(self.text[index], is_big);
-        while index > 0 && class(self.text[index - 1], is_big) == kind {
-            index -= 1;
-        }
-        index
-    }
-
-    /// The end of the word after `at`, or of the word `at` is in when it ends further.
-    fn word_end(&self, at: usize, is_big: bool) -> usize {
-        let length = self.text.len();
-        let mut index = at + 1;
-        while index < length && class(self.text[index], is_big) == Class::Blank {
-            index += 1;
-        }
-        if index >= length {
-            return at;
-        }
-        let kind = class(self.text[index], is_big);
-        while index + 1 < length && class(self.text[index + 1], is_big) == kind {
-            index += 1;
-        }
-        index
+        (to, kind)
     }
 
     fn line_start(&self, at: usize) -> usize {
@@ -1261,6 +1291,252 @@ fn class(character: char, is_big: bool) -> Class {
 fn class_of(text: &[char], at: usize, is_big: bool) -> Class {
     text.get(at)
         .map_or(Class::Blank, |&character| class(character, is_big))
+}
+
+/// Where a word motion stopped, and whether it moved its whole count before the text's start or
+/// end stopped it. As in vim, the cursor goes to where the motion stopped either way, and each
+/// command decides what a motion that fell short does to a pending operator.
+#[derive(Clone, Copy)]
+struct Walk {
+    to: usize,
+    is_whole: bool,
+}
+
+/// What a step forward of a `Walker` crossed.
+/// Ref: `inc` in vim's src/misc2.c, which tells these apart by its return value
+#[derive(Clone, Copy, PartialEq)]
+enum Step {
+    /// Onto another character of the line.
+    InLine,
+    /// Off the line's characters: onto its end, or from there onto the next line.
+    LeavesLine,
+}
+
+/// A cursor that steps through the text a character at a time, as vim's word motions step
+/// through a buffer. Each line has a position past its last character: its line break, or the
+/// text's end for the last line. That position stands for the NUL at the end of a line in vim,
+/// and the cursor stops on it as vim's does.
+struct Walker<'a> {
+    text: &'a [char],
+    at: usize,
+    is_big: bool,
+}
+
+impl Walker<'_> {
+    fn new(text: &[char], at: usize, is_big: bool) -> Walker<'_> {
+        Walker { text, at, is_big }
+    }
+
+    /// The class of the character at the cursor, where a line's end is blank.
+    /// Ref: `cls` in vim's src/textobject.c
+    fn class(&self) -> Class {
+        class_of(self.text, self.at, self.is_big)
+    }
+
+    fn is_at_line_end(&self) -> bool {
+        self.text
+            .get(self.at)
+            .is_none_or(|&character| character == '\n')
+    }
+
+    fn is_on_empty_line(&self) -> bool {
+        self.is_at_line_end() && (self.at == 0 || self.text[self.at - 1] == '\n')
+    }
+
+    /// Steps forward, from a line's end onto the next line's start. At the text's end, stays
+    /// and returns None. Ref: `inc` in vim's src/misc2.c
+    fn forward(&mut self) -> Option<Step> {
+        if self.at == self.text.len() {
+            return None;
+        }
+        let was_at_line_end = self.is_at_line_end();
+        self.at += 1;
+        Some(if was_at_line_end || self.is_at_line_end() {
+            Step::LeavesLine
+        } else {
+            Step::InLine
+        })
+    }
+
+    /// Steps back, from a line's start onto the end of the line before. At the text's start,
+    /// stays and returns false. Ref: `dec` in vim's src/misc2.c
+    fn back(&mut self) -> bool {
+        let Some(at) = self.at.checked_sub(1) else {
+            return false;
+        };
+        self.at = at;
+        true
+    }
+
+    /// Steps forward past the characters of `class`, and tells whether the text's end stopped
+    /// it. Ref: `skip_chars` in vim's src/textobject.c
+    fn skip_forward(&mut self, class: Class) -> bool {
+        while self.class() == class {
+            if self.forward().is_none() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Steps back past the characters of `class`, and tells whether the text's start stopped
+    /// it. Ref: `skip_chars` in vim's src/textobject.c
+    fn skip_back(&mut self, class: Class) -> bool {
+        while self.class() == class {
+            if !self.back() {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn whole(&self) -> Walk {
+        Walk {
+            to: self.at,
+            is_whole: true,
+        }
+    }
+
+    fn fell_short(&self) -> Walk {
+        Walk {
+            to: self.at,
+            is_whole: false,
+        }
+    }
+}
+
+/// Where `b` or `ge` takes the cursor, from `walk`. When the text's start stopped the walk
+/// before its count ran out, the motion cancels a pending operator, and without an operator
+/// the cursor still goes to where the walk stopped.
+/// Ref: `nv_bck_word`, and `nv_g_cmd` for `ge`, in vim's src/normal.c
+fn backward_word_target(
+    walk: Walk,
+    kind: Kind,
+    operator: Option<Operator>,
+) -> Option<(usize, Kind)> {
+    (walk.is_whole || operator.is_none()).then_some((walk.to, kind))
+}
+
+/// Where `w` goes, `count` times, or `W` when `is_big`: the next word's start, or an empty
+/// line. With `stops_at_line_end`, the last count stops at the end of its line instead of at
+/// the next line's first word, as vim's `w` does when an operator is pending.
+/// Ref: `fwd_word` in vim's src/textobject.c
+fn walk_to_word_start(
+    text: &[char],
+    at: usize,
+    count: usize,
+    is_big: bool,
+    stops_at_line_end: bool,
+) -> Walk {
+    let mut walker = Walker::new(text, at, is_big);
+    for left in (0..count).rev() {
+        let start = walker.class();
+        let is_last_line = !text[walker.at..].contains(&'\n');
+        let stops = stops_at_line_end && left == 0;
+        match walker.forward() {
+            None => return walker.fell_short(),
+            Some(Step::LeavesLine) if is_last_line => return walker.fell_short(),
+            Some(Step::LeavesLine) if stops => return walker.whole(),
+            Some(_) => {}
+        }
+        let ends = |step: Option<Step>| step.is_none_or(|step| stops && step == Step::LeavesLine);
+        while start != Class::Blank && walker.class() == start {
+            if ends(walker.forward()) {
+                return walker.whole();
+            }
+        }
+        while walker.class() == Class::Blank && !walker.is_on_empty_line() {
+            if ends(walker.forward()) {
+                return walker.whole();
+            }
+        }
+    }
+    walker.whole()
+}
+
+/// Where `e` goes, `count` times, or `E` when `is_big`: the end of the word the cursor is in,
+/// or of the next one when it is on the end already or on blanks, past empty lines. With
+/// `stops_on_end`, the first count does not move a cursor that is on a word's end, as vim's
+/// `cw` does.
+/// Ref: `end_word` in vim's src/textobject.c, which vim calls with `empty` false for `e`
+fn walk_to_word_end(
+    text: &[char],
+    at: usize,
+    count: usize,
+    is_big: bool,
+    stops_on_end: bool,
+) -> Walk {
+    let mut walker = Walker::new(text, at, is_big);
+    for time in 0..count {
+        let start = walker.class();
+        if walker.forward().is_none() {
+            return walker.fell_short();
+        }
+        // Inside a word, go to its end. Else go to the next word's end, unless the cursor stays
+        let is_in_word = start != Class::Blank && walker.class() == start;
+        let stays = stops_on_end && time == 0 && start != Class::Blank;
+        let reaches_text_end = if is_in_word {
+            walker.skip_forward(start)
+        } else if stays {
+            false
+        } else {
+            walker.skip_forward(Class::Blank) || walker.skip_forward(walker.class())
+        };
+        if reaches_text_end {
+            return walker.fell_short();
+        }
+        // The walk went one past the word's end
+        walker.back();
+    }
+    walker.whole()
+}
+
+/// Where `b` goes, `count` times, or `B` when `is_big`: the start of the word the cursor is
+/// in, or of the one before when it is on the start already or on blanks, or an empty line.
+/// Ref: `bck_word` in vim's src/textobject.c, which vim calls with `stop` false for `b`
+fn walk_back_to_word_start(text: &[char], at: usize, count: usize, is_big: bool) -> Walk {
+    let mut walker = Walker::new(text, at, is_big);
+    for _ in 0..count {
+        if !walker.back() {
+            return walker.fell_short();
+        }
+        while walker.class() == Class::Blank && !walker.is_on_empty_line() {
+            if !walker.back() {
+                return walker.whole();
+            }
+        }
+        if walker.is_on_empty_line() {
+            continue;
+        }
+        if walker.skip_back(walker.class()) {
+            return walker.whole();
+        }
+        // The walk went one before the word's start
+        walker.forward();
+    }
+    walker.whole()
+}
+
+/// Where `ge` goes, `count` times, or `gE` when `is_big`: the end of the word before the
+/// cursor's, or an empty line.
+/// Ref: `bckend_word` in vim's src/textobject.c, which vim calls with `eol` false for `ge`
+fn walk_back_to_word_end(text: &[char], at: usize, count: usize, is_big: bool) -> Walk {
+    let mut walker = Walker::new(text, at, is_big);
+    for _ in 0..count {
+        let start = walker.class();
+        if !walker.back() {
+            return walker.fell_short();
+        }
+        if start != Class::Blank && walker.skip_back(start) {
+            return walker.whole();
+        }
+        while walker.class() == Class::Blank && !walker.is_on_empty_line() {
+            if !walker.back() {
+                return walker.whole();
+            }
+        }
+    }
+    walker.whole()
 }
 
 /// Where two texts start to differ, which is where a change undone or redone starts.
@@ -1444,6 +1720,8 @@ fn parse_motion(keys: &[Key]) -> Result<Motion, Parse> {
         [Key::Char('^')] => Motion::FirstNonBlank,
         [Key::Char('$') | Key::End] => Motion::LineEnd,
         [Key::Char('g'), Key::Char('g')] => Motion::FirstLine,
+        [Key::Char('g'), Key::Char('e')] => Motion::WordEndBack(false),
+        [Key::Char('g'), Key::Char('E')] => Motion::WordEndBack(true),
         [Key::Char('G')] => Motion::LastLine,
         [Key::Char(';')] => Motion::RepeatFind(false),
         [Key::Char(',')] => Motion::RepeatFind(true),
@@ -1626,6 +1904,21 @@ mod tests {
     }
 
     #[test]
+    fn word_motions_stop_where_the_text_ends() {
+        assert_eq!(shown(&after("foo bar   ", "eee")), "foo bar  | ");
+        assert_eq!(shown(&after("foo bar   ", "wede")), "foo b|a");
+        assert_eq!(shown(&after("foo bar", "w3b")), "|foo bar");
+        assert_eq!(shown(&after("foo bar", "w3db")), "|bar");
+        assert_eq!(shown(&after("foo bar", "dbx")), "|oo bar");
+    }
+
+    #[test]
+    fn ge_goes_back_to_the_previous_word_end() {
+        assert_eq!(shown(&after("foo bar baz", "$ge")), "foo ba|r baz");
+        assert_eq!(shown(&after("foo bar baz", "$dge")), "foo b|a");
+    }
+
+    #[test]
     fn delete_word_on_the_last_word_keeps_the_line_break() {
         assert_eq!(shown(&after("foo bar\nbaz", "wdw")), "foo| \nbaz");
     }
@@ -1744,6 +2037,85 @@ mod tests {
         ("foo bar baz", "$B"),
         ("foo bar baz", "e"),
         ("foo bar baz", "3e"),
+        // The word motions at the text's ends, past lines that end in blanks, and across empty
+        // lines
+        ("foo bar   ", "eee"),
+        ("foo bar   ", "EEE"),
+        ("foo bar   ", "5e"),
+        ("foo bar   ", "wde"),
+        ("foo bar   ", "wdE"),
+        ("foo bar   ", "wede"),
+        ("foo bar   ", "wwdw"),
+        ("foo bar   ", "ww"),
+        ("foo bar   ", "5w"),
+        ("abc", "$de"),
+        ("abc", "$dw"),
+        ("abc", "$e"),
+        ("foo   \nbar", "ee"),
+        ("foo   \nbar", "dw"),
+        ("foo   \nbar", "wdw"),
+        ("foo   \nbar", "2w"),
+        ("foo\n\n\nbar", "e"),
+        ("foo\n\n\nbar", "w"),
+        ("foo\n\n\nbar", "ww"),
+        ("foo\n\n\nbar", "Gbb"),
+        ("foo\n\n\nbar", "Gb"),
+        ("foo.bar(baz)", "eee"),
+        ("foo.bar(baz)", "3w"),
+        ("foo.bar(baz)", "$bbb"),
+        ("foo.bar(baz)", "$3B"),
+        ("   foo", "$b"),
+        ("   foo", "$bb"),
+        ("foo bar", "w3b"),
+        ("foo bar", "w3db"),
+        ("foo bar", "dbx"),
+        ("foo bar", "w5b"),
+        ("foo\nbar", "jdb"),
+        ("  foo\nbar", "wjdb"),
+        ("foo\nbar", "jyb"),
+        ("foo bar\nbaz", "d3w"),
+        ("foo bar baz", "ge"),
+        ("foo bar baz", "$ge"),
+        ("foo bar baz", "$2ge"),
+        ("foo bar baz", "$5ge"),
+        ("foo.bar baz", "$gE"),
+        ("foo.bar baz", "$ge"),
+        ("foo\n\nbar", "Gge"),
+        ("foo\n\nbar", "Ggege"),
+        ("foo   \nbar", "Gge"),
+        ("foo bar baz", "$dge"),
+        ("foo bar baz", "wdge"),
+        ("foo bar baz", "w5dge"),
+        ("foo bar", "ecwX\x1b"),
+        ("foo bar", "ecw\x1b"),
+        ("foo bar", "ece\x1b"),
+        ("foo bar   ", "wcwX\x1b"),
+        ("foo bar   ", "wc5wX\x1b"),
+        ("foo  bar", "llldwx"),
+        ("foo\n\nbar", "jcwX\x1b"),
+        ("foo\n\nbar", "jdw"),
+        ("foo.bar baz", "cWX\x1b"),
+        ("foo bar baz", "wvee"),
+        ("foo bar   ", "wveed"),
+        ("", "dw"),
+        ("", "de"),
+        ("", "db"),
+        ("", "w"),
+        ("foo\n\nbar", "jde"),
+        ("foo\n\nbar", "jdge"),
+        ("abc", "vllllld"),
+        ("abc\ndef", "vllld"),
+        // Where a yank leaves the cursor: where the yanked text starts, at the column the motion
+        // or the selection gave
+        ("  one\ntwo\nthree", "jllyk"),
+        ("  one\ntwo\nthree", "llyj"),
+        ("  one\ntwo\nthree", "jllVky"),
+        ("  one\ntwo\nthree", "jjllVkky"),
+        ("  one\ntwo\nthree", "llVjy"),
+        ("  one\ntwo\nthree", "jyb"),
+        ("  one\ntwo\nthree", "jlyb"),
+        ("  one\ntwo\nthree", "llyy"),
+        ("  one\ntwo\nthree", "jl2yy"),
         ("foo bar\nbaz qux", "3w"),
         ("foo\n\nbar", "w"),
         ("foo\n\nbar", "Gb"),

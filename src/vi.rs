@@ -1077,9 +1077,7 @@ impl Editor {
             return;
         }
         self.begin_change();
-        for index in self.cursor..end {
-            self.text[index] = character;
-        }
+        self.text[self.cursor..end].fill(character);
         self.cursor = end - 1;
     }
 

@@ -233,7 +233,6 @@ impl Shared {
 
 /// Runs claudio, with the arguments it was started with, and ends with the exit code it ends
 /// with.
-#[must_use]
 pub fn main() -> ExitCode {
     match run() {
         Ok(code) => code,

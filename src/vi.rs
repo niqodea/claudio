@@ -1088,8 +1088,7 @@ impl Editor {
             return;
         }
         self.begin_change();
-        for index in start..end {
-            let character = self.text[index];
+        for character in &mut self.text[start..end] {
             let toggled: Vec<char> = if character.is_uppercase() {
                 character.to_lowercase().collect()
             } else {
@@ -1097,7 +1096,7 @@ impl Editor {
             };
             // A character whose other case takes several characters stays as it is
             if let [toggled] = toggled[..] {
-                self.text[index] = toggled;
+                *character = toggled;
             }
         }
     }

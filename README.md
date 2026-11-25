@@ -163,7 +163,7 @@ Ctrl+L starts a new session, as Claude Code's `/clear` does, and keeps your text
 That is why claudio clears rather than leaving it to a restart: you often decide on a fresh context with the message already written, and Ctrl+L sends it there without retyping it.
 While tasks run in the background, it waits for them to end before it clears, so their ends, and what Claude does with them, stay in the session that started them, and the label row says so in place of what Claude does, as `clear waits for background tasks · Ctrl+K stops`.
 Meanwhile Enter and Ctrl+L wait too, and Ctrl+K stops the tasks, after which the clear goes through.
-The session that ended closes with `- resume with claudio --resume <id>`, which goes back to it, when it holds anything to go back to, and a boundary, `─── cleared ───`, starts the new one.
+A boundary, `─── cleared ─── · resume with claudio --resume <id>`, ends the old session and starts the new one, and its command resumes the old one, when the old one holds anything to resume.
 When claudio ends, the session closes the same way, with `─── ended ───`.
 Text you send that starts with `/` reaches Claude as written, so a `/clear` you type is a message like any other.
 
@@ -276,6 +276,8 @@ So claudio leaves out on purpose:
 - completion and checks that need a list of Claude Code's commands, which would go stale with each new version
 
 claudio only ever appends to the conversation, in characters on screen, so it copies along with the rest of the scrollback.
+Each line claudio writes in its own words makes sense without the lines next to it, so a line that a search finds, or that is copied alone, still reads whole: the command that resumes a session is on the boundary that ends it.
+Only a mark's row, like `››`, and the text a notice quotes under its header depend on the lines next to them.
 Its lines don't depend on the terminal's size, so they read the same at any width, with the terminal wrapping a line wider than the screen.
 A noisy line, which shows a tool's input or output as it is, is cut at its end to a fixed width, since Ctrl+O shows it whole.
 Every other line, like an error or a warning, stays whole, to be read in full.

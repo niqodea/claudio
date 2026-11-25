@@ -19,7 +19,7 @@
 //! part         = [subject ": "] text
 //! hint         = key " " verb [object]                         like `Ctrl+O shows it whole`
 //!              │ verb " with " command                         like `resume with claudio --resume <id>`
-//! boundary     = "─── " event " ───"                           where a session ends
+//! boundary     = "─── " event " ───" [" · " hint]             where a session ends
 //! label row    = group (" │ " group)*
 //! ```
 //!
@@ -31,7 +31,7 @@
 //! - A notice takes a `NoticeMark`, which only a `Notice` writes, and which gives the only color
 //!   a mark gives.
 //! - `Notice` takes its header from claudio and anything else as quoted text.
-//! - `part`, `parts`, `Hint` and `GROUP` join the pieces of a line.
+//! - `part`, `parts`, `Hint`, `command_hint` and `GROUP` join the pieces of a line.
 //! - Every line here is as wide as its text, whatever the terminal's width, as the README's
 //!   Design section asks.
 
@@ -163,12 +163,9 @@ impl Notice {
 
     pub fn lines(self) -> Vec<Line> {
         let style = self.mark.style();
-        let header: Line = (self.header.characters())
-            .map(|(character, own)| (character, own.on(style)))
-            .collect();
         let marked = Line::from([Span::new(self.mark.symbol(), style), " ".into()]);
         let quoted = self.quoted.iter().flat_map(|text| text.lines());
-        std::iter::once(marked.with_line(header))
+        std::iter::once(marked.with_line(self.header.over(style)))
             .chain(quoted.map(|line| Notice::more(self.mark, line)))
             .collect()
     }
@@ -252,6 +249,12 @@ pub fn hints(hints: &[Hint]) -> String {
     parts(&hints.iter().map(ToString::to_string).collect::<Vec<_>>())
 }
 
+/// The hint that names `command` as the way to `verb`, like `resume with claudio --resume <id>`,
+/// with the command set as code.
+pub fn command_hint(verb: &str, command: &str) -> Line {
+    Line::from([format!("{verb} with ").into(), Span::new(command, CODE)])
+}
+
 /// What happened to a session, which a boundary names.
 #[derive(Clone, Copy)]
 pub enum SessionEnd {
@@ -261,17 +264,9 @@ pub enum SessionEnd {
     Ended,
 }
 
-/// The lines that end a session: how to resume it, when its id is known, then the boundary
-/// that names how it ended, so the hint stands on the side of the session it resumes.
-pub fn session_end(end: SessionEnd, session: Option<&str>) -> Vec<Line> {
-    let resume = session.map(|session| {
-        let command = Span::new(format!("claudio --resume {session}"), CODE);
-        Notice::new(
-            NoticeMark::Noted,
-            Line::from(["resume with ".into(), command]),
-        )
-        .lines()
-    });
+/// The boundary that names how a session ended, then the command that resumes the session, when
+/// the session's id is known.
+pub fn session_end(end: SessionEnd, session: Option<&str>) -> Line {
     let event = match end {
         SessionEnd::Cleared => "cleared",
         SessionEnd::Ended => "ended",
@@ -283,7 +278,13 @@ pub fn session_end(end: SessionEnd, session: Option<&str>) -> Vec<Line> {
         " ".into(),
         Span::new(RULE, MARK),
     ]);
-    resume.into_iter().flatten().chain([boundary]).collect()
+    match session {
+        Some(session) => {
+            let hint = command_hint("resume", &format!("claudio --resume {session}"));
+            boundary.with_line(Line::from(PART).with_line(hint).over(SUBDUED))
+        }
+        None => boundary,
+    }
 }
 
 #[cfg(test)]
@@ -326,17 +327,17 @@ mod tests {
     }
 
     #[test]
-    fn a_session_ends_with_how_to_resume_it_then_its_boundary() {
-        let lines = session_end(SessionEnd::Cleared, Some("a1"));
-        let text: Vec<String> = lines.iter().map(Line::text).collect();
+    fn a_session_ends_with_its_boundary_then_how_to_resume_it() {
+        let cleared = session_end(SessionEnd::Cleared, Some("a1"));
         assert_eq!(
-            text,
-            ["- resume with claudio --resume a1", "─── cleared ───"]
+            cleared.text(),
+            "─── cleared ─── · resume with claudio --resume a1"
         );
-        let unknown = session_end(SessionEnd::Ended, None);
+        assert_eq!(cleared.style_of(" · resume with "), Some(SUBDUED));
         assert_eq!(
-            unknown.iter().map(Line::text).collect::<Vec<_>>(),
-            ["─── ended ───"]
+            cleared.style_of("claudio --resume a1"),
+            Some(CODE.on(SUBDUED))
         );
+        assert_eq!(session_end(SessionEnd::Ended, None).text(), "─── ended ───");
     }
 }

@@ -102,6 +102,15 @@ impl Line {
         self
     }
 
+    /// The line over `base`: each span keeps what its own style sets, and takes from `base` what
+    /// its style leaves unset, as `Style::on` combines them.
+    #[must_use]
+    pub fn over(self, base: Style) -> Self {
+        (self.spans.into_iter())
+            .map(|span| Span::new(span.text, span.style.on(base)))
+            .collect()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.spans.is_empty()
     }
@@ -171,11 +180,8 @@ impl Row {
     /// rest of the row past the line's end, as a style keeps its own colors on another.
     #[must_use]
     pub fn on(self, background: Style) -> Self {
-        let line = (self.line.spans.into_iter())
-            .map(|span| Span::new(span.text, span.style.on(background)))
-            .collect();
         Row {
-            line,
+            line: self.line.over(background),
             background: self.background.or(Some(background)),
             wrap: self.wrap,
         }

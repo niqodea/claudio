@@ -277,9 +277,7 @@ impl Output {
     pub fn show_session_end(&mut self, end: SessionEnd, session: Option<&str>) {
         self.end_text();
         self.begin(Section::Notice);
-        for line in session_end(end, session) {
-            self.push_detail(line);
-        }
+        self.push_detail(session_end(end, session));
     }
 
     /// Marks a command the user runs, which Claude Code runs in place of Claude, so the

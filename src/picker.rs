@@ -30,8 +30,8 @@ use crate::wording::{Hint, hints};
 pub const OWN_KEY: char = '>';
 
 /// The keys that go to a batch's questions, which also name them. Claude Code asks at most four
-/// questions in a call, as of Claude Code 2.1.322, so a fifth would have no key, and its name
-/// would show as `·`.
+/// questions in a call, so a fifth would have no key, and its name would show as `·`.
+/// Ref: `questions` of `AskUserQuestionInput` in `sdk-tools.d.ts`, of at most 4 items
 pub const QUESTION_KEYS: [char; 4] = ['a', 's', 'd', 'f'];
 
 /// The name of the batch's question at `index`.
@@ -49,9 +49,9 @@ pub fn request_name(index: usize) -> Option<char> {
     REQUEST_KEYS.get(index).copied()
 }
 
-/// The most options Claude Code allows on a question, as of Claude Code 2.1.321, which checks a
-/// question's options against `.min(2).max(4)`. The options take as many rows on every question,
-/// so the input area keeps its size from one question to the next.
+/// The most options Claude Code allows on a question. The options take as many rows on every
+/// question, so the input area keeps its size from one question to the next.
+/// Ref: `options` of `AskUserQuestionInput` in `sdk-tools.d.ts`, of 2 to 4 items
 const OPTION_ROWS: u16 = 4;
 
 /// The rows the options of a question of `choices` options take. More options than
@@ -252,7 +252,7 @@ impl Pick {
     /// ticks show.
     ///
     /// Every question needs an answer, so an empty one waits, as Clack's multiselect does by
-    /// default. Claude Code 2.1.322 instead lets a question go unanswered and leaves it out of
+    /// default. Claude Code instead lets a question go unanswered and leaves it out of
     /// what Claude reads, so Claude cannot tell it from a choice of none. To choose none, the
     /// user writes it.
     /// Ref: <https://github.com/bombshell-dev/clack/blob/50c8ea04ac165df77a874af54ec8ff0cdc135453/packages/prompts/src/multi-select.ts#L85>,

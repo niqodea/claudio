@@ -39,11 +39,11 @@ pub struct Questions {
 /// A request of Claude's, with each of its questions.
 struct Request {
     ask: Ask,
-    /// The subagent that asked, as `Work::name_subagent` names it, none for Claude itself. Only a
-    /// permission can come from a subagent, since Claude Code gives no subagent
-    /// `AskUserQuestion` or `ExitPlanMode`, so only a permission shows it.
-    /// Seen with Claude Code 2.1.322: a subagent asked to call either reported neither among its
-    /// tools.
+    /// The subagent that asked, as `Work::name_subagent` names it, none for Claude itself. Claude
+    /// Code takes `AskUserQuestion` from every subagent, and `ExitPlanMode` from every one but a
+    /// subagent that runs in plan mode, so only a permission shows who asked. A plan from such a
+    /// subagent shows as one from Claude.
+    /// Ref: <https://code.claude.com/docs/en/sub-agents>, on the tools every subagent lacks
     agent: Option<String>,
     entries: Vec<Entry>,
     /// The question the question view shows, from 0, where one past the last is the review.

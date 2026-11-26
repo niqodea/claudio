@@ -107,8 +107,7 @@ impl Context {
     /// Notes a call of Claude's whose reply starts at `now`, and returns when its cache turns
     /// cold. The API keeps a cache entry for its TTL after the call that last read or wrote it,
     /// and that call reached the API a little before its reply started, so the cache can turn
-    /// cold that much earlier. Claude Code 2.1.316 counts its own cache's TTL the same way, from
-    /// its own clock and with no margin.
+    /// cold that much earlier.
     pub fn note_call(&mut self, usage: &Usage, now: Instant) -> Instant {
         self.tokens = usage.tokens;
         if let Some(ttl) = usage.cache_ttl {

@@ -47,8 +47,8 @@
 //! A resize reaches the terminal at once, but claudio hears of it only later, so what it already
 //! sent, drawn for the old size, lands on the new one. In real use this happens all the time on a
 //! phone: opening the keyboard shrinks the window while Claude answers. A redraw that relies on
-//! where rows were before then erases or repeats rows: in claudio 0.1, a message and the reply that
-//! followed it went missing from the scrollback, and copies of the label row were left in it.
+//! where rows were before then erases or repeats rows: a message and the reply that follows it
+//! can go missing from the scrollback, and copies of the label row can stay in it.
 //!
 //! Timing is what a test cannot set, so these tests set the order of events instead: `pty-relay`
 //! sits between the terminal and claudio, holds claudio's output back as if it were still on its

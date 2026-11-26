@@ -23,7 +23,7 @@ pub enum Phase {
 /// where typing only answers it, and refusing it ends the turn before the user writes again. So
 /// Enter on a message refuses the waiting questions, which makes it a press that names its loss.
 ///
-/// Claude Code 2.1.321 also accepts a plain message while a question waits, though its interface
+/// Claude Code also accepts a plain message while a question waits, though its interface
 /// never sends one: the message queues behind the question, and Claude reads it right after the
 /// answer, in the same turn. A message sent with send now cancels the question instead.
 #[derive(Clone)]

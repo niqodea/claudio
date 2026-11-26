@@ -20,8 +20,8 @@
 //! Code addresses a subagent by the `name` its `Agent` call asks for, but reports the name it
 //! gave in none of what it sends: the `Agent` call's result holds the subagent's id alone, and
 //! so does its task's start. The name it gave can differ from the one asked for, since Claude
-//! Code 2.1.322 renamed a subagent whose name a running one held, like `reviewer-2`, and freed a
-//! name only 30 seconds after its holder ended. A name can also reach another session, or a
+//! Code renames a subagent whose name a running one holds, like `reviewer-2`, and frees a name
+//! only some time after its holder ended. A name can also reach another session, or a
 //! teammate, as `SendMessage`'s `to` does.
 //! Ref: `AgentInput` and `AgentOutput` in `sdk-tools.d.ts`, and `SDKTaskStartedMessage` in
 //! `sdk.d.ts`, of <https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.325/>
@@ -50,7 +50,7 @@ use crate::protocol::{TaskStatus, ToolUse};
 pub struct Tag(
     /// The counts, of which the first is unknown, `??`, for a subagent's call that comes before
     /// the subagent's task, which names the call that started it. That never happens in
-    /// practice: Claude Code 2.1.322 tells the task first, as
+    /// practice: Claude Code tells the task first, as
     /// [`crate::contract::a_subagent_is_told_from_start_to_end`] checks. The SDK's types promise
     /// no order, though, so a call can come first, and its tag then says what is unknown rather
     /// than guess it.
@@ -215,8 +215,8 @@ pub struct Work {
     /// The subagents of the session, by their ids. A subagent stays after it ends, so the tag of
     /// the call that first started it names it again when Claude resumes it. So the list grows
     /// by one small entry for each subagent the session starts, about 100 bytes, and a reset
-    /// forgets the ended ones, since the new session cannot resume them. Claude Code 2.1.322
-    /// bounds its own list instead: it forgets an ended subagent 30 seconds after its end, and
+    /// forgets the ended ones, since the new session cannot resume them. Claude Code
+    /// bounds its own list instead: it forgets an ended subagent some time after its end, and
     /// loads it back from its transcript on disk when Claude resumes it, which claudio cannot
     /// read.
     subagents: HashMap<SubagentId, Subagent>,
@@ -466,7 +466,7 @@ impl Work {
     /// or whose calls wait, and the subagents of those tasks and calls. Everything else goes, like
     /// the subagents that ended, which the new session cannot resume. claudio clears once
     /// nothing runs, so only the count stays then, and the rest stays for a clear that came
-    /// while work ran, which Claude Code 2.1.322 lets run on.
+    /// while work ran, which Claude Code lets run on.
     pub fn start_session(&mut self) {
         let calls = &self.calls;
         (self.tasks)

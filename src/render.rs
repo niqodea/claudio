@@ -31,8 +31,9 @@ use crate::wording::{
 
 /// The tools whose input carries a `description` of the call in Claude's words, which sums it up
 /// in place of its input, still whole in the full view.
-/// Seen with Claude Code 2.1.322: the field is optional, yet every one of 1,798 Bash calls over
-/// 60 days of one user's sessions had it, so a Bash call shows its command only in the full view.
+/// The field is optional, yet Claude fills it in on Bash calls in
+/// practice, so a Bash call shows its command only in the full view. A call without one shows its
+/// input instead.
 const DESCRIBED_TOOLS: [&str; 2] = ["Agent", "Bash"];
 
 /// The type of the subagent that Claude Code starts by default, which Claude also often names.
@@ -765,7 +766,7 @@ impl Output {
         !self.waiting_stderr.is_empty()
     }
 
-    /// Seen with Claude Code 2.1.322: it writes to its error output only on failure, like the
+    /// Seen with Claude Code: it writes to its error output only on failure, like the
     /// tag of an API error, so each line is red, as a failure.
     fn push_stderr(&mut self, line: &str) {
         // A line right after the last one, with nothing written in between, goes on its block

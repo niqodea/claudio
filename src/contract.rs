@@ -218,7 +218,7 @@ pub fn session_state(state: &str) -> String {
     json!({"type": "system", "subtype": "session_state_changed", "state": state}).to_string()
 }
 
-/// From Claude Code's changelog and seen with 2.1.322: the fields of a send-now interrupt are
+/// From Claude Code's changelog and seen with Claude Code: the fields of a send-now interrupt are
 /// Claude Code's own, absent from the SDK's types, and Claude Code announces them as
 /// `interrupt_send_now_v1` in the capabilities of its init. One without them takes the request
 /// as a plain interrupt.
@@ -241,7 +241,7 @@ pub(crate) fn send_now_is_announced(claude: &Live) -> Result<(), String> {
     }
 }
 
-/// Seen with Claude Code 2.1.319 and 2.1.322: `ANTHROPIC_API_KEY` fills the account's
+/// Seen with Claude Code: `ANTHROPIC_API_KEY` fills the account's
 /// `apiKeySource` with its name, `ANTHROPIC_AUTH_TOKEN` fills `tokenSource` with its name, and
 /// the subscription's login leaves `apiKeySource` out and `tokenSource` out or `claude.ai`. The
 /// check needs a login to the subscription, and no settings file that sets either variable.
@@ -269,7 +269,7 @@ pub(crate) fn the_paying_key_is_named_by_its_source(claude: &Live) -> Result<(),
     Ok(())
 }
 
-/// Seen with Claude Code 2.1.322: the answer to `initialize` lists the commands the session
+/// Seen with Claude Code: the answer to `initialize` lists the commands the session
 /// runs, by name, as the init that comes with the first message does, before any message. The
 /// SDK's `supportedCommands` reads them there.
 /// Ref: <https://code.claude.com/docs/en/agent-sdk/slash-commands>, on the commands a session
@@ -291,7 +291,7 @@ pub(crate) fn the_start_lists_the_commands(claude: &Live) -> Result<(), String> 
 
 /// The answers to the requests claudio sends as the session starts tell every fact the status
 /// shows of how the session runs and of its context, so none of them waits for the first message.
-/// Seen with Claude Code 2.1.322, whose answer to `initialize` tells the permission mode as
+/// Seen with Claude Code, whose answer to `initialize` tells the permission mode as
 /// `current_permission_mode`, which `sdk.d.ts` leaves out of `SDKControlInitializeResponse`.
 pub(crate) fn the_start_tells_every_fact_of_the_status(claude: &Live) -> Result<(), String> {
     type IsTold = fn(&Event) -> bool;
@@ -349,7 +349,7 @@ pub fn auth_token_account() -> Value {
     json!({"tokenSource": "ANTHROPIC_AUTH_TOKEN", "apiProvider": "firstParty"})
 }
 
-/// Some of the commands Claude Code 2.1.322 runs in a session of its own, which the fake lists.
+/// Some of the commands Claude Code runs in a session of its own, which the fake lists.
 const COMMANDS: [&str; 5] = ["clear", "compact", "context", "model", "usage"];
 
 /// The answer to `initialize` for `account`, with the commands the session runs.
@@ -371,7 +371,7 @@ pub fn initialize_response(account: &Value) -> String {
     line.to_string()
 }
 
-/// Seen with Claude Code 2.1.322: `/clear` sends `conversation_reset`, whose `session_id` is
+/// Seen with Claude Code: `/clear` sends `conversation_reset`, whose `session_id` is
 /// the cleared session's, then the new session's init, then a result that ends a turn of no
 /// calls.
 pub(crate) fn a_clear_resets_the_session(claude: &Live) -> Result<(), String> {
@@ -421,7 +421,7 @@ pub fn init(session: &str) -> String {
     line.to_string()
 }
 
-/// Seen with Claude Code 2.1.322: in auto mode, once the classifier has not answered for 4
+/// Seen with Claude Code: in auto mode, once the classifier has not answered for 4
 /// seconds whether a tool call needs the user's approval, Claude Code sends
 /// `permission_check_status` with `checking`, then with `done` as the classifier answers, both
 /// between the call and its result.
@@ -445,7 +445,7 @@ pub(crate) fn a_slow_permission_check_is_told(fake: &Hermetic) -> Result<(), Str
 /// with [`slow_permission_check`].
 pub const SLOW_PERMISSION_CHECK_MESSAGE: &str = "Run sh -c true with Bash";
 
-/// What Claude Code writes for a tool call whose permission check is slow, as 2.1.322 did,
+/// What Claude Code writes for a tool call whose permission check is slow,
 /// without the turn's other lines.
 #[must_use]
 pub fn slow_permission_check() -> Vec<String> {
@@ -486,14 +486,13 @@ pub fn slow_permission_check() -> Vec<String> {
     lines.iter().map(Value::to_string).collect()
 }
 
-/// Seen with Claude Code 2.1.322: a narration, text Claude wrote for the user between tool
+/// Seen with Claude Code: a narration, text Claude wrote for the user between tool
 /// calls, comes as a thinking block that holds the API's summary of the text, and the line that
 /// carries it lists the block's index in `narration_block_indexes`. Claude Code's schema marks
 /// the field `@internal`, and says it lists the thinking blocks whose signature the API marks as
 /// a narration, "so a renderer can label them as summaries without decoding the signature
-/// envelope". The fake signs its narration with that mark, as learned from 5,313 thinking blocks
-/// of real sessions: the 592 that held text were all marked so. The narration ends in an empty
-/// line, as all 199 summaries in real sessions did.
+/// envelope". The fake signs its narration with that mark, which real sessions put on every
+/// thinking block that holds text, and ends it in an empty line, as real summaries end.
 pub(crate) fn a_narration_is_listed(fake: &Hermetic) -> Result<(), String> {
     let lines = fake.run(|run| {
         run.send_message(NARRATION_MESSAGE)?;
@@ -506,7 +505,7 @@ pub(crate) fn a_narration_is_listed(fake: &Hermetic) -> Result<(), String> {
 /// [`narration`].
 pub const NARRATION_MESSAGE: &str = "Narrate ok";
 
-/// What Claude Code writes for a narration and the text after it, as 2.1.322 did, without the
+/// What Claude Code writes for a narration and the text after it, without the
 /// turn's other lines.
 #[must_use]
 pub fn narration() -> Vec<String> {
@@ -529,7 +528,7 @@ pub fn narration() -> Vec<String> {
     ]
 }
 
-/// Seen with Claude Code 2.1.322: a command that Claude runs in the background gets a
+/// Seen with Claude Code: a command that Claude runs in the background gets a
 /// `task_started` that links its task to the call and says it runs in the background, before the
 /// call's result. As the task ends, `task_notification` tells how, as `completed`, `failed` or,
 /// once `TaskStop` stopped it, `stopped`. `background_tasks_changed` lists the task while it
@@ -567,7 +566,7 @@ pub(crate) fn a_background_task_is_told_from_start_to_end(fake: &Hermetic) -> Re
         .map_err(|error| format!("a task that TaskStop stopped: {error}"))
 }
 
-/// Seen with Claude Code 2.1.322: a message sent with send now, while a command runs in the
+/// Seen with Claude Code: a message sent with send now, while a command runs in the
 /// foreground, moves the command to the background. Its task started in the foreground, as for
 /// any command that runs for a while, then a `task_updated` says it moved, before the call's
 /// result. The task's end then comes as for any background task.
@@ -589,7 +588,7 @@ pub(crate) fn a_call_moved_to_the_background_is_told(fake: &Hermetic) -> Result<
     compare(TASK_KINDS, &lines, &moved_call())
 }
 
-/// Seen with Claude Code 2.1.322: a move to the background by a call's id, sent right before a
+/// Seen with Claude Code: a move to the background by a call's id, sent right before a
 /// message with send now, ends before Claude Code reads the send now, which then finds nothing
 /// that runs in the foreground, and spares the subagent the call started. Claude Code alone
 /// stops the turn for a subagent that runs in the foreground, and the subagent with it. The
@@ -626,7 +625,7 @@ pub(crate) fn a_call_moved_by_its_id_makes_way_for_send_now(fake: &Hermetic) -> 
 /// for a while.
 pub const MOVED_SUBAGENT_MESSAGE: &str = "Run sleep 4 with Bash in a subagent";
 
-/// What Claude Code writes, as 2.1.322 did, for a subagent that runs a command in the
+/// What Claude Code writes for a subagent that runs a command in the
 /// foreground, moved to the background by its call's id, without the turns' other lines.
 #[must_use]
 pub fn moved_subagent() -> Vec<String> {
@@ -712,7 +711,7 @@ pub fn moved_subagent() -> Vec<String> {
     lines.iter().map(Value::to_string).collect()
 }
 
-/// Seen with Claude Code 2.1.322: a subagent's task starts with its `Agent` call, as
+/// Seen with Claude Code: a subagent's task starts with its `Agent` call, as
 /// `task_started`, and ends as `task_notification` tells, whether it runs in the foreground or
 /// in the background. `background_tasks_changed` lists only one that runs in the background.
 ///
@@ -748,7 +747,7 @@ pub const BACKGROUND_SUBAGENT_MESSAGE: &str = "Reply ok in a background subagent
 /// The task id of the subagent of the fixtures.
 const AGENT_TASK_ID: &str = "a259478d0d71f063d";
 
-/// What Claude Code writes, as 2.1.322 did, for a subagent that replies ok, in the background
+/// What Claude Code writes for a subagent that replies ok, in the background
 /// when `is_backgrounded`, without the turn's other lines.
 #[must_use]
 pub fn subagent(is_backgrounded: bool) -> Vec<String> {
@@ -828,7 +827,7 @@ pub fn subagent(is_backgrounded: bool) -> Vec<String> {
     lines.iter().map(Value::to_string).collect()
 }
 
-/// Seen with Claude Code 2.1.322: a `SendMessage` whose `to` is the id of a subagent that
+/// Seen with Claude Code: a `SendMessage` whose `to` is the id of a subagent that
 /// ended, which its task's id is, resumes it, as a task of the same id that the call starts,
 /// in the background. `SendMessage` is absent from the SDK's types of tools, and only Claude
 /// Code's result for an `Agent` call tells Claude to send to the id.
@@ -856,7 +855,7 @@ pub fn resume_message(agent: &str) -> String {
     format!("Resume {agent} with SendMessage")
 }
 
-/// What Claude Code writes, as 2.1.322 did, for a subagent that replies ok, and that Claude
+/// What Claude Code writes for a subagent that replies ok, and that Claude
 /// then resumes with `SendMessage`, without the turns' other lines. The lines of
 /// [`subagent`] come of the first message, and the rest of the second one.
 #[must_use]
@@ -923,7 +922,7 @@ pub fn resumed_subagent() -> Vec<String> {
         .collect()
 }
 
-/// Seen with Claude Code 2.1.322: an interrupt fails the call that runs with a result of its
+/// Seen with Claude Code: an interrupt fails the call that runs with a result of its
 /// own, so every call gets its result, however its turn ends.
 pub(crate) fn a_stopped_call_gets_its_result(fake: &Hermetic) -> Result<(), String> {
     let lines = fake.run(|run| {
@@ -938,7 +937,7 @@ pub(crate) fn a_stopped_call_gets_its_result(fake: &Hermetic) -> Result<(), Stri
     compare(&["tool use", "tool result"], &lines, &stopped_call())
 }
 
-/// Seen with Claude Code 2.1.322: as a task ends in the background, Claude Code tells its end
+/// Seen with Claude Code: as a task ends in the background, Claude Code tells its end
 /// and starts a turn on it before it lists no task left, so a `/clear` sent once it lists none
 /// runs after that turn, and the task's end stays in the session that started it. A subagent's
 /// end was seen to come the same way.
@@ -954,7 +953,7 @@ pub(crate) fn a_clear_follows_the_turn_on_the_last_tasks_end(
     compare(&["turn end", "reset"], &lines, &clear_after_task())
 }
 
-/// What Claude Code writes, as 2.1.322 did, for a `/clear` sent once the last task that ran in
+/// What Claude Code writes for a `/clear` sent once the last task that ran in
 /// the background ended: the end of the turn on the task's end, then the clear.
 #[must_use]
 pub fn clear_after_task() -> Vec<String> {
@@ -965,7 +964,7 @@ pub fn clear_after_task() -> Vec<String> {
         .collect()
 }
 
-/// Seen with Claude Code 2.1.322: `stop_task` succeeds for a task that ended already, as for one
+/// Seen with Claude Code: `stop_task` succeeds for a task that ended already, as for one
 /// that runs, so a stop sent as the task ends never fails.
 pub(crate) fn a_stop_of_a_task_that_ended_succeeds(fake: &Hermetic) -> Result<(), String> {
     let lines = fake.run(|run| {
@@ -1099,8 +1098,8 @@ fn running_in_background() -> String {
     )
 }
 
-/// What Claude Code writes, as 2.1.322 did, without the turn's other lines, for a command that
-/// Claude runs in the background and that ends with `status`, `completed` or `failed`.
+/// What Claude Code writes for a command that Claude runs in the background and that ends with
+/// `status`, `completed` or `failed`, without the turn's other lines.
 ///
 /// # Panics
 ///
@@ -1133,7 +1132,7 @@ pub fn background_task(status: &str) -> Vec<String> {
     lines.iter().map(Value::to_string).collect()
 }
 
-/// What Claude Code writes, as 2.1.322 did, for a command that Claude runs in the background and
+/// What Claude Code writes for a command that Claude runs in the background and
 /// then stops with `TaskStop`, without the turns' other lines. The lines up to the call's result
 /// come of the first message, and the rest of the second one.
 #[must_use]
@@ -1167,7 +1166,7 @@ pub fn stopped_background_task() -> Vec<String> {
     lines.iter().map(Value::to_string).collect()
 }
 
-/// What Claude Code writes, as 2.1.322 did, for a command that a message sent with send now moves
+/// What Claude Code writes for a command that a message sent with send now moves
 /// to the background, without the turns' other lines. The call comes of the first message, and
 /// the rest of send now.
 #[must_use]
@@ -1206,7 +1205,7 @@ pub fn moved_call() -> Vec<String> {
     lines.iter().map(Value::to_string).collect()
 }
 
-/// What Claude Code writes, as 2.1.322 did, for a call that an interrupt stops, without the
+/// What Claude Code writes for a call that an interrupt stops, without the
 /// turn's other lines. The call comes of the message, and its result of the interrupt.
 #[must_use]
 pub fn stopped_call() -> Vec<String> {
@@ -1229,7 +1228,7 @@ pub fn stopped_call() -> Vec<String> {
     lines.iter().map(Value::to_string).collect()
 }
 
-/// Seen with Claude Code 2.1.316: only `unifiedWindows` holds every limit of the plan, where the
+/// Seen with Claude Code: only `unifiedWindows` holds every limit of the plan, where the
 /// documented fields describe only the limit that applies now. The check needs a login to the
 /// subscription, whose plan has the limits.
 pub(crate) fn a_rate_limit_event_has_every_window(claude: &Live) -> Result<(), String> {
@@ -1243,7 +1242,7 @@ pub(crate) fn a_rate_limit_event_has_every_window(claude: &Live) -> Result<(), S
     same(&real, &summary(&["limits"], &events(&[rate_limit_event()])))
 }
 
-/// Seen with Claude Code 2.1.322: it keeps its last fetch of the plan's usage, with when it
+/// Seen with Claude Code: it keeps its last fetch of the plan's usage, with when it
 /// fetched it by this machine's clock, as `cachedUsageUtilization` in its config file, which all
 /// its processes share, and saves a new fetch a few milliseconds after it answers `get_usage`. It
 /// answers `get_usage` from that copy, without a new fetch, until the copy is a minute old.
@@ -1312,7 +1311,7 @@ fn ask_usage(run: &mut Run) -> Result<(), String> {
     Ok(())
 }
 
-/// A rate limit event, as Claude Code 2.1.316 sent it.
+/// A rate limit event, as Claude Code sends it.
 #[must_use]
 pub fn rate_limit_event() -> String {
     let line = json!({
@@ -1335,7 +1334,7 @@ pub fn rate_limit_event() -> String {
     line.to_string()
 }
 
-/// Seen with Claude Code 2.1.316: once its input closed, Claude Code fails each permission it
+/// Seen with Claude Code: once its input closed, Claude Code fails each permission it
 /// would ask for, with "Stream closed" in the tool's result.
 pub(crate) fn a_permission_after_the_input_closes_fails(claude: &Live) -> Result<(), String> {
     let mut run = claude.start_with(&["--permission-mode", "default"], &[], &[])?;
@@ -1358,7 +1357,7 @@ pub(crate) fn a_permission_after_the_input_closes_fails(claude: &Live) -> Result
     }
 }
 
-/// Seen with Claude Code 2.1.316: SIGINT stops Claude's turn and its background tasks, as
+/// Seen with Claude Code: SIGINT stops Claude's turn and its background tasks, as
 /// Ctrl+C does a program's work in the terminal, and Claude Code then exits, since its input
 /// closed.
 pub(crate) fn sigint_stops_claude_code_after_its_input_closes(claude: &Live) -> Result<(), String> {
@@ -1378,7 +1377,7 @@ pub(crate) fn sigint_stops_claude_code_after_its_input_closes(claude: &Live) -> 
     run.wait().map_err(|error| format!("after SIGINT, {error}"))
 }
 
-/// Seen with Claude Code 2.1.316: the processes Claude Code starts write to files of their own,
+/// Seen with Claude Code: the processes Claude Code starts write to files of their own,
 /// so its output closes as it exits, even while a process it started still runs.
 pub(crate) fn the_output_closes_as_claude_code_exits(claude: &Live) -> Result<(), String> {
     let mut run = claude.start_with(&["--allowedTools", "Bash(sleep:*)"], &[], &[])?;

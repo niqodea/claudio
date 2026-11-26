@@ -234,7 +234,7 @@ impl Fake {
     }
 
     /// Sends the requests of a turn that asks, which ends once all are answered, each after its
-    /// call, as Claude Code 2.1.322 shows a call before it asks about it.
+    /// call, as Claude Code shows a call before it asks about it.
     fn send_asks(&mut self, asks: Vec<Value>) {
         self.asks_waiting = asks.len();
         for (number, request) in asks.into_iter().enumerate() {
@@ -356,8 +356,8 @@ fn text_line(text: &str) -> String {
     .to_string()
 }
 
-/// What Claude Code writes for the command `text` in the session `session`, as 2.1.322 does,
-/// none for a text that is no command the fake knows. `/compact` reports its progress, starts
+/// What Claude Code writes for the command `text` in the session `session`, none for a text that
+/// is no command the fake knows. `/compact` reports its progress, starts
 /// the session again, marks the compaction, hands Claude the summary, and replays its output
 /// from Claude Code's history, with no answer of its own. `/cost` answers with a message that
 /// is never streamed, as any command that answers does.

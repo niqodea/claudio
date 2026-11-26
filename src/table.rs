@@ -122,8 +122,8 @@ impl Table {
     ///
     /// A record's number stands alone on its line, which CommonMark reads as an item that starts
     /// with a blank line, and an item like that cannot interrupt a paragraph. So this assumes
-    /// Claude starts a table after a blank line, as every table in the sessions read did: once
-    /// copied, a table right under a line of text would lose its first number into that line.
+    /// Claude starts a table after a blank line, as Claude does in practice: once copied, a table
+    /// right under a line of text would lose its first number into that line.
     /// Ref: <https://spec.commonmark.org/0.31.2/#list-items>
     fn render_records(&self, color_cell: impl Fn(&str) -> Line) -> Vec<Line> {
         // CommonMark takes the lines under a marker of width W, like `10.`, into its item when they

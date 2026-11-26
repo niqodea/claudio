@@ -419,7 +419,7 @@ pub enum Command<'a> {
     GetContext,
     /// Asks for the plan's usage limits, which Claude Code reads from the plan's usage, where a
     /// call to the API would only send them along with its reply. The SDK's types mark the
-    /// request experimental, with a shape that may change. Seen with Claude Code 2.1.319.
+    /// request experimental, with a shape that may change.
     GetUsage,
     /// Asks for the MCP servers and how each is connected, which changes as they connect.
     GetMcpStatus,
@@ -1709,7 +1709,7 @@ fn strip_escapes(text: &str) -> String {
 ///   `decision_reason`. The block shows all of it from the input and the reason. Not to be
 ///   confused with the `description` in a Bash call's input, Claude's own words, which the
 ///   block shows after `#`.
-/// - `title`: a heading for Claude Code's own dialog. Claude Code 2.1.322 sends it only for a
+/// - `title`: a heading for Claude Code's own dialog. Claude Code sends it only for a
 ///   tool the person answers on a card of its own, like setting up Claude in Chrome, which only
 ///   Claude's apps offer, and for an ask a hook words itself, so no call claudio meets has one
 ///   yet. Should a tool claudio meets start sending one, show it.
@@ -2396,7 +2396,7 @@ mod tests {
 
     #[test]
     fn a_compaction_shows_once_and_nothing_else_of_it_does() {
-        // As Claude Code 2.1.322 sends a /compact, its init and result left out
+        // As Claude Code sends a /compact, its init and result left out
         let lines = [
             json!({"type": "system", "subtype": "status", "status": "compacting"}),
             json!({"type": "system", "subtype": "status", "status": null, "compact_result": "success"}),

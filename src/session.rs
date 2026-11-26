@@ -110,10 +110,8 @@ impl<'a> Conversation<'a> {
                     self.send(&Command::Run { command: "clear" })?;
                     continue;
                 }
-                // Claude Code answers these from what it holds, locally: with Claude Code 2.1.322,
-                // 150 such requests took 0.2 s in all, while its network traffic stayed at its
-                // idle level. A turn can be a command, like `/effort` or
-                // `/clear`, that changes what they tell
+                // Claude Code answers these from what it holds, without going to the network. A
+                // turn can be a command, like `/effort` or `/clear`, that changes what they tell
                 Some(Input::TurnEnded) => {
                     self.send(&Command::GetEffort)?;
                     self.send(&Command::GetContext)?;

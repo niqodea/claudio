@@ -99,8 +99,6 @@ fn wraps_at_spaces() -> Result<bool, String> {
             0 => return Ok(false),
             _ => {}
         }
-        // TODO: Hand the keys typed meanwhile, which arrive among the answers, to the input line,
-        // which never sees them now
         let mut buffer = [0u8; 64];
         // SAFETY: read writes at most the buffer's length into the buffer
         let read =

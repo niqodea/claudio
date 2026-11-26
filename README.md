@@ -342,7 +342,7 @@ The terminal applies a resize at once, but claudio hears of it only later, so wh
 So claudio never names a row by its number: each redraw finds its way back to the first live row from the cursor, which the terminal keeps on its character as it wraps the rows again.
 As claudio starts, it checks whether a backspace at a row's start goes up only onto a row that wrapped into it, as [tmux's does](https://github.com/tmux/tmux/blob/3.5a/screen-write.c#L983).
 Then backspaces stop exactly at the start of each live row, however the terminal wrapped it, and a resize leaves nothing behind, except in the case below.
-tmux 3.5 passes the check, and is the only terminal checked so far.
+tmux 3.5 and 3.8 pass the check, and are the only terminals checked so far.
 In a terminal that fails it, claudio warns in orange as it starts, and each redraw goes up as many rows as the live rows took.
 A narrower screen splits rows into more, so the conversation is never erased, but stray copies of the label row and the box can stay in the scrollback.
 
@@ -354,7 +354,7 @@ Narrowing a pane a column at a time, like dragging its border or zooming it back
 Until the conversation fills the screen, the live rows have few rows above them, so a single narrower screen can be enough.
 Claude's next lines move the live rows back down, as they fill the empty rows.
 Seen with tmux 3.8: narrowing a 14-row screen a column at a time, 0.4 s apart, moved the live rows up a row each time, and the tenth left a copy.
-The fix belongs in tmux: taking the rows a narrower screen adds from the empty rows below the cursor first, as a shorter screen already does, would keep the live rows in place.
+A fix in tmux would keep the live rows in place: taking the rows a narrower screen adds from the empty rows below the cursor first, as a shorter screen already does.
 A shorter screen has no such case, since tmux then drops the empty rows below the cursor first.
 
 One limit holds in any terminal: a program can clear the scrollback only whole, never change a row of it, so live rows taller than the screen push the screen's top into the scrollback for good.

@@ -255,8 +255,8 @@ impl Pick {
     /// default. Claude Code 2.1.322 instead lets a question go unanswered and leaves it out of
     /// what Claude reads, so Claude cannot tell it from a choice of none. To choose none, the
     /// user writes it.
-    /// Ref: <https://tessl.io/registry/tessl/npm-clack--prompts/0.11.0/files/docs/selection-prompts.md>,
-    /// on Clack's multiselect taking `required`, true by default
+    /// Ref: <https://github.com/bombshell-dev/clack/blob/50c8ea04ac165df77a874af54ec8ff0cdc135453/packages/prompts/src/multi-select.ts#L85>,
+    /// where Clack's multiselect takes `required`, true by default
     /// Ref: <https://github.com/anthropics/claude-code/issues/30320>, on asking Claude Code to
     /// tell Claude an empty answer from a real one
     pub fn chosen(&self, form: Form, text: &str) -> Chosen {

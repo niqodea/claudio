@@ -875,11 +875,11 @@ impl InputLine {
     /// until Ctrl+C, or from the request the question view shows, which reads in full there
     /// with less's own keys and then answers on `q`. The request's line shows a quarter down the
     /// screen, under what led to it, and the prompt names the view, rather than the path of its
-    /// temporary file, in each of less's three prompts, which `LESS` may pick. less keeps the colors, draws on a screen of its own, which leaves the
-    /// conversation's rows as they were, and stays open on a view shorter than a screen,
-    /// whatever `LESS` says. It reads the file as the UTF-8 the output writes, whatever the
-    /// locale. Each of these takes a flag of less's own, which another pager has no use for, so
-    /// the view runs less whatever `PAGER` says.
+    /// temporary file, in each of less's three prompts, which `LESS` may pick. less keeps the
+    /// colors, draws on a screen of its own, which leaves the conversation's rows as they were,
+    /// and stays open on a view shorter than a screen, whatever `LESS` says. It reads the file as
+    /// the UTF-8 the output writes, whatever the locale. Each of these takes a flag of less's own,
+    /// which another pager has no use for, so the view runs less whatever `PAGER` says.
     fn show_full_view(&mut self) -> Result<(), String> {
         let start = match &lock(&self.shared).phase {
             Phase::Answering(Answering { view }) => format!("+{}g", view.full_view_line),
@@ -951,8 +951,9 @@ impl InputLine {
     /// each as a line of its own, as `climb` needs: the line Claude still writes, the label row
     /// and the box. Each is a `ScreenRow`, so the live rows take as many rows of the terminal as
     /// the layout gives them, and never push the screen's top into the scrollback. Last, it climbs
-    /// from the end of the last live row to the cursor's row, and moves along it to the cursor. No step names a row by its number, so the frame lands where
-    /// it should even when a resize reaches the terminal first.
+    /// from the end of the last live row to the cursor's row, and moves along it to the cursor.
+    /// No step names a row by its number, so the frame lands where it should even when a resize
+    /// reaches the terminal first.
     fn draw_main(&mut self) -> Result<(), String> {
         let layout = self.layout;
         let mut out = Vec::new();

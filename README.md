@@ -317,6 +317,22 @@ Its result line says `◌ #00 Bash: running in background`, and once it ends, a 
 A call that names the task, like TaskStop's, names it by that tag too.
 Ctrl+O shows what Claude Code told Claude of the task, like the file its output goes to, which `tail -f` follows.
 
+## Wording
+
+Every line claudio writes in its own words follows these rules: in the conversation, on the label row, and in its errors.
+`src/wording.rs` writes out the grammar of those lines, with the reason for each part.
+
+- Say what happened, in the user's terms, and what they can do about it, when they can do something: `Ctrl+O shows it whole`, not only that a line was cut, as [NN/g](https://www.nngroup.com/articles/error-message-guidelines/) and [clig.dev](https://clig.dev/#errors) ask.
+- Put first what the user scans for: the subject of the line, then what it did, like `Claude Code 2.1.330 runs, but 2.1.322 is the one checked to work`, as [Chrome DevTools' guide](https://chromium.googlesource.com/devtools/devtools-frontend/+/main/docs/styleguide/ux/writing.md) asks.
+- Name only what the user knows: Claude, Claude Code, the session, the context, a call, a key, and none of claudio's workings, like a kind of message, unless the user can act on it, as [clig.dev](https://clig.dev/#output) asks. claudio never names itself in a session, since it is what the user looks through, but does in a command the user can run, like `claudio --resume <id>`, where its name is part of the command.
+- Use one word for one thing, everywhere, the word this README uses: Claude's questions are refused, never denied, as [NN/g](https://www.nngroup.com/articles/consistency-and-standards/) asks.
+- Show what a key does where the user looks, while the key matters, so they recognize it rather than recall it, and leave it out otherwise: `Ctrl+K stops` while a clear waits. [NN/g](https://www.nngroup.com/articles/recognition-and-recall/) asks for recognition over recall, and [for shortcuts](https://www.nngroup.com/articles/ui-accelerators/) "readily available, yet easy to ignore".
+- Name a key with a capital, and a shortcut with + and no spaces, like Enter, Esc, Space and Ctrl+O, as [Microsoft's style guide](https://learn.microsoft.com/style-guide/a-z-word-list-term-collections/term-collections/keys-keyboard-shortcuts) does, then say what it does from a verb, in 2 to 4 words, like `Enter again sends`, as [NN/g](https://www.nngroup.com/articles/ui-copy/) keeps a command's label.
+- Give a command to run after its verb, like `resume with claudio --resume <id>`, so it ends the line, where it is copied whole. [clig.dev](https://clig.dev/#output) asks to suggest the commands to run next, and the order is claudio's own.
+- Keep a line to one idea, in the active voice, with plain words and no filler, like please or sorry, as [Chrome DevTools' guide](https://chromium.googlesource.com/devtools/devtools-frontend/+/main/docs/styleguide/ux/writing.md) asks.
+- Start with a small letter unless a name starts the line, end with no period, and write numbers as digits, as [Rust's API guidelines](https://rust-lang.github.io/api-guidelines/interoperability.html#c-good-err) and [Chrome DevTools' guide](https://chromium.googlesource.com/devtools/devtools-frontend/+/main/docs/styleguide/ux/writing.md) ask.
+- Never let a color alone tell two things apart: say it in words or with a mark too, as [Design](#design) tells. [Primer](https://github.com/primer/design/blob/main/content/native/cli/foundations.mdx#color) uses "color to enhance meaning, not to communicate meaning", and so does [WCAG 1.4.1](https://www.w3.org/WAI/WCAG22/Understanding/use-of-color).
+
 ## Resizing
 
 The conversation is printed once, a whole line at a time, and never touched again, so the terminal wraps it again on a resize, as it does any output.

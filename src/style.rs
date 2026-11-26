@@ -5,6 +5,11 @@
 //! alone: whatever a color says, a character on the same line says too, so the scrollback reads
 //! the same without color, as once copied.
 //!
+//! What stays in the background takes one style wherever it shows, and a mark, like a field's
+//! sign, takes its style from what it marks, never from the value after it. Text keeps a
+//! contrast of at least 4.5:1 with what is behind it, the bar included.
+//! Ref: <https://www.w3.org/WAI/WCAG22/Understanding/contrast-minimum>
+//!
 //! A style is a value, whole in itself, so where it is set says nothing of the styles around
 //! it: `text.rs` gives each piece of text its style, and writes the codes only as the text
 //! reaches the terminal.
@@ -24,7 +29,9 @@ pub struct Style {
 }
 
 /// A color, as the parameter that sets it in front of the text, which `+ 10` sets behind it for
-/// the 16 colors.
+/// the 16 colors. The terminal's 16 colors, which its theme sets, come before fixed shades, which
+/// are only for what the 16 lack: orange, and the bar's background and the grey on it.
+/// Ref: <https://github.com/sharkdp/bat#8-bit-themes>
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Color {
     /// One of the terminal's 16 colors, which its theme sets, by its foreground parameter.
@@ -124,6 +131,8 @@ pub const STRONG: Style = BOLD;
 /// Literal text, in backticks or a code block without a language, as Markdown marks it: in
 /// bold, which has no hue, so it reads on any theme, and the backticks tell it from strong text.
 /// A background would read as the user's, as the bar does.
+/// Ref: <https://man7.org/linux/man-pages/man7/man-pages.7.html#FORMATTING_AND_WORDING_CONVENTIONS>,
+/// which sets literal text in bold
 pub const CODE: Style = BOLD;
 /// What stays in the background, like a call's result, the marks that structure Markdown, or
 /// claudio's own notes, everywhere but on the bar.
@@ -139,11 +148,18 @@ pub const MARK: Style = CYAN;
 /// What needs the user's attention, like a warning, a key that waits for a second press, or a
 /// cache that turns cold.
 pub const ATTENTION: Style = ORANGE;
-/// What waits for the user's answer: the requests Claude makes. Reversed, as tmux marks a window
-/// that alerts, so it stands out on any theme in no hue of its own.
+/// What waits for the user's answer: the requests Claude makes. Not `ATTENTION`'s orange: a
+/// question is the user's turn, which nothing went wrong to bring, and a warning's color on it
+/// would make every turn read as a problem. Reversed, as tmux marks a window that alerts, so it
+/// stands out by its lightness on any theme, with no hue to learn.
+/// Ref: <https://man7.org/linux/man-pages/man1/tmux.1.html>, whose `window-status-bell-style`
+/// and `window-status-activity-style` are `reverse` by default
+/// Ref: <https://www.w3.org/WAI/WCAG22/Understanding/use-of-color.html>, which counts a
+/// difference in lightness as one apart from hue
 pub const AWAITS_YOU: Style = REVERSED;
 /// What failed or was removed: an error, a limit reached, the lines a diff removes. Red reads as
 /// an error, so it says nothing else.
+/// Ref: <https://clig.dev/#output>
 pub const FAILED_OR_REMOVED: Style = RED;
 /// What is done or added: a submitted answer, the lines a diff adds.
 pub const DONE_OR_ADDED: Style = GREEN;

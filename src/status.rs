@@ -71,8 +71,10 @@ pub struct Facts {
 }
 
 /// The status's lines at `now`, which is `wall_now` on the wall clock. What Claude Code has not
-/// told yet shows as `?`. A new session has nothing to resume before its first message, which
-/// starts it.
+/// told yet shows as `?`, never as a value of claudio's own: each fact comes from an answer
+/// Claude Code gives before the first message, since the first message's init comes late, and
+/// leaves out the effort in claudio's sessions. A new session has nothing to resume before its
+/// first message, which starts it.
 pub fn lines(
     facts: &Facts,
     session_id: Option<&str>,

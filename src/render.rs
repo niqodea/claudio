@@ -707,8 +707,14 @@ impl Output {
     }
 
     /// Shows what Claude Code tells the user at `level`, under a header that says it is Claude
-    /// Code's: in the full view only when it is `Info`, as a warning when it is a `Warning`, and
-    /// else noted, since a suggestion, like `Session resumed`, needs nothing of the user.
+    /// Code's: in the full view only when it is `Info`, as a warning when it is a `Warning`, like
+    /// `Args from unknown skill: <name>`, and else noted, since a suggestion, like `Session
+    /// resumed`, needs nothing of the user. `SDKInformationalMessage` asks to show a suggestion
+    /// "prominently, as a warning is", but a warning that needs nothing teaches the user to skip
+    /// warnings.
+    /// Ref: `SDKInformationalMessage` in `sdk.d.ts`
+    /// Ref: <https://developer.dynatrace.com/design/status-and-health>, which warns that
+    /// "over-communicating statuses can overwhelm users"
     pub fn show_claude_code_notice(&mut self, text: &str, level: Level) {
         let notice = match level {
             Level::Info => {

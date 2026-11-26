@@ -1,10 +1,13 @@
 //! A question's options and the user's own answer, as the question view shows them, and what the
 //! keys do to them. The options are numbered from 1, and below them an item marked `>` stands for
 //! the user's own answer, which the user writes in the input box. An option's number, or its
-//! letter, moves the cursor to it, and only Enter answers, as AGENTS.md's rule for keys says.
+//! letter, moves the cursor to it, and only Enter answers, so the user sees their choice before
+//! it counts, and a slip, like Ctrl+Y that loses its Ctrl, answers nothing.
 //! Enter on the `>` item, or the `>` key, takes the cursor into the box. There, Enter finishes the
 //! answer, or on a question of several options ticks it as one more, and Esc in normal mode
 //! leaves the box.
+//! Ref: <https://primer.style/accessibility/patterns/keyboard-shortcuts#avoid-single-character-shortcuts-by-default>
+//! Ref: <https://www.nngroup.com/articles/ui-accelerators/>
 //!
 //! `]` and `[` move to the next and previous question, as they move between tabs in lazygit, and
 //! the home row's `a`, `s`, `d` and `f` go straight to the first four, which letters name apart

@@ -1,11 +1,15 @@
 //! Cutting what does not fit, across a row and down the rows, in one place, so every cut
-//! follows the same rules, which AGENTS.md's Cutting section gives with their sources:
+//! follows the same rules, which the items below give with their sources. In the
+//! conversation, only a noisy line is cut, as the README's Design section tells:
 //! - a cut leaves a sign where it cuts: `…` at the end of a line, or a row that counts what it
-//!   hides. Only empty rows go without one, since they hide nothing;
+//!   hides. Only empty rows go without one, since they hide nothing, and a half-typed vi
+//!   command, as `label::newest` tells;
 //! - a sign stands for text that a view shows whole, `Whole`. A row that counts names the key of
 //!   that view, since it has the room, while an `…` names none, since the line it ends has none
 //!   left, and stands for the full view, where every line the screen cuts shows whole;
 //! - what is left takes the room that what was cut leaves.
+//!
+//! Ref: <https://v5-archive.patternfly.org/ux-writing/truncation>, which marks a cut with `…`
 
 use std::num::NonZeroUsize;
 
@@ -16,7 +20,13 @@ use crate::style::{SUBDUED, Style};
 use crate::text::{Line, Row, Span};
 use crate::wording::{Hint, with_hint};
 
-/// A view that shows whole what a cut hides, which the cut's sign names.
+/// A view that shows whole what a cut hides, which the cut's sign names, so no cut hides text
+/// for good. The label row and the status are the exceptions, since a wider or a taller screen
+/// shows them whole.
+/// Ref: <https://www.w3.org/WAI/WCAG22/Understanding/reflow.html>, which allows a cut while a
+/// mechanism reveals the text
+/// Ref: <https://v5-archive.patternfly.org/ux-writing/truncation>, which asks for at least one
+/// way to see the whole text
 #[derive(Clone, Copy)]
 pub enum Whole {
     /// The whole conversation, with every question and call whole: Ctrl+O.
@@ -34,7 +44,11 @@ impl Whole {
 
 /// A row drawn on the screen, which takes at most the screen's columns, since only a cut or
 /// `empty` makes one, and so exactly one row of the terminal. A screen drawn from
-/// these takes as many rows as it has rows, where a row that wrapped would take more.
+/// these takes as many rows as it has rows, where a row that wrapped would take more: on the
+/// question screen it would land on the row below, on a screen of its own it would push the rows
+/// above it off the top, and among the main screen's live rows it could push them past the
+/// screen's top, into the scrollback for good. An error stays whole, so its screen wraps it
+/// onto rows before it counts them.
 pub struct ScreenRow(Row);
 
 impl ScreenRow {

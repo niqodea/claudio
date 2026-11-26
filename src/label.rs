@@ -1,8 +1,20 @@
 //! The label rows, laid out in slots: parts whose columns and widths the screen's width alone
-//! decides, so what one part shows never moves another, as AGENTS.md's Label row section asks.
+//! decides, so what one part shows never moves another, as the rows of the question view keep
+//! their place by the screen's height alone.
 //! A layout takes the screen's width and nothing of what the row shows, so no column can depend
 //! on it, and each part's text then fills its slot, padded, or cut with `…`. A part with nothing
 //! to show leaves its slot empty.
+//!
+//! On a narrow screen, each end of a label row keeps its edge and gives up text toward the
+//! middle, so every `…` falls there: first the right end, the mode and the half-typed command
+//! last, since they tell what the user is typing, then the label, which loses its end. What
+//! either side gives up costs little, since the keys of a hidden name still work and the `…`
+//! says that text is hidden, so the order stays this simple rather than weighing what each part
+//! shows.
+//! Ref: <https://ec.europa.eu/component-library/v3.13.0/ec/components/navigation/breadcrumb/code/>,
+//! whose breadcrumbs keep their first and last items and hide the middle ones behind `…`
+//! Ref: <https://github.com/nvim-lualine/lualine.nvim/wiki/Component-snippets>, which hides
+//! whole components on a narrow window
 
 use std::num::NonZeroUsize;
 
@@ -208,7 +220,9 @@ fn fill(text: &Line, width: usize) -> Line {
 
 /// The newest keys of `keys`, a half-typed command, that fit in `width` columns, padded at their
 /// end: as they grow past it, each new key pushes out the oldest, with no `…`, as vim's
-/// `showcmd` does, so the key just typed always shows, and the others keep their order.
+/// `showcmd` does, so the key just typed always shows, and the others keep their order. The keys
+/// are the user's own, just typed, so they need no sign of the cut.
+/// Ref: `add_to_showcmd` in vim's src/normal.c, which drops the oldest keys past its columns
 fn newest(keys: &str, width: usize) -> String {
     let mut used = 0;
     let mut kept = Vec::new();

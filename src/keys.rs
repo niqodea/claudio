@@ -127,7 +127,10 @@ pub enum Mark {
     /// A preview of an option, whose value is the preview's Markdown, which shows highlighted, as
     /// `picker::preview_lines` gives its lines, each on its own row behind a bar in the margin.
     /// The option's key, like `2▎`, goes in front of the first row, or nothing when the cursor is
-    /// on no option.
+    /// on no option. The bar, rather than a title row, keeps the preview a value like any other,
+    /// which gives up rows down to 1 and keeps its sign at its end.
+    /// Ref: <https://docs.rs/crate/synaps-tui/0.3.3/source/src/tui/render.rs>, which sets its tool
+    /// blocks apart with a bar in their margin
     Quote(Option<String>),
 }
 

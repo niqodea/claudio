@@ -68,7 +68,10 @@ const TICK: Duration = Duration::from_millis(25);
 type ScreenRows<'a> = &'a dyn Fn(NonZeroUsize, usize) -> Vec<ScreenRow>;
 
 /// What a screen of its own asks Claude Code for as it opens, then every `ASK_EVERY` while it
-/// stays open, so it shows what Claude Code tells only when asked.
+/// stays open, so it shows what Claude Code tells only when asked, and a screen opened before
+/// Claude Code loaded something fills it in.
+/// Ref: <https://www.nngroup.com/articles/visibility-system-status/>, which asks to keep users
+/// informed "within a reasonable amount of time"
 type Refresh<'a> = &'a dyn Fn() -> Result<(), String>;
 
 /// How often an open screen asks again. Claude Code answers from what it holds, locally.
@@ -1251,13 +1254,25 @@ impl InputLine {
         }
     }
 
-    /// The label row: for a message, `››` with the budgets, then the activity, as AGENTS.md's
-    /// rules for the label row group them. The budgets are the context's level, marked and red
+    /// The label row: for a message, `››` with the budgets, then the activity, each a group set
+    /// apart by `│`, since items close together read as one. Within a group, what needs the user
+    /// goes first, and among the budgets the narrowest, since attention leans left. What holds
+    /// for the whole session is on the left, and what holds for the moment, like where the keys
+    /// go, at the right end. Each indicator keeps a fixed width, one character for a count, and
+    /// text of varying width goes last, so a change moves nothing the eye learned to find.
+    /// The budgets are the context's level, marked and red
     /// on a cold cache, and the levels of the plan's usage limits. The activity is the questions
     /// that wait, in the color of a warning since only the user moves them on, the tasks that run
     /// in the background, the subagents that run, and then what the session waits on, the user
     /// or Claude, `idle` too, so the user always sees whether it is their turn. For an answer,
     /// the question; at the end, the work Claude still does.
+    /// Ref: <https://www.nngroup.com/articles/gestalt-proximity/>
+    /// Ref: <https://www.nngroup.com/articles/visibility-system-status/>
+    /// Ref: <https://www.nngroup.com/articles/horizontal-attention-leans-left/>
+    /// Ref: <https://code.visualstudio.com/api/ux-guidelines/status-bar>, which puts what holds
+    /// for the workspace on the left and what holds for the moment on the right
+    /// Ref: <https://web.dev/articles/cls>, which counts a layout shift only when "existing
+    /// elements change their start position"
     fn make_label(&self) -> Line {
         let shared = lock(&self.shared);
         match &shared.phase {
@@ -1567,7 +1582,8 @@ fn box_line(text: Option<&Line>, columns: NonZeroUsize) -> ScreenRow {
 
 /// The place of the request shown among those that wait, like `2/7`, when more than one waits,
 /// each number counted as `Y` counts, up to 9 and then +, like `2/+` and `+/+`, so the place
-/// always takes 3 columns.
+/// always takes 3 columns. It goes in the title rather than on the label row, which shows only
+/// names that are keys, and no key reaches a place.
 fn request_place(view: &View) -> Option<String> {
     let count = view.requests.len();
     (count > 1).then(|| {
@@ -1636,7 +1652,14 @@ fn agents_indicator(agents: usize) -> Span {
 
 /// What the session waits on, which the label row's last item names, so its width varies at the
 /// row's end and moves nothing else. Each variant holds the text, a verb first and what varies,
-/// like a tool's name, last.
+/// like a tool's name, last. The row ends with one item, the first that holds: the user's own
+/// action, since it is tied to what they just did, then their answer, which Claude waits for,
+/// then Claude. The order between the action and the answer is claudio's own.
+/// Ref: <https://www.nngroup.com/articles/indicators-validations-notifications/>, whose
+/// validations are "tied to a user's action or input" and whose action-required notifications
+/// "are often urgent"
+/// Ref: <https://code.visualstudio.com/api/ux-guidelines/status-bar>, which asks not to "Add more
+/// than one item (unless necessary)"
 #[derive(Debug, PartialEq)]
 enum WaitsOn {
     /// The user to finish an action of theirs: a key that waits for its second press, or a

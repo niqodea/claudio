@@ -1,7 +1,8 @@
 //! The grammar of the conversation as claudio writes it: the marks that set apart what the user
 //! and Claude write, which shows as written, and the lines claudio writes itself. This is the
-//! one place the grammar is written out. The rules for its lines, with their reasons and
-//! sources, are in `AGENTS.md`'s Lines section, which the types here keep.
+//! one place the grammar is written out, and each item here gives the reason for its part, so
+//! a change to the grammar changes its reason with it. The README's Wording section gives the
+//! rules that the words of every line follow.
 //!
 //! ```text
 //! conversation = (message │ user line │ answer │ decision │ reply │ detail line │ boundary)*
@@ -49,7 +50,11 @@ pub const GROUP: &str = " │ ";
 const RULE: &str = "───";
 
 /// The mark in front of a call's line, which says how far the call got, and leaves the line's
-/// colors to the line.
+/// colors to the line. The marks are Primer's, but `○` and `◌`, and `✗` marks a failure as
+/// Dynatrace marks a failed process. A failed call takes no color either: failing is part of
+/// Claude's work, like a search that finds nothing, and Claude deals with it.
+/// Ref: <https://github.com/primer/design/blob/main/content/native/cli/foundations.mdx#iconography>
+/// Ref: <https://developer.dynatrace.com/design/status-and-health>
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallMark {
     /// A call Claude makes.
@@ -94,7 +99,13 @@ impl CallMark {
 }
 
 /// The mark in front of a notice, which says whether it needs the user, and gives the notice
-/// its color, the only color a mark gives.
+/// its color, the only color a mark gives. `!` marks what needs the user, as Dynatrace marks
+/// what needs attention at both its warning and critical levels, and only then does a notice
+/// take a color: red for what failed and needs them, as Carbon's red signals "that user action
+/// is needed immediately", and orange for what they should know. A notice that needs nothing of
+/// them takes `-` and no color, as Carbon asks for plain text where no action is.
+/// Ref: <https://developer.dynatrace.com/design/status-and-health>
+/// Ref: <https://v10.carbondesignsystem.com/patterns/status-indicator-pattern/>
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoticeMark {
     /// A change the user may want to know of, which needs nothing of them, like a compaction.
@@ -129,6 +140,12 @@ impl NoticeMark {
 /// A notice: a header after its mark, in claudio's words, and the text it quotes, like a hook's
 /// error output or what Claude Code says, under it as written. A notice is the only way to
 /// write a line with a notice's mark.
+///
+/// The header names the source, like `Claude Code warns`, so the user always knows whose words
+/// they read, and the quoted text takes no mark, indent or prefix, since claudio never rewrites
+/// words it did not write. A notice of one line takes the same shape as one of many, so a
+/// one-line warning of Claude Code's takes two lines.
+/// Ref: <https://clig.dev/#errors>, which asks to group lines "under a single explanatory header"
 pub struct Notice {
     mark: NoticeMark,
     header: Line,
@@ -172,6 +189,15 @@ impl Notice {
 
     /// A line more of the text a notice of `mark` quotes, for one whose text arrives a line at a
     /// time, like Claude Code's error output, right under the notice's last line.
+    ///
+    /// The quoted text reads as its header's by standing right under it, and the next mark ends
+    /// it, rather than a gutter or a box: nearness groups as strongly as anything but a boundary,
+    /// and a boundary, like a `│` or an indent on every line, clutters, and breaks the text when
+    /// copied, as users of Claude Code report of its indented output.
+    /// Ref: <https://www.nngroup.com/articles/gestalt-proximity/>
+    /// Ref: <https://www.nngroup.com/articles/common-region/>, which warns that overused
+    /// boundaries clutter
+    /// Ref: <https://github.com/anthropics/claude-code/issues/18170>
     pub fn more(mark: NoticeMark, line: &str) -> Line {
         Line::from(Span::new(line, mark.style()))
     }
@@ -183,7 +209,9 @@ pub fn user_line(what: &str) -> Row {
     Line::from([marks(), Span::new(format!(" {what}"), SUBDUED_ON_BAR)]).on(YOURS)
 }
 
-/// The marks in front of a message, on a row of their own.
+/// The marks in front of a message, on a row of their own. `reply_mark`'s `‹‹` starts what
+/// Claude writes the same way and in the same color, since both say who starts: their characters
+/// tell the user's lines from Claude's once the scrollback is copied, without colors.
 pub fn marks() -> Span {
     Span::new("››", MARK)
 }
@@ -194,7 +222,10 @@ pub fn reply_mark() -> Line {
 }
 
 /// The marks in front of a narration, which the API sends only as a summary of what Claude
-/// wrote, on a row of their own.
+/// wrote, on a row of their own, so the user knows they don't read Claude's exact words. The
+/// word goes on the mark's row rather than after the text, where Claude Code's interface puts
+/// ` · summarized`, so claudio's words stay off a line of words from elsewhere, as a `Notice`
+/// keeps them. It is dim, since it says something about the text, which is what the user reads.
 pub fn summarized_reply_mark() -> Line {
     Line::from([Span::new("‹‹", MARK), Span::new(" summarized", SUBDUED)])
 }
@@ -229,7 +260,10 @@ impl std::fmt::Display for Hint<'_> {
     }
 }
 
-/// `parts` as one line's text, each set apart from the next.
+/// `parts` as one line's text, each set apart from the next by ` · `, a hint included, as
+/// `part` sets a part's subject apart from what it says by `: `. No style guide read covers these
+/// separators, so they follow Claude Code's own notices, like `Previous session saved · resume
+/// with: claude --resume <id>`.
 pub fn parts(parts: &[String]) -> String {
     parts.join(PART)
 }
@@ -265,7 +299,8 @@ pub enum SessionEnd {
 }
 
 /// The boundary that names how a session ended, then the command that resumes the session, when
-/// the session's id is known.
+/// the session's id is known. The rules on each side have a fixed length, so the line stays as
+/// wide as its text, and they make the boundary stand out among the lines.
 pub fn session_end(end: SessionEnd, session: Option<&str>) -> Line {
     let event = match end {
         SessionEnd::Cleared => "cleared",

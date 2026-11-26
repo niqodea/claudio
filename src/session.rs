@@ -17,9 +17,10 @@ use crate::picker::Draft;
 use crate::protocol::{Answer, Ask, AskKind, Command};
 use crate::questions::{Questions, Sent};
 use crate::render::{Interruption, Status};
+use crate::termination::Termination;
 use crate::{Shared, lock};
 
-/// What Claude Code asks of the main thread.
+/// What the main thread acts on: what Claude Code asks, or a signal that asks claudio to end.
 pub enum Input {
     Ask(Box<Ask>),
     Unsupported {
@@ -32,6 +33,8 @@ pub enum Input {
     TurnEnded,
     /// Claude Code ended.
     Closed,
+    /// A signal asked claudio to end. The session ends as when Claude Code ended.
+    Terminated,
     /// Claude Code works in a way claudio was not made for, as this error says, which ends the
     /// session.
     Incompatible(String),
@@ -51,6 +54,7 @@ impl<'a> Conversation<'a> {
         shared: Arc<Mutex<Shared>>,
         inputs: Receiver<Input>,
         break_signal: Arc<AtomicBool>,
+        termination: Termination,
         to_claude: ClaudeInput,
         claude: &'a Child,
     ) -> Self {
@@ -60,6 +64,7 @@ impl<'a> Conversation<'a> {
                 shared,
                 inputs,
                 break_signal,
+                termination,
             },
             to_claude,
             claude,
@@ -117,7 +122,7 @@ impl<'a> Conversation<'a> {
                     self.send(&Command::GetContext)?;
                     continue;
                 }
-                Some(Input::Closed) => {
+                Some(Input::Closed | Input::Terminated) => {
                     self.session.close_line()?;
                     return Ok(None);
                 }
@@ -411,7 +416,7 @@ impl Ending<'_> {
     pub fn run(mut self) -> Result<(), String> {
         loop {
             match self.session.next_input() {
-                Some(Input::Closed) => return self.session.close_line(),
+                Some(Input::Closed | Input::Terminated) => return self.session.close_line(),
                 // The ending clears nothing, so a clear that waited has no session left to clear,
                 // and Claude Code's input is closed, so the end of a turn asks it nothing
                 Some(
@@ -461,13 +466,18 @@ struct Session {
     shared: Arc<Mutex<Shared>>,
     inputs: Receiver<Input>,
     break_signal: Arc<AtomicBool>,
+    termination: Termination,
 }
 
 impl Session {
-    /// What Claude Code asks of the main thread, if anything waits.
+    /// What the main thread acts on, if anything waits. A signal that asks claudio to end comes
+    /// first, since nothing else is acted on once claudio ends.
     fn next_input(&self) -> Option<Input> {
         // A break signal raised before the line opens has nothing left to break
         self.break_signal.store(false, Ordering::Relaxed);
+        if self.termination.signal().is_some() {
+            return Some(Input::Terminated);
+        }
         match self.inputs.try_recv() {
             Ok(input) => Some(input),
             Err(TryRecvError::Disconnected) => Some(Input::Closed),

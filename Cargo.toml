@@ -17,6 +17,8 @@ jiff = { version = "0.2", default-features = false, features = ["std"] }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+# To end on a termination signal only once claudio restored the terminal and removed its files
+signal-hook = "0.3"
 # To check the Claude Code it installs against its pinned sha256
 sha2 = "0.10"
 # Only the grammars and a regex engine in Rust, since the terminal's own colors replace its themes

@@ -32,6 +32,7 @@ mod status;
 mod style;
 mod table;
 mod terminal;
+mod termination;
 mod text;
 mod vi;
 mod wording;
@@ -59,6 +60,7 @@ use protocol::{Event, read_events, repeats_a_message};
 use render::Output;
 use session::{Conversation, Ending, Input};
 use terminal::QuietTerminal;
+use termination::Termination;
 use text::Wrap;
 use wording::SessionEnd;
 use work::Work;
@@ -235,7 +237,9 @@ impl Shared {
 /// with.
 pub fn main() -> ExitCode {
     match run() {
-        Ok(code) => code,
+        Ok(Exit::Code(code)) => code,
+        // run() restored the terminal and removed claudio's files as it returned
+        Ok(Exit::Signal(signal)) => termination::end_by(signal),
         Err(error) => {
             eprintln!("{error}");
             ExitCode::FAILURE
@@ -243,17 +247,28 @@ pub fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<ExitCode, String> {
+/// How claudio ends.
+enum Exit {
+    Code(ExitCode),
+    /// By the signal that asked it to end, once it restored the terminal and removed its files.
+    Signal(std::ffi::c_int),
+}
+
+fn run() -> Result<Exit, String> {
     let mut args = env::args().skip(1).peekable();
     if let Some(code) = run_subcommand(&mut args)? {
-        return Ok(code);
+        return Ok(Exit::Code(code));
     }
     let Some(start) = parse(args)? else {
         println!("{USAGE}");
-        return Ok(ExitCode::SUCCESS);
+        return Ok(Exit::Code(ExitCode::SUCCESS));
     };
     let program = claude_code::program()?;
     let config = Config::read()?;
+    let break_signal = Arc::new(AtomicBool::new(false));
+    // Caught before claudio changes the terminal's settings or creates a file
+    let termination = Termination::catch(&break_signal)
+        .map_err(|error| format!("cannot catch the signals that end claudio: {error}"))?;
     let quiet_terminal = QuietTerminal::new()?;
     let prose_wrap = terminal::prose_wrap(config.prose_wrap)?;
     // vi when EDITOR is unset or empty, since POSIX requires a vi on every system it covers
@@ -275,8 +290,7 @@ fn run() -> Result<ExitCode, String> {
     let from_claude = claude.stdout.take().expect("stdout is piped");
     let errors_from_claude = claude.stderr.take().expect("stderr is piped");
 
-    // Removed when the client ends. A signal that ends the client, like SIGHUP when its terminal
-    // closes, leaves it in the temporary directory
+    // Removed when the client ends, also by a signal it catches
     let full_view = tempfile::Builder::new()
         .prefix("claudio-")
         .tempfile()
@@ -300,7 +314,6 @@ fn run() -> Result<ExitCode, String> {
         work: Work::default(),
         is_clear_waiting: false,
     }));
-    let break_signal = Arc::new(AtomicBool::new(false));
     let (input_sender, inputs) = mpsc::channel();
 
     let reader_shared = Arc::clone(&shared);
@@ -335,13 +348,19 @@ fn run() -> Result<ExitCode, String> {
         Arc::clone(&shared),
         inputs,
         break_signal,
+        termination.clone(),
         to_claude,
         &claude,
     );
     let result = conversation
         .run(start.command.as_deref())
         .and_then(|ending| ending.map_or(Ok(()), Ending::run));
-    end(claude, [reader, errors_reader], &shared, result)
+    // A signal skips the end, since the end waits for Claude to finish its work.
+    // Claude Code, its input closed, finishes on its own.
+    if let Some(signal) = termination.signal() {
+        return Ok(Exit::Signal(signal));
+    }
+    end(claude, [reader, errors_reader], &shared, result).map(Exit::Code)
 }
 
 /// Runs the subcommand of claudio's own that `args` start with, if any, and returns the exit

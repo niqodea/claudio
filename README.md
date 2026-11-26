@@ -165,6 +165,8 @@ While tasks run in the background, it waits for them to end before it clears, so
 Meanwhile Enter and Ctrl+L wait too, and Ctrl+K stops the tasks, after which the clear goes through.
 A boundary, `─── cleared ─── · resume with claudio --resume <id>`, ends the old session and starts the new one, and its command resumes the old one, when the old one holds anything to resume.
 When claudio ends, the session closes the same way, with `─── ended ───`.
+Closing the terminal, or `kill`, ends claudio at once, without that boundary.
+Claude Code then finishes its turn and its background tasks on its own, out of view.
 Text you send that starts with `/` reaches Claude as written, so a `/clear` you type is a message like any other.
 
 ## Commands

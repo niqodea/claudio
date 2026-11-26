@@ -167,10 +167,10 @@ fn read_answers(answers: &[u8]) -> Option<bool> {
     })
 }
 
-/// Runs `command` in the terminal and waits for it, as POSIX `system` does: with the terminal's
-/// `original` settings, where Ctrl+C and Ctrl+\ send their signals, which the client ignores
-/// meanwhile and the command takes with their default actions. The client's settings return
-/// once the command ends.
+/// Runs `command` in the terminal and waits for it, as POSIX `system` does. The command runs with
+/// the terminal's `original` settings, where Ctrl+C and Ctrl+\ send their signals. The client
+/// ignores those signals meanwhile, and the command takes them with their default actions. The
+/// client's settings return once the command ends.
 pub fn run_in_terminal(original: Settings, command: &mut Command) -> io::Result<ExitStatus> {
     let client = read_settings()?;
     // SAFETY: signal is async-signal-safe, so the child may call it between fork and exec
@@ -181,23 +181,46 @@ pub fn run_in_terminal(original: Settings, command: &mut Command) -> io::Result<
             Ok(())
         });
     }
-    // SAFETY: setting a signal to be ignored runs no code of the client's
-    let (interrupt, quit) = unsafe {
-        (
-            libc::signal(libc::SIGINT, libc::SIG_IGN),
-            libc::signal(libc::SIGQUIT, libc::SIG_IGN),
-        )
-    };
+    let _interrupt = Ignored::new(libc::SIGINT)?;
+    let _quit = Ignored::new(libc::SIGQUIT)?;
     let status = write_settings(original, libc::TCSANOW).and_then(|()| command.status());
     // Restoring the client's settings fails only when the terminal is gone, which leaves the
     // session nothing to show anyway
     let restored = write_settings(client, libc::TCSANOW);
-    // SAFETY: the actions are the ones the client had before
-    unsafe {
-        libc::signal(libc::SIGINT, interrupt);
-        libc::signal(libc::SIGQUIT, quit);
-    }
     restored.and(status)
+}
+
+/// A signal the client ignores until this is dropped. It then gets back the action it had,
+/// whole, with the flags that `signal` would drop, like `SA_SIGINFO` for a handler that reads the
+/// signal's details.
+struct Ignored {
+    signal: libc::c_int,
+    previous: libc::sigaction,
+}
+
+impl Ignored {
+    fn new(signal: libc::c_int) -> io::Result<Self> {
+        // SAFETY: an all-zero sigaction is a valid one, with an empty mask and no flags
+        let mut ignore: libc::sigaction = unsafe { std::mem::zeroed() };
+        ignore.sa_sigaction = libc::SIG_IGN;
+        let mut previous = MaybeUninit::<libc::sigaction>::uninit();
+        // SAFETY: sigaction reads the new action and fills the previous one when it returns 0
+        if unsafe { libc::sigaction(signal, &raw const ignore, previous.as_mut_ptr()) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Ignored {
+            signal,
+            // SAFETY: sigaction returned 0 above, so it filled the previous action
+            previous: unsafe { previous.assume_init() },
+        })
+    }
+}
+
+impl Drop for Ignored {
+    fn drop(&mut self) {
+        // SAFETY: the action is the one the signal had before, whole
+        unsafe { libc::sigaction(self.signal, &raw const self.previous, std::ptr::null_mut()) };
+    }
 }
 
 fn read_settings() -> io::Result<Settings> {
@@ -221,9 +244,22 @@ fn write_settings(settings: Settings, when: libc::c_int) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
 
     const ATTRIBUTES: &[u8] = b"\x1b[?62;22c";
+
+    #[test]
+    fn an_ignored_signal_gets_its_handler_back() {
+        // SIGUSR2, which POSIX leaves to applications, so the system never sends it
+        let caught = Arc::new(AtomicBool::new(false));
+        signal_hook::flag::register(libc::SIGUSR2, Arc::clone(&caught)).expect("a handler");
+        drop(Ignored::new(libc::SIGUSR2).expect("ignored"));
+        signal_hook::low_level::raise(libc::SIGUSR2).expect("raised");
+        assert!(caught.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn the_answers_say_nothing_until_the_device_attributes_end() {

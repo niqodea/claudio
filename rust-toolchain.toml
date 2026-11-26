@@ -1,0 +1,4 @@
+[toolchain]
+# Each release adds clippy lints, and ./lint denies warnings
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]

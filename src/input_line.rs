@@ -21,12 +21,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use crossterm::cursor::{self, Hide, MoveRight, MoveTo, SetCursorStyle, Show};
-use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers,
+use termina::escape::csi::{
+    self, Csi, Cursor as CsiCursor, DecPrivateMode, DecPrivateModeCode, Edit, EraseInDisplay,
 };
-use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
+use termina::event::{KeyCode, KeyEvent, KeyEventKind, Modifiers};
+use termina::style::CursorStyle;
+use termina::{Event, EventReader, OneBased};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::claude_input::ClaudeInput;
@@ -49,7 +49,7 @@ use crate::style::{
     ATTENTION, AWAITS_YOU, DONE_OR_ADDED, FAILED_OR_REMOVED, MARK, PLAIN, STRONG, SUBDUED,
     SUBDUED_ON_BAR, YOURS,
 };
-use crate::terminal::{Settings, run_in_terminal};
+use crate::terminal::{QuietTerminal, Settings, run_in_terminal};
 use crate::text::{Line, Span, Text};
 use crate::vi::{Editor, Mode};
 use crate::wording::{GROUP, Hint, PART, marks, with_hint};
@@ -81,16 +81,43 @@ const ASK_EVERY: Duration = Duration::from_secs(1);
 const BEGIN_FRAME: &str = "\x1b[?2026h";
 const END_FRAME: &str = "\x1b[?2026l";
 
-/// Writes crossterm's commands to `out`, a frame in memory, which writing cannot fail.
+/// Writes escape sequences to `out`, a frame in memory.
 macro_rules! put {
-    ($out:expr, $($command:expr),+ $(,)?) => {
-        $({
-            let mut text = String::new();
-            // Formatting into a String never fails
-            let _ = crossterm::Command::write_ansi(&$command, &mut text);
-            $out.extend(text.as_bytes());
-        })+
+    ($out:expr, $($sequence:expr),+ $(,)?) => {
+        $($out.extend($sequence.to_string().as_bytes());)+
     };
+}
+
+const SHOW_CURSOR: Csi = dec_mode(DecPrivateModeCode::ShowCursor, true);
+const HIDE_CURSOR: Csi = dec_mode(DecPrivateModeCode::ShowCursor, false);
+const ENTER_ALTERNATE_SCREEN: Csi =
+    dec_mode(DecPrivateModeCode::ClearAndEnableAlternateScreen, true);
+const LEAVE_ALTERNATE_SCREEN: Csi =
+    dec_mode(DecPrivateModeCode::ClearAndEnableAlternateScreen, false);
+const ENABLE_BRACKETED_PASTE: Csi = dec_mode(DecPrivateModeCode::BracketedPaste, true);
+const DISABLE_BRACKETED_PASTE: Csi = dec_mode(DecPrivateModeCode::BracketedPaste, false);
+const CLEAR_SCREEN: Csi = Csi::Edit(Edit::EraseInDisplay(EraseInDisplay::EraseDisplay));
+
+/// Sets the terminal's DEC private mode `code`, or resets it.
+const fn dec_mode(code: DecPrivateModeCode, is_set: bool) -> Csi {
+    let mode = DecPrivateMode::Code(code);
+    Csi::Mode(if is_set {
+        csi::Mode::SetDecPrivateMode(mode)
+    } else {
+        csi::Mode::ResetDecPrivateMode(mode)
+    })
+}
+
+/// Moves the cursor to `column` and `row`, from 0.
+const fn move_to(column: u16, row: u16) -> Csi {
+    Csi::Cursor(CsiCursor::Position {
+        line: OneBased::from_zero_based(row),
+        col: OneBased::from_zero_based(column),
+    })
+}
+
+const fn cursor_style(style: CursorStyle) -> Csi {
+    Csi::Cursor(CsiCursor::CursorStyle(style))
 }
 
 /// How reading the input line ended, with `D`, the draft: the text on the line, or the pick of
@@ -165,6 +192,8 @@ pub struct InputLine {
     /// The terminal's settings from before the client changed them, for the programs the
     /// client runs in it.
     original_settings: Settings,
+    /// What the terminal sends.
+    events: EventReader,
     /// The rows the user chose for the input box, which a short screen gives fewer.
     input_rows: NonZeroU16,
     /// Whether the line Claude still writes shows among the live rows, or waits until it ends.
@@ -215,19 +244,17 @@ impl InputLine {
     pub fn new(
         editor_command: String,
         full_view: PathBuf,
-        original_settings: Settings,
+        terminal: &QuietTerminal,
         config: &Config,
         break_signal: Arc<AtomicBool>,
         shared: Arc<Mutex<Shared>>,
         to_claude: ClaudeInput,
     ) -> Result<Self, String> {
-        let (width, height) = terminal::size().map_err(|error| cannot_read_terminal(&error))?;
-        let (column, row) = cursor::position().map_err(|error| cannot_read_terminal(&error))?;
+        let (width, height) = terminal.size()?;
+        let (column, row) = terminal.cursor_position()?;
         let row = if column > 0 {
             write_out(b"\r\n")?;
-            cursor::position()
-                .map_err(|error| cannot_read_terminal(&error))?
-                .1
+            terminal.cursor_position()?.1
         } else {
             row
         };
@@ -237,11 +264,11 @@ impl InputLine {
         if row > lowest {
             scroll_screen(&mut out, layout, row - lowest);
         }
-        put!(out, MoveTo(0, row.min(lowest)), EnableBracketedPaste);
+        put!(out, move_to(0, row.min(lowest)), ENABLE_BRACKETED_PASTE);
         write_out(&out)?;
         // The check needs a row below the cursor, which a screen of one row lacks
         let climb = if height >= 2 {
-            climb::check()?
+            climb::check(terminal)?
         } else {
             Climb::Counted
         };
@@ -254,7 +281,8 @@ impl InputLine {
             to_claude,
             editor_command,
             full_view,
-            original_settings,
+            original_settings: terminal.original(),
+            events: terminal.events(),
             input_rows: config.input_rows,
             stream: config.stream,
             editor: Editor::new(""),
@@ -359,10 +387,10 @@ impl InputLine {
             if self.make_label() != self.label {
                 self.draw()?;
             }
-            if !event::poll(TICK).map_err(|error| cannot_read_terminal(&error))? {
+            if !self.poll_event()? {
                 continue;
             }
-            match event::read().map_err(|error| cannot_read_terminal(&error))? {
+            match self.read_event()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     let action = self.begin_key(&key);
                     if let Some(outcome) = reading.key(self, key, action)? {
@@ -370,11 +398,21 @@ impl InputLine {
                     }
                 }
                 Event::Paste(text) if lock(&self.shared).phase.takes_text() => self.paste(&text),
-                Event::Resize(width, height) => self.resize(width, height),
+                Event::WindowResized(size) => self.resize(size.cols, size.rows),
                 _ => continue,
             }
             self.draw()?;
         }
+    }
+
+    /// Whether the terminal sent something within a `TICK`.
+    fn poll_event(&self) -> Result<bool, String> {
+        (self.events.poll(Some(TICK), |_| true)).map_err(|error| cannot_read_terminal(&error))
+    }
+
+    /// What the terminal sent next, which `poll_event` said is there.
+    fn read_event(&self) -> Result<Event, String> {
+        (self.events.read(|_| true)).map_err(|error| cannot_read_terminal(&error))
     }
 
     /// Takes the bottom of the terminal away, once the session ended, and prints the rest of the
@@ -396,13 +434,17 @@ impl InputLine {
             self.drawn.width,
         );
         out.extend(climb::ERASE_DOWN.as_bytes());
-        put!(out, SetCursorStyle::DefaultUserShape, DisableBracketedPaste);
+        put!(
+            out,
+            cursor_style(CursorStyle::Default),
+            DISABLE_BRACKETED_PASTE
+        );
         let pending = std::mem::take(&mut self.pending);
         out.extend(pending.to_terminal("\r\n").as_bytes());
         if self.climb == Climb::Exact {
             out.extend(climb::BACKSPACE_WRAPS_OFF.as_bytes());
         }
-        put!(out, Show);
+        put!(out, SHOW_CURSOR);
         write_out(&out)
     }
 
@@ -416,9 +458,9 @@ impl InputLine {
     fn switch_screen(&mut self) -> Result<(), String> {
         let mut out = Vec::new();
         if self.in_view {
-            put!(out, LeaveAlternateScreen);
+            put!(out, LEAVE_ALTERNATE_SCREEN);
         } else {
-            put!(out, EnterAlternateScreen);
+            put!(out, ENTER_ALTERNATE_SCREEN);
         }
         write_out(&out)?;
         self.in_view = !self.in_view;
@@ -505,7 +547,7 @@ impl InputLine {
                 _ => self.edit_in_editor()?,
             },
             Action::Edit => match &mut self.command_line {
-                Some(_) if key.code == KeyCode::Esc => self.command_line = None,
+                Some(_) if key.code == KeyCode::Escape => self.command_line = None,
                 Some(line) => line.press(&key),
                 None => self.editor.press(&key),
             },
@@ -810,14 +852,14 @@ impl InputLine {
         // The question view is on the alternate screen already, and draws itself again after
         let mut out = Vec::new();
         if !self.in_view {
-            put!(out, EnterAlternateScreen);
+            put!(out, ENTER_ALTERNATE_SCREEN);
         }
-        put!(out, Hide);
+        put!(out, HIDE_CURSOR);
         write_out(&out)?;
         let shown = self.show_screen_until_closed(rows, refresh);
         let mut out = Vec::new();
         if !self.in_view {
-            put!(out, LeaveAlternateScreen);
+            put!(out, LEAVE_ALTERNATE_SCREEN);
         }
         let left = write_out(&out);
         if let Some((width, height)) = shown? {
@@ -850,20 +892,20 @@ impl InputLine {
                 .collect();
             let top = height.saturating_sub(u16::try_from(shown.len()).unwrap_or(u16::MAX));
             let mut frame = Vec::new();
-            put!(frame, Clear(ClearType::All), MoveTo(0, top));
+            put!(frame, CLEAR_SCREEN, move_to(0, top));
             frame.extend(shown.join("\r\n").as_bytes());
             if frame != drawn {
                 write_out(&frame)?;
                 drawn = frame;
             }
-            if !event::poll(TICK).map_err(|error| cannot_read_terminal(&error))? {
+            if !self.poll_event()? {
                 continue;
             }
-            match event::read().map_err(|error| cannot_read_terminal(&error))? {
+            match self.read_event()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => break,
-                Event::Resize(new_width, new_height) => {
-                    (width, height) = (new_width, new_height);
-                    resized = Some((new_width, new_height));
+                Event::WindowResized(size) => {
+                    (width, height) = (size.cols, size.rows);
+                    resized = Some((width, height));
                 }
                 _ => {}
             }
@@ -906,15 +948,19 @@ impl InputLine {
         command: &mut process::Command,
     ) -> Result<io::Result<ExitStatus>, String> {
         let mut out = Vec::new();
-        put!(out, DisableBracketedPaste, SetCursorStyle::DefaultUserShape);
+        put!(
+            out,
+            DISABLE_BRACKETED_PASTE,
+            cursor_style(CursorStyle::Default)
+        );
         write_out(&out)?;
         let status = run_in_terminal(self.original_settings, command);
         let mut out = Vec::new();
         // A program that draws on the alternate screen leaves it as it ends
         if self.in_view {
-            put!(out, EnterAlternateScreen);
+            put!(out, ENTER_ALTERNATE_SCREEN);
         }
-        put!(out, EnableBracketedPaste);
+        put!(out, ENABLE_BRACKETED_PASTE);
         write_out(&out)?;
         Ok(status)
     }
@@ -958,7 +1004,7 @@ impl InputLine {
         let layout = self.layout;
         let mut out = Vec::new();
         out.extend(BEGIN_FRAME.as_bytes());
-        put!(out, Hide);
+        put!(out, HIDE_CURSOR);
         climb::write(
             &mut out,
             self.climb,
@@ -1025,13 +1071,13 @@ impl InputLine {
             layout.width,
         );
         if cursor_column > 0 {
-            put!(out, MoveRight(cursor_column));
+            put!(out, Csi::Cursor(CsiCursor::Right(u32::from(cursor_column))));
         }
         self.drawn = Drawn {
             lines_above_cursor: to_u16(cursor_line),
             width: layout.width,
         };
-        put!(out, self.cursor_shape(), Show);
+        put!(out, cursor_style(self.cursor_shape()), SHOW_CURSOR);
         out.extend(END_FRAME.as_bytes());
         write_out(&out)
     }
@@ -1044,7 +1090,7 @@ impl InputLine {
         let layout = self.layout;
         let mut out = Vec::new();
         out.extend(BEGIN_FRAME.as_bytes());
-        put!(out, Hide);
+        put!(out, HIDE_CURSOR);
         let rows = ViewRows::new(layout.height, self.input_rows.get(), view.choices.len());
         self.draw_question(&mut out, view, rows);
         if layout.label_rows > 0 {
@@ -1058,7 +1104,12 @@ impl InputLine {
         if self.pick.cursor == Cursor::Writing && !view.is_submitted {
             let row = (rows.box_top + u16::try_from(cursor_row_in_box).unwrap_or(u16::MAX))
                 .min(layout.height.saturating_sub(1));
-            put!(out, MoveTo(cursor_column, row), self.cursor_shape(), Show);
+            put!(
+                out,
+                move_to(cursor_column, row),
+                cursor_style(self.cursor_shape()),
+                SHOW_CURSOR
+            );
         }
         out.extend(END_FRAME.as_bytes());
         write_out(&out)
@@ -1098,11 +1149,11 @@ impl InputLine {
 
     /// The cursor's shape: a bar to insert text, as in the command line, and a block for vi's
     /// other modes.
-    fn cursor_shape(&self) -> SetCursorStyle {
+    fn cursor_shape(&self) -> CursorStyle {
         match self.editor.mode() {
-            _ if self.command_line.is_some() => SetCursorStyle::SteadyBar,
-            Mode::Insert => SetCursorStyle::SteadyBar,
-            Mode::Normal | Mode::Visual | Mode::VisualLine => SetCursorStyle::SteadyBlock,
+            _ if self.command_line.is_some() => CursorStyle::SteadyBar,
+            Mode::Insert => CursorStyle::SteadyBar,
+            Mode::Normal | Mode::Visual | Mode::VisualLine => CursorStyle::SteadyBlock,
         }
     }
 
@@ -1167,7 +1218,7 @@ impl InputLine {
     /// when it is wider than the screen, since a line that wrapped would push the rows below it
     /// out of place. When there are more options than rows, they scroll to keep the cursor in view.
     fn draw_question(&self, out: &mut Vec<u8>, view: &View, rows: ViewRows) {
-        put!(out, Clear(ClearType::All));
+        put!(out, CLEAR_SCREEN);
         let columns = self.columns();
         let mut fields = view.fields.clone();
         if let Some(preview) = picker::preview(&view.choices, &self.pick) {
@@ -1509,7 +1560,7 @@ fn terminal_rows(line: &Line, width: usize) -> Vec<Line> {
 
 /// Scrolls the whole screen up by `rows`, which sends its top rows to the scrollback.
 fn scroll_screen(out: &mut Vec<u8>, layout: Layout, rows: u16) {
-    put!(out, MoveTo(0, layout.height.saturating_sub(1)));
+    put!(out, move_to(0, layout.height.saturating_sub(1)));
     for _ in 0..rows {
         out.extend(b"\n");
     }
@@ -2011,7 +2062,7 @@ fn word_rows(text: &str, width: usize) -> Vec<String> {
 
 /// Writes `line` on `row`, from its start.
 fn put_line(out: &mut Vec<u8>, row: u16, line: &ScreenRow) {
-    put!(out, MoveTo(0, row));
+    put!(out, move_to(0, row));
     out.extend(line.to_terminal().as_bytes());
 }
 
@@ -2086,7 +2137,7 @@ impl ViewRows {
 
 /// The Esc key, which takes the box to normal mode.
 fn escape() -> KeyEvent {
-    KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+    KeyEvent::new(KeyCode::Escape, Modifiers::NONE)
 }
 
 /// What Claude does, none while it waits for the user, which names a call by `work`.

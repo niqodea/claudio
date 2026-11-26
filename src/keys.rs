@@ -3,7 +3,7 @@
 //! works on the text: Enter sends it, and the rest edit it with the vi keys of the input box. In
 //! the question view, they also move between the options above the box.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use termina::event::{KeyCode, KeyEvent, Modifiers};
 
 use crate::context::Held;
 use crate::picker::{Choice, Form};
@@ -224,7 +224,7 @@ pub enum SessionKey {
 impl SessionKey {
     /// The session key that `key` is, from the key alone.
     fn of(key: &KeyEvent) -> Option<SessionKey> {
-        if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        if !key.modifiers.contains(Modifiers::CONTROL) {
             return None;
         }
         match key.code {
@@ -660,13 +660,21 @@ pub fn questions(count: usize) -> String {
 /// stays the character it types, like `j`.
 pub fn name(key: &KeyEvent) -> String {
     let base = match key.code {
-        // crossterm names it Return on macOS, where the README says Enter
-        KeyCode::Enter => "Enter".to_string(),
         KeyCode::Char(' ') => "Space".to_string(),
         KeyCode::Char(character) => character.to_string(),
-        code => code.to_string(),
+        KeyCode::Enter => "Enter".to_string(),
+        KeyCode::Escape => "Esc".to_string(),
+        KeyCode::Backspace => "Backspace".to_string(),
+        KeyCode::Delete => "Del".to_string(),
+        KeyCode::Tab => "Tab".to_string(),
+        KeyCode::BackTab => "Back Tab".to_string(),
+        KeyCode::PageUp => "Page Up".to_string(),
+        KeyCode::PageDown => "Page Down".to_string(),
+        KeyCode::Function(number) => format!("F{number}"),
+        // Like Left, Home or Insert
+        code => format!("{code:?}"),
     };
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
+    if key.modifiers.contains(Modifiers::CONTROL) {
         format!("Ctrl+{}", base.to_uppercase())
     } else {
         base
@@ -746,11 +754,11 @@ mod tests {
     }
 
     fn control(character: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
+        KeyEvent::new(KeyCode::Char(character), Modifiers::CONTROL)
     }
 
     fn plain(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
+        KeyEvent::new(code, Modifiers::NONE)
     }
 
     fn writing(waiting: usize) -> Phase {
@@ -796,7 +804,7 @@ mod tests {
                 (control('w'), false, Action::Edit),
                 (plain(KeyCode::Enter), false, Action::Send),
                 (plain(KeyCode::Char('r')), false, Action::Edit),
-                (plain(KeyCode::Esc), false, Action::Edit),
+                (plain(KeyCode::Escape), false, Action::Edit),
             ];
             for (key, is_empty, expected) in cases {
                 assert_eq!(action(&phase, &key, input(is_empty)), expected);
@@ -824,7 +832,7 @@ mod tests {
         let enter = plain(KeyCode::Enter);
         assert_eq!(action(&writing(0), &enter, commanding), Action::Run);
         let tab = plain(KeyCode::Tab);
-        let back_tab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        let back_tab = KeyEvent::new(KeyCode::BackTab, Modifiers::SHIFT);
         let complete = |is_backward| Action::Complete { is_backward };
         assert_eq!(action(&writing(0), &tab, commanding), complete(false));
         assert_eq!(action(&writing(0), &back_tab, commanding), complete(true));
@@ -1062,7 +1070,7 @@ mod tests {
         assert_eq!(name(&control('c')), "Ctrl+C");
         assert_eq!(name(&plain(KeyCode::Enter)), "Enter");
         assert_eq!(name(&plain(KeyCode::Char(' '))), "Space");
-        assert_eq!(name(&plain(KeyCode::Esc)), "Esc");
+        assert_eq!(name(&plain(KeyCode::Escape)), "Esc");
         assert_eq!(name(&plain(KeyCode::Char('2'))), "2");
     }
 

@@ -23,7 +23,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::process;
 use std::ptr;
 
-use crossterm::terminal;
+use termina::{PlatformTerminal, Terminal};
 
 fn main() {
     let arguments: Vec<String> = env::args().skip(1).collect();
@@ -59,7 +59,9 @@ fn relay(commands: &str, output_log: &str, program: &[String]) -> io::Result<()>
     if pid == 0 {
         exec(program);
     }
-    terminal::enable_raw_mode()?;
+    // Gives the terminal its settings back as it is dropped, once the relay ends
+    let mut terminal = PlatformTerminal::new()?;
+    terminal.enter_raw_mode()?;
     // Opened for writing too, so the pipe never ends when a writer closes it
     let mut commands = OpenOptions::new()
         .read(true)
@@ -135,7 +137,7 @@ fn relay(commands: &str, output_log: &str, program: &[String]) -> io::Result<()>
             }
         }
     }
-    terminal::disable_raw_mode()
+    Ok(())
 }
 
 /// Runs `program` in place of the child, which forkpty set up on the pseudo-terminal.

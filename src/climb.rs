@@ -39,10 +39,8 @@
 //! [wcwidth]: https://pypi.org/project/wcwidth/
 //! [reverse-wraparound]: https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
 
-use crossterm::cursor;
-use crossterm::terminal;
-
-use crate::input_line::{cannot_read_terminal, write_out};
+use crate::input_line::write_out;
+use crate::terminal::QuietTerminal;
 
 /// Lets a backspace at a row's first column move to the row above, in terminals like xterm that
 /// keep it off by default. Others, tmux among them, have no such mode and ignore it.
@@ -112,24 +110,24 @@ fn backspace_to_line_start(out: &mut Vec<u8>, width: u16) {
 /// A resize meanwhile wraps the spaces again, so the check runs again until the screen's size
 /// stays the same throughout. It fails when the terminal does not tell the cursor's place in
 /// time.
-pub fn check() -> Result<Climb, String> {
+pub fn check(terminal: &QuietTerminal) -> Result<Climb, String> {
     loop {
-        let size = terminal::size().map_err(|error| cannot_read_terminal(&error))?;
-        let climb = check_once(size.0)?;
-        if terminal::size().map_err(|error| cannot_read_terminal(&error))? == size {
+        let size = terminal.size()?;
+        let climb = check_once(terminal, size.0)?;
+        if terminal.size()? == size {
             return Ok(climb);
         }
     }
 }
 
-fn check_once(width: u16) -> Result<Climb, String> {
-    let (_, start) = cursor::position().map_err(|error| cannot_read_terminal(&error))?;
+fn check_once(terminal: &QuietTerminal, width: u16) -> Result<Climb, String> {
+    let (_, start) = terminal.cursor_position()?;
     let mut out = Vec::new();
     out.extend(BACKSPACE_WRAPS_ON.as_bytes());
     out.extend(" ".repeat(usize::from(width) + 1).as_bytes());
     backspace_to_line_start(&mut out, width);
     write_out(&out)?;
-    let (column, row) = cursor::position().map_err(|error| cannot_read_terminal(&error))?;
+    let (column, row) = terminal.cursor_position()?;
     let climb = if (column, row) == (0, start) {
         Climb::Exact
     } else {

@@ -12,7 +12,6 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
-crossterm = "0.29"
 # Only to read timestamps, so without the time zone database
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 libc = "0.2"
@@ -24,6 +23,9 @@ sha2 = "0.10"
 syntect = { version = "5", default-features = false, features = ["default-syntaxes", "regex-fancy"] }
 # The file of the full view, removed when the client ends
 tempfile = "3"
+# Reads what the terminal sends, and stops at a terminal that closed, where crossterm 0.29 reads
+# on at full CPU: https://github.com/crossterm-rs/crossterm/issues/793
+termina = "0.4"
 # Only to read the config file
 toml = { version = "1.2.1", default-features = false, features = ["std", "parse", "serde"] }
 unicode-width = "0.2"

@@ -324,7 +324,7 @@ fn run() -> Result<ExitCode, String> {
     let input = InputLine::new(
         editor_command,
         full_view.path().to_path_buf(),
-        quiet_terminal.original(),
+        &quiet_terminal,
         &config,
         Arc::clone(&break_signal),
         Arc::clone(&shared),

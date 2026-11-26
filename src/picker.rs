@@ -17,7 +17,7 @@
 
 use std::collections::BTreeSet;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use termina::event::{KeyCode, KeyEvent};
 
 use crate::keys::Input;
 use crate::markdown::is_fence;
@@ -326,7 +326,7 @@ impl Pick {
                 }
                 Effect::Stay
             }
-            (KeyCode::Esc, _, _) => Effect::Back,
+            (KeyCode::Escape, _, _) => Effect::Back,
             _ => Effect::Stay,
         }
     }
@@ -339,7 +339,7 @@ impl Pick {
                 self.is_own_ticked = !input.is_empty;
                 self.leave_box()
             }
-            (KeyCode::Esc, _) if input.is_idle => self.leave_box(),
+            (KeyCode::Escape, _) if input.is_idle => self.leave_box(),
             (KeyCode::Char(']'), _) if input.is_idle => Effect::Go(Move::Next),
             (KeyCode::Char('['), _) if input.is_idle => Effect::Go(Move::Previous),
             (KeyCode::Char('}'), _) if input.is_idle => Effect::Go(Move::NextRequest),
@@ -353,7 +353,7 @@ impl Pick {
         match (key.code, move_of(key)) {
             (_, Some(to)) => Effect::Go(to),
             (KeyCode::Enter, _) => Effect::Submit,
-            (KeyCode::Esc, _) => Effect::Back,
+            (KeyCode::Escape, _) => Effect::Back,
             _ => Effect::Stay,
         }
     }
@@ -551,7 +551,7 @@ pub fn hint(form: Form, pick: &Pick, choices: usize, sends_at_once: bool) -> Str
 mod tests {
     use super::*;
 
-    use crossterm::event::KeyModifiers;
+    use termina::event::Modifiers;
 
     const IDLE: Input = Input {
         is_idle: true,
@@ -569,7 +569,7 @@ mod tests {
     fn press(pick: &mut Pick, form: Form, keys: &str) -> Vec<Effect> {
         keys.chars()
             .map(|character| {
-                let key = KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE);
+                let key = KeyEvent::new(KeyCode::Char(character), Modifiers::NONE);
                 pick.press(&key, &numbered(3), form, IDLE)
             })
             .collect()
@@ -577,7 +577,7 @@ mod tests {
 
     fn press_code(pick: &mut Pick, form: Form, code: KeyCode, input: Input) -> Effect {
         pick.press(
-            &KeyEvent::new(code, KeyModifiers::NONE),
+            &KeyEvent::new(code, Modifiers::NONE),
             &numbered(3),
             form,
             input,
@@ -598,7 +598,7 @@ mod tests {
 
     #[test]
     fn a_letter_only_moves_to_its_option_and_enter_answers() {
-        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let key = |code| KeyEvent::new(code, Modifiers::NONE);
         let mut pick = pick(Cursor::Option(1));
         assert_eq!(
             pick.press(&key(KeyCode::Char('y')), &decision(), Form::One, IDLE),
@@ -697,11 +697,11 @@ mod tests {
         };
         let mut esc = pick(Cursor::Writing);
         assert_eq!(
-            press_code(&mut esc, Form::Several, KeyCode::Esc, typing),
+            press_code(&mut esc, Form::Several, KeyCode::Escape, typing),
             Effect::Type
         );
         assert_eq!(
-            press_code(&mut esc, Form::Several, KeyCode::Esc, IDLE),
+            press_code(&mut esc, Form::Several, KeyCode::Escape, IDLE),
             Effect::StopWriting
         );
         assert!(!esc.is_own_ticked);
@@ -746,9 +746,9 @@ mod tests {
 
     #[test]
     fn a_submitted_question_takes_only_enter_esc_and_brackets() {
-        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let key = |code| KeyEvent::new(code, Modifiers::NONE);
         assert_eq!(Pick::press_submitted(&key(KeyCode::Enter)), Effect::Submit);
-        assert_eq!(Pick::press_submitted(&key(KeyCode::Esc)), Effect::Back);
+        assert_eq!(Pick::press_submitted(&key(KeyCode::Escape)), Effect::Back);
         assert_eq!(
             Pick::press_submitted(&key(KeyCode::Char(']'))),
             Effect::Go(Move::Next)
@@ -762,7 +762,7 @@ mod tests {
     fn esc_goes_back_and_brackets_and_asdf_move_between_questions() {
         let mut pick = pick(Cursor::Option(0));
         assert_eq!(
-            press_code(&mut pick, Form::One, KeyCode::Esc, IDLE),
+            press_code(&mut pick, Form::One, KeyCode::Escape, IDLE),
             Effect::Back
         );
         assert_eq!(

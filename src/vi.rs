@@ -29,7 +29,7 @@
 //!   help rather than ported, and Ctrl+W in insert mode uses `b`, where vim has a function of
 //!   its own
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use termina::event::{KeyCode, KeyEvent, Modifiers};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
@@ -1567,11 +1567,11 @@ fn is_change(command: Command) -> bool {
 }
 
 fn key_of(event: &KeyEvent) -> Option<Key> {
-    let is_control = event.modifiers.contains(KeyModifiers::CONTROL);
+    let is_control = event.modifiers.contains(Modifiers::CONTROL);
     Some(match event.code {
         KeyCode::Char(character) if is_control => Key::Control(character),
         KeyCode::Char(character) => Key::Char(character),
-        KeyCode::Esc => Key::Escape,
+        KeyCode::Escape => Key::Escape,
         KeyCode::Backspace => Key::Backspace,
         KeyCode::Delete => Key::Delete,
         KeyCode::Left => Key::Left,
@@ -1792,11 +1792,11 @@ mod tests {
             {
                 let name = &rest[1..end];
                 let event = match name {
-                    "Esc" => Some(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-                    "BS" => Some(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+                    "Esc" => Some(KeyEvent::new(KeyCode::Escape, Modifiers::NONE)),
+                    "BS" => Some(KeyEvent::new(KeyCode::Backspace, Modifiers::NONE)),
                     _ => name.strip_prefix("C-").and_then(|key| {
                         let key = key.chars().next()?;
-                        Some(KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL))
+                        Some(KeyEvent::new(KeyCode::Char(key), Modifiers::CONTROL))
                     }),
                 };
                 if let Some(event) = event {
@@ -1805,7 +1805,7 @@ mod tests {
                     continue;
                 }
             }
-            events.push(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+            events.push(KeyEvent::new(KeyCode::Char(character), Modifiers::NONE));
             rest = &rest[character.len_utf8()..];
         }
         events
@@ -1857,7 +1857,7 @@ mod tests {
 
     #[test]
     fn a_replaced_text_has_no_stop_for_ctrl_w() {
-        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let key = |code| KeyEvent::new(code, Modifiers::NONE);
         let mut editor = Editor::new("abc");
         // The cursor keys move the session's stop to where they leave the cursor, after "ab"
         editor.press(&key(KeyCode::Left));
@@ -1865,7 +1865,7 @@ mod tests {
         for character in "something".chars() {
             editor.press(&key(KeyCode::Char(character)));
         }
-        editor.press(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        editor.press(&KeyEvent::new(KeyCode::Char('w'), Modifiers::CONTROL));
         assert_eq!(editor.text(), "");
     }
 
@@ -2267,12 +2267,12 @@ mod tests {
         editor.cursor = 0;
         for key in keys.chars() {
             let event = match key {
-                '\x1b' => KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-                '\x08' => KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
-                '\x12' => KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
-                '\x17' => KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
-                '\x15' => KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
-                character => KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                '\x1b' => KeyEvent::new(KeyCode::Escape, Modifiers::NONE),
+                '\x08' => KeyEvent::new(KeyCode::Backspace, Modifiers::NONE),
+                '\x12' => KeyEvent::new(KeyCode::Char('r'), Modifiers::CONTROL),
+                '\x17' => KeyEvent::new(KeyCode::Char('w'), Modifiers::CONTROL),
+                '\x15' => KeyEvent::new(KeyCode::Char('u'), Modifiers::CONTROL),
+                character => KeyEvent::new(KeyCode::Char(character), Modifiers::NONE),
             };
             editor.press(&event);
         }

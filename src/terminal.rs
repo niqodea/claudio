@@ -4,6 +4,10 @@ use std::io;
 use std::mem::MaybeUninit;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitStatus};
+use std::time::Duration;
+
+use termina::escape::csi::{Csi, Cursor};
+use termina::{Event, EventReader, PlatformTerminal, Terminal};
 
 use crate::config::ProseWrap;
 use crate::input_line::{cannot_read_terminal, write_out};
@@ -18,18 +22,18 @@ use crate::text::Wrap;
 /// [kitty keyboard protocol]: https://sw.kovidgoyal.net/kitty/keyboard-protocol/#detection-of-support-for-this-protocol
 const ASK_WRAP_AT_SPACES: &[u8] = b"\x1b]2029;?\x1b\\\x1b[c";
 
-/// How long claudio waits for the next answer, only for a terminal that answers nothing at all,
-/// as long as crossterm waits for the cursor's place ([`cursor::position`]).
-///
-/// [`cursor::position`]: https://github.com/crossterm-rs/crossterm/blob/0.29/src/cursor/sys/unix.rs#L39
-const ANSWER_TIMEOUT_MS: libc::c_int = 2000;
+/// How long claudio waits for the terminal's next answer, only for a terminal that answers nothing
+/// at all.
+const ANSWER_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Hands the client every key as typed until it is dropped: the terminal echoes none, holds none
 /// for a whole line, and takes none for itself, like Ctrl+C for a signal, Ctrl+S to pause the
 /// output or Ctrl+V to quote the next key. Its output stays as it was, so a line break still
 /// starts the next row at its start. Between two readings of the input line, a key then waits
-/// for the next one instead of showing up where Claude's text goes.
+/// for the next one instead of showing up where Claude's text goes. termina reads what the
+/// terminal sends, and gives the terminal its original settings back as it is dropped.
 pub struct QuietTerminal {
+    terminal: PlatformTerminal,
     original: Settings,
 }
 
@@ -39,6 +43,8 @@ pub struct Settings(libc::termios);
 
 impl QuietTerminal {
     pub fn new() -> Result<Self, String> {
+        // Opened first, so that the settings it gives back are the original ones
+        let terminal = PlatformTerminal::new().map_err(|error| cannot_read_terminal(&error))?;
         let original = read_settings()
             .map_err(|error| format!("cannot read the terminal's settings: {error}"))?;
         let mut quiet = original.0;
@@ -46,20 +52,53 @@ impl QuietTerminal {
         quiet.c_iflag &= !(libc::IXON | libc::ICRNL);
         write_settings(Settings(quiet), libc::TCSANOW)
             .map_err(|error| format!("cannot change the terminal's settings: {error}"))?;
-        Ok(QuietTerminal { original })
+        Ok(QuietTerminal { terminal, original })
     }
 
     /// The settings the terminal had before the client changed them.
     pub fn original(&self) -> Settings {
         self.original
     }
-}
 
-impl Drop for QuietTerminal {
-    fn drop(&mut self) {
-        // Restoring the settings can only fail if the terminal is gone, which leaves nothing to
-        // restore
-        let _ = write_settings(self.original, libc::TCSADRAIN);
+    /// What the terminal sends: keys, pastes, resizes, and its answers to what claudio asks it.
+    pub fn events(&self) -> EventReader {
+        self.terminal.event_reader()
+    }
+
+    /// The terminal's columns and rows.
+    pub fn size(&self) -> Result<(u16, u16), String> {
+        let size =
+            (self.terminal.get_dimensions()).map_err(|error| cannot_read_terminal(&error))?;
+        Ok((size.cols, size.rows))
+    }
+
+    /// The cursor's column and row, from 0, as the terminal answers when asked. What the terminal
+    /// sends meanwhile, like a key, waits in `events` for the input line.
+    pub fn cursor_position(&self) -> Result<(u16, u16), String> {
+        let is_position = |event: &Event| {
+            matches!(
+                event,
+                Event::Csi(Csi::Cursor(Cursor::ActivePositionReport { .. }))
+            )
+        };
+        write_out(
+            Csi::Cursor(Cursor::RequestActivePositionReport)
+                .to_string()
+                .as_bytes(),
+        )?;
+        let events = self.events();
+        let answered = (events.poll(Some(ANSWER_TIMEOUT), is_position))
+            .map_err(|error| cannot_read_terminal(&error))?;
+        if !answered {
+            return Err("the terminal did not tell where the cursor is".to_string());
+        }
+        match events.read(is_position) {
+            Ok(Event::Csi(Csi::Cursor(Cursor::ActivePositionReport { line, col }))) => {
+                Ok((col.get_zero_based(), line.get_zero_based()))
+            }
+            Ok(_) => unreachable!("the filter lets only the cursor's place through"),
+            Err(error) => Err(cannot_read_terminal(&error)),
+        }
     }
 }
 
@@ -93,8 +132,10 @@ fn wraps_at_spaces() -> Result<bool, String> {
             events: libc::POLLIN,
             revents: 0,
         };
+        let timeout_ms =
+            libc::c_int::try_from(ANSWER_TIMEOUT.as_millis()).unwrap_or(libc::c_int::MAX);
         // SAFETY: poll only reads and writes the one pollfd it is given
-        match unsafe { libc::poll(&raw mut stdin, 1, ANSWER_TIMEOUT_MS) } {
+        match unsafe { libc::poll(&raw mut stdin, 1, timeout_ms) } {
             -1 => return Err(cannot_read_terminal(&io::Error::last_os_error())),
             0 => return Ok(false),
             _ => {}

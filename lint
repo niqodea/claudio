@@ -13,8 +13,8 @@ if git -C "$root" grep -n 'Undocumented' -- src ':!src/contract.rs' | grep -v 'U
     >&2 echo 'Error: link what relies on undocumented behaviour of Claude Code to its check, as Undocumented: [crate::contract::<check>]'
     exit 1
 fi
-# A comment never names the Claude Code that claudio pins, since VERSION alone holds it and a new
-# version would leave the comment behind: a fact holds by its contract check or its docs instead
+# Only VERSION names the Claude Code that claudio pins, since a copy anywhere else goes stale
+# with the next version
 # Ref: https://pragprog.com/tips/, Tip 15: "Every piece of knowledge must have a single,
 # unambiguous, authoritative representation within a system"
 version="$(sed -n 's/^pub const VERSION: &str = "\(.*\)";$/\1/p' "$root/src/claude_code.rs")"
@@ -22,7 +22,7 @@ if [ -z "$version" ]; then
     >&2 echo 'Error: lint cannot read VERSION in src/claude_code.rs'
     exit 1
 fi
-if git -C "$root" grep -n -F "$version" -- src tests ':!src/claude_code.rs' | grep -E '^[^:]+:[0-9]+:[[:space:]]*//'; then
-    >&2 echo "Error: a comment names Claude Code $version, which goes stale with the next version: link the contract check or the docs that back the fact instead"
+if git -C "$root" grep -n -F "$version" -- ':!src/claude_code.rs'; then
+    >&2 echo "Error: Claude Code $version is written outside VERSION: use VERSION in code, a made-up version like 1.2.3 in a test or an example, and in a comment, a link to the contract check or the docs that back the fact"
     exit 1
 fi

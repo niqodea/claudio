@@ -383,7 +383,7 @@ mod tests {
         lines(
             &facts(),
             Some("a1"),
-            Some("2.1.322"),
+            Some("1.2.3"),
             limits,
             context,
             now,
@@ -462,7 +462,7 @@ mod tests {
                 format!("Context     41,203  warm    cold at {in_an_hour}"),
                 "Compact    925,797  left".to_string(),
                 String::new(),
-                "Version  2.1.322".to_string(),
+                "Version  1.2.3".to_string(),
                 "MCP      none".to_string(),
             ]
         );

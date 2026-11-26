@@ -1958,7 +1958,7 @@ mod tests {
             "type": "system",
             "subtype": "init",
             "session_id": "a1",
-            "claude_code_version": "2.1.322",
+            "claude_code_version": "1.2.3",
             "tools": [],
             "slash_commands": ["compact", "/model"],
             "permissionMode": "auto",
@@ -1974,7 +1974,7 @@ mod tests {
                 Event::Commands(commands),
                 Event::FastMode(fast),
             ] if id == "a1"
-                && version == "2.1.322"
+                && version == "1.2.3"
                 && mode == "auto"
                 && commands == &["compact", "model"]
                 && fast == "off"

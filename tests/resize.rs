@@ -57,21 +57,16 @@
 //!
 //! They run claudio with the fake Claude Code, on a tmux server of their own.
 
+mod common;
+
 use std::ffi::CString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-/// The number of sessions started so far, which gives each session's tmux server its own name.
-static SESSIONS: AtomicUsize = AtomicUsize::new(0);
-
-/// How long a step may take before the test gives up on it, far above what any step takes, so
-/// that a broken claudio fails the test instead of hanging it.
-const STEP_LIMIT: Duration = Duration::from_secs(10);
+use common::{Tmux, quote};
 
 const LABEL_MARK: &str = "│ Y";
 /// The start of the label row once Claude Code told whether the session's cache is warm, before
@@ -92,10 +87,12 @@ fn a_shrink_while_a_reply_is_on_its_way_loses_nothing_and_leaves_nothing() {
     // The reply to message 2 is drawn for 34 rows, but reaches tmux once it has 14
     session.relay("hold");
     session.send_message("message 2");
-    session.wait_until("message 2 is on its way", || {
+    session.tmux.wait_until("message 2 is on its way", || {
         session.output().contains("message 2")
     });
-    session.tmux(&["resize-window", "-t", "main", "-x", "62", "-y", "14"]);
+    session
+        .tmux
+        .run(&["resize-window", "-t", "main", "-x", "62", "-y", "14"]);
     session.relay("release");
     session.relay("resize");
     session.wait_for_reply_to("message 2");
@@ -103,7 +100,7 @@ fn a_shrink_while_a_reply_is_on_its_way_loses_nothing_and_leaves_nothing() {
     session.send_message("message 3");
     session.wait_for_reply_to("message 3");
 
-    let history = session.history();
+    let history = session.tmux.history();
     let shown: Vec<&str> = history
         .lines()
         .map(str::trim)
@@ -146,15 +143,17 @@ fn a_shrink_below_the_unfinished_line_leaves_one_copy_of_its_start() {
         .collect::<Vec<_>>()
         .join(" ");
     session.send_message(LONG_LINE_MESSAGE);
-    session.wait_until("the line's start shows", || {
-        session.output().contains("w200") && session.screen().contains("w200")
+    session.tmux.wait_until("the line's start shows", || {
+        session.output().contains("w200") && session.tmux.screen().contains("w200")
     });
-    session.tmux(&["resize-window", "-t", "main", "-x", "62", "-y", "14"]);
+    session
+        .tmux
+        .run(&["resize-window", "-t", "main", "-x", "62", "-y", "14"]);
     let before = session.output().len();
     session.relay("resize");
     // claudio draws right after it handles a resize, before it prints more of the reply, so once
     // it writes, the line's end reaches it at 14 rows
-    session.wait_until("claudio draws for 14 rows", || {
+    session.tmux.wait_until("claudio draws for 14 rows", || {
         session.output().len() > before
     });
     session.open_gate();
@@ -163,7 +162,7 @@ fn a_shrink_below_the_unfinished_line_leaves_one_copy_of_its_start() {
     session.send_message("message 2");
     session.wait_for_reply_to("message 2");
 
-    let history = session.history();
+    let history = session.tmux.history();
     let whole = format!("{start}{LONG_LINE_END}");
     let lines: Vec<&str> = history.lines().map(str::trim).collect();
     let wholes = lines.iter().filter(|line| **line == whole).count();
@@ -352,20 +351,12 @@ fn a_full_row_of_the_box_wraps_as_the_label_row_does() {
 
 /// claudio in a tmux session of its own, behind `pty-relay`.
 struct Session {
-    server: String,
+    tmux: Tmux,
     dir: tempfile::TempDir,
 }
 
 impl Session {
     fn start(width: u16, height: u16) -> Self {
-        let available = Command::new("tmux")
-            .arg("-V")
-            .output()
-            .is_ok_and(|out| out.status.success());
-        assert!(
-            available,
-            "the resize tests run claudio in tmux, which is not installed"
-        );
         let dir = tempfile::tempdir().expect("a temporary directory");
         let commands = dir.path().join("commands");
         let gate = dir.path().join("gate");
@@ -383,47 +374,18 @@ impl Session {
             quote(&binary("claudio")),
         );
         let session = Session {
-            // Cargo runs the tests in parallel, and each needs a tmux server of its own
-            server: format!(
-                "claudio-test-{}-{}",
-                std::process::id(),
-                SESSIONS.fetch_add(1, Ordering::Relaxed)
-            ),
+            tmux: Tmux::start(width, height, &program),
             dir,
         };
-        let (width, height) = (width.to_string(), height.to_string());
-        session.tmux(&[
-            "-f",
-            "/dev/null",
-            "new-session",
-            "-d",
-            "-s",
-            "main",
-            "-x",
-            &width,
-            "-y",
-            &height,
-            &program,
-        ]);
-        session.tmux(&["set-option", "-t", "main", "window-size", "manual"]);
-        session.wait_until("Claude Code tells the cache's state", || {
-            session.screen().contains(KNOWN_CACHE)
-        });
         session
-    }
-
-    fn tmux(&self, arguments: &[&str]) -> String {
-        let output = Command::new("tmux")
-            .args(["-L", &self.server])
-            .args(arguments)
-            .output()
-            .expect("tmux runs");
-        assert!(
-            output.status.success(),
-            "tmux {arguments:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).into_owned()
+            .tmux
+            .run(&["set-option", "-t", "main", "window-size", "manual"]);
+        session
+            .tmux
+            .wait_until("Claude Code tells the cache's state", || {
+                session.tmux.screen().contains(KNOWN_CACHE)
+            });
+        session
     }
 
     /// Gives `command` to `pty-relay`.
@@ -455,10 +417,13 @@ impl Session {
     /// `pty-relay` passes on the size the terminal has when told.
     fn resize_terminal(&self, width: usize, height: usize) {
         let (columns, rows) = (width.to_string(), height.to_string());
-        self.tmux(&["resize-window", "-t", "main", "-x", &columns, "-y", &rows]);
-        let terminal = self.tmux(&["display-message", "-p", "-t", "main", "#{pane_tty}"]);
+        self.tmux
+            .run(&["resize-window", "-t", "main", "-x", &columns, "-y", &rows]);
+        let terminal = self
+            .tmux
+            .run(&["display-message", "-p", "-t", "main", "#{pane_tty}"]);
         let pane_height = self.pane("pane_height");
-        self.wait_until("the terminal takes the new size", || {
+        self.tmux.wait_until("the terminal takes the new size", || {
             terminal_size(terminal.trim()) == (width, pane_height)
         });
     }
@@ -468,7 +433,7 @@ impl Session {
     fn tell_size(&self) {
         let before = self.output().len();
         self.relay("resize");
-        self.wait_until("claudio draws for the new size", || {
+        self.tmux.wait_until("claudio draws for the new size", || {
             self.output().len() > before
         });
         self.wait_until_settled();
@@ -499,14 +464,15 @@ impl Session {
     /// The row of the screen, from 0, that the label row is on, which starts with the same marks
     /// however narrow the screen, while its end gives way.
     fn label_row(&self) -> usize {
-        (self.screen().lines())
+        (self.tmux.screen().lines())
             .position(|line| line.starts_with(KNOWN_CACHE) || line.starts_with("››*T"))
             .expect("the label row is on screen")
     }
 
     /// The copies of the label row in the scrollback, above the screen.
     fn label_copies(&self) -> usize {
-        self.tmux(&["capture-pane", "-p", "-S", "-", "-E", "-1", "-t", "main"])
+        self.tmux
+            .run(&["capture-pane", "-p", "-S", "-", "-E", "-1", "-t", "main"])
             .lines()
             .filter(|line| line.contains(LABEL_MARK))
             .count()
@@ -523,16 +489,18 @@ impl Session {
 
     fn pane(&self, variable: &str) -> usize {
         let format = format!("#{{{variable}}}");
-        let value = self.tmux(&["display-message", "-p", "-t", "main", &format]);
+        let value = self
+            .tmux
+            .run(&["display-message", "-p", "-t", "main", &format]);
         value.trim().parse().expect("a number")
     }
 
     /// Waits until the screen and the cursor stay the same over two looks, so the terminal has
     /// drawn all that claudio wrote.
     fn wait_until_settled(&self) {
-        let look = || (self.screen(), self.cursor_row());
+        let look = || (self.tmux.screen(), self.cursor_row());
         let mut last = look();
-        self.wait_until("the screen settles", || {
+        self.tmux.wait_until("the screen settles", || {
             thread::sleep(Duration::from_millis(100));
             let now = look();
             let settled = now == last;
@@ -543,13 +511,13 @@ impl Session {
 
     /// Types `text` into the box, without sending it.
     fn type_text(&self, text: &str) {
-        self.tmux(&["send-keys", "-t", "main", "-l", text]);
+        self.tmux.run(&["send-keys", "-t", "main", "-l", text]);
         self.wait_until_settled();
     }
 
     fn send_message(&self, text: &str) {
-        self.tmux(&["send-keys", "-t", "main", "-l", text]);
-        self.tmux(&["send-keys", "-t", "main", "Enter"]);
+        self.tmux.run(&["send-keys", "-t", "main", "-l", text]);
+        self.tmux.run(&["send-keys", "-t", "main", "Enter"]);
     }
 
     fn wait_for_reply_to(&self, message: &str) {
@@ -559,9 +527,10 @@ impl Session {
     /// Waits as `wait_for_reply_to` does, on a screen too narrow for the label row to show `idle`:
     /// until claudio wrote the reply, and the screen settles.
     fn wait_for_reply_on_a_narrow_screen(&self, message: &str) {
-        self.wait_until(&format!("the reply to {message}"), || {
-            self.after_reply(message, SECOND_BLOCK).is_some()
-        });
+        self.tmux
+            .wait_until(&format!("the reply to {message}"), || {
+                self.after_reply(message, SECOND_BLOCK).is_some()
+            });
         self.wait_until_settled();
     }
 
@@ -570,11 +539,12 @@ impl Session {
     /// shows, so a claudio that loses lines on screen fails the test's checks rather than this
     /// wait.
     fn wait_for_reply_ending(&self, message: &str, end: &str) {
-        self.wait_until(&format!("the reply to {message}"), || {
-            self.after_reply(message, end)
-                .is_some_and(|rest| rest.contains(IDLE))
-                && self.screen().contains(IDLE)
-        });
+        self.tmux
+            .wait_until(&format!("the reply to {message}"), || {
+                self.after_reply(message, end)
+                    .is_some_and(|rest| rest.contains(IDLE))
+                    && self.tmux.screen().contains(IDLE)
+            });
     }
 
     /// What claudio wrote from the end of its reply to `message`, once it wrote the reply up to `end`.
@@ -585,41 +555,12 @@ impl Session {
         Some(after[after.find(end)?..].to_string())
     }
 
-    /// The whole history, with the rows the terminal wrapped joined into their lines.
-    fn history(&self) -> String {
-        self.tmux(&["capture-pane", "-p", "-J", "-S", "-", "-t", "main"])
-    }
-
-    fn screen(&self) -> String {
-        self.tmux(&["capture-pane", "-p", "-t", "main"])
-    }
-
     /// All that claudio wrote, whether `pty-relay` held it or passed it on.
     fn output(&self) -> String {
         fs::read(self.dir.path().join("output")).map_or_else(
             |_| String::new(),
             |bytes| String::from_utf8_lossy(&bytes).into_owned(),
         )
-    }
-
-    fn wait_until(&self, what: &str, mut done: impl FnMut() -> bool) {
-        let start = Instant::now();
-        while !done() {
-            assert!(
-                start.elapsed() < STEP_LIMIT,
-                "{what} did not happen. The history:\n{}",
-                self.history()
-            );
-            thread::sleep(Duration::from_millis(20));
-        }
-    }
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        let _ = Command::new("tmux")
-            .args(["-L", &self.server, "kill-server"])
-            .output();
     }
 }
 
@@ -661,9 +602,4 @@ fn binary(name: &str) -> PathBuf {
         "pty-relay" => env!("CARGO_BIN_EXE_pty-relay"),
         _ => unreachable!("a binary of this package"),
     })
-}
-
-/// `path` quoted for the shell that tmux runs the program with.
-fn quote(path: &Path) -> String {
-    format!("'{}'", path.display().to_string().replace('\'', r"'\''"))
 }

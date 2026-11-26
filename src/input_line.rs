@@ -26,7 +26,7 @@ use termina::escape::csi::{
 };
 use termina::event::{KeyCode, KeyEvent, KeyEventKind, Modifiers};
 use termina::style::CursorStyle;
-use termina::{Event, EventReader, OneBased};
+use termina::{Event, OneBased};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::claude_input::ClaudeInput;
@@ -49,7 +49,7 @@ use crate::style::{
     ATTENTION, AWAITS_YOU, DONE_OR_ADDED, FAILED_OR_REMOVED, MARK, PLAIN, STRONG, SUBDUED,
     SUBDUED_ON_BAR, YOURS,
 };
-use crate::terminal::{QuietTerminal, Settings, run_in_terminal};
+use crate::terminal::{Events, QuietTerminal, Settings, run_in_terminal};
 use crate::text::{Line, Span, Text};
 use crate::vi::{Editor, Mode};
 use crate::wording::{GROUP, Hint, PART, marks, with_hint};
@@ -191,7 +191,7 @@ pub struct InputLine {
     /// client runs in it.
     original_settings: Settings,
     /// What the terminal sends.
-    events: EventReader,
+    events: Events,
     /// The rows the user chose for the input box, which a short screen gives fewer.
     input_rows: NonZeroU16,
     /// Whether the line Claude still writes shows among the live rows, or waits until it ends.
@@ -242,7 +242,7 @@ impl InputLine {
     pub fn new(
         editor_command: String,
         full_view: PathBuf,
-        terminal: &QuietTerminal,
+        terminal: &mut QuietTerminal,
         config: &Config,
         break_signal: Arc<AtomicBool>,
         shared: Arc<Mutex<Shared>>,
@@ -405,12 +405,12 @@ impl InputLine {
 
     /// Whether the terminal sent something within a `TICK`.
     fn poll_event(&self) -> Result<bool, String> {
-        (self.events.poll(Some(TICK), |_| true)).map_err(|error| cannot_read_terminal(&error))
+        (self.events.poll(TICK)).map_err(|error| cannot_read_terminal(&error))
     }
 
     /// What the terminal sent next, which `poll_event` said is there.
-    fn read_event(&self) -> Result<Event, String> {
-        (self.events.read(|_| true)).map_err(|error| cannot_read_terminal(&error))
+    fn read_event(&mut self) -> Result<Event, String> {
+        (self.events.read()).map_err(|error| cannot_read_terminal(&error))
     }
 
     /// Takes the bottom of the terminal away, once the session ended, and prints the rest of the
@@ -870,7 +870,7 @@ impl InputLine {
     /// Claude Code closes it, asking with `refresh` as it opens and every `ASK_EVERY`. Returns
     /// the size of the last resize meanwhile, if any.
     fn show_screen_until_closed(
-        &self,
+        &mut self,
         rows: ScreenRows,
         refresh: Refresh,
     ) -> Result<Option<(u16, u16)>, String> {

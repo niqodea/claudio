@@ -269,8 +269,8 @@ fn run() -> Result<Exit, String> {
     // Caught before claudio changes the terminal's settings or creates a file
     let termination = Termination::catch(&break_signal)
         .map_err(|error| format!("cannot catch the signals that end claudio: {error}"))?;
-    let quiet_terminal = QuietTerminal::new()?;
-    let prose_wrap = terminal::prose_wrap(config.prose_wrap)?;
+    let mut quiet_terminal = QuietTerminal::new()?;
+    let prose_wrap = quiet_terminal.prose_wrap(config.prose_wrap)?;
     // vi when EDITOR is unset or empty, since POSIX requires a vi on every system it covers
     let editor_command = env::var("EDITOR")
         .ok()
@@ -337,7 +337,7 @@ fn run() -> Result<Exit, String> {
     let input = InputLine::new(
         editor_command,
         full_view.path().to_path_buf(),
-        &quiet_terminal,
+        &mut quiet_terminal,
         &config,
         Arc::clone(&break_signal),
         Arc::clone(&shared),

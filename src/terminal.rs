@@ -1,13 +1,15 @@
 //! The terminal's settings, which the client changes while it runs, and what it can do.
 
+use std::collections::VecDeque;
 use std::io;
+use std::iter;
 use std::mem::MaybeUninit;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitStatus};
 use std::time::Duration;
 
 use termina::escape::csi::{Csi, Cursor};
-use termina::{Event, EventReader, PlatformTerminal, Terminal};
+use termina::{Event, EventReader, Parser, PlatformTerminal, Terminal};
 
 use crate::config::ProseWrap;
 use crate::input_line::{cannot_read_terminal, write_out};
@@ -35,6 +37,8 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct QuietTerminal {
     terminal: PlatformTerminal,
     original: Settings,
+    /// What the user typed while claudio read the terminal's answers itself, oldest first.
+    typed: VecDeque<Event>,
 }
 
 /// The terminal's settings.
@@ -52,7 +56,11 @@ impl QuietTerminal {
         quiet.c_iflag &= !(libc::IXON | libc::ICRNL);
         write_settings(Settings(quiet), libc::TCSANOW)
             .map_err(|error| format!("cannot change the terminal's settings: {error}"))?;
-        Ok(QuietTerminal { terminal, original })
+        Ok(QuietTerminal {
+            terminal,
+            original,
+            typed: VecDeque::new(),
+        })
     }
 
     /// The settings the terminal had before the client changed them.
@@ -60,9 +68,13 @@ impl QuietTerminal {
         self.original
     }
 
-    /// What the terminal sends: keys, pastes, resizes, and its answers to what claudio asks it.
-    pub fn events(&self) -> EventReader {
-        self.terminal.event_reader()
+    /// What the terminal sends from now on, after what the user typed while claudio waited for
+    /// its answers: keys, pastes, resizes, and its answers to what claudio asks it.
+    pub fn events(&mut self) -> Events {
+        Events {
+            typed: std::mem::take(&mut self.typed),
+            reader: self.terminal.event_reader(),
+        }
     }
 
     /// The terminal's columns and rows.
@@ -99,57 +111,102 @@ impl QuietTerminal {
         };
         Ok((col.get_zero_based(), line.get_zero_based()))
     }
+
+    /// Where Claude's prose wraps, as the config's `prose_wrap` asks: at spaces only once the
+    /// terminal says it can, and at the edge otherwise. It asks before anything else reads the
+    /// terminal, since termina drops an answer it does not know, like `OSC 2029`'s.
+    pub fn prose_wrap(&mut self, prose_wrap: ProseWrap) -> Result<Wrap, String> {
+        match prose_wrap {
+            ProseWrap::Edge => Ok(Wrap::Edge),
+            ProseWrap::AskSpaces => {
+                let can_wrap_at_spaces = self.wraps_at_spaces()?;
+                Ok(if can_wrap_at_spaces {
+                    Wrap::Spaces
+                } else {
+                    Wrap::Edge
+                })
+            }
+        }
+    }
+
+    /// Whether the terminal says it wraps a line at spaces, asked with `ASK_WRAP_AT_SPACES`. It
+    /// reads the answers itself, a byte at a time, so it reads nothing past their end, and keeps
+    /// what the user typed among them in `typed`.
+    fn wraps_at_spaces(&mut self) -> Result<bool, String> {
+        write_out(ASK_WRAP_AT_SPACES)?;
+        let mut bytes = Vec::new();
+        let wraps = loop {
+            if let Some(wraps) = read_answers(&bytes) {
+                break wraps;
+            }
+            match read_byte()? {
+                Some(byte) => bytes.push(byte),
+                None => break false,
+            }
+        };
+        self.typed.extend(typed_events(&bytes));
+        Ok(wraps)
+    }
 }
 
-/// Where Claude's prose wraps, as the config's `prose_wrap` asks: at spaces only once the
-/// terminal says it can, and at the edge otherwise. The terminal must be quiet.
-pub fn prose_wrap(prose_wrap: ProseWrap) -> Result<Wrap, String> {
-    match prose_wrap {
-        ProseWrap::Edge => Ok(Wrap::Edge),
-        ProseWrap::AskSpaces => {
-            let can_wrap_at_spaces = wraps_at_spaces()?;
-            Ok(if can_wrap_at_spaces {
-                Wrap::Spaces
-            } else {
-                Wrap::Edge
-            })
+/// What the terminal sends, in the order it sent it: first what the user typed while claudio
+/// read the terminal's answers itself, then what termina reads. A key typed before claudio reads
+/// the terminal waits in the terminal's input queue, which POSIX empties only when a program
+/// reads it or flushes it, like `tcsetattr` with `TCSAFLUSH`, so it reaches the input box too.
+/// Ref: <https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/V1_chap11.html#tag_11_01_05>
+/// Ref: <https://pubs.opengroup.org/onlinepubs/9799919799/functions/tcsetattr.html>
+pub struct Events {
+    typed: VecDeque<Event>,
+    reader: EventReader,
+}
+
+impl Events {
+    /// Whether an event is there, waiting up to `timeout` for one.
+    pub fn poll(&self, timeout: Duration) -> io::Result<bool> {
+        Ok(!self.typed.is_empty() || self.reader.poll(Some(timeout), |_| true)?)
+    }
+
+    /// The next event, which `poll` said is there.
+    pub fn read(&mut self) -> io::Result<Event> {
+        match self.typed.pop_front() {
+            Some(event) => Ok(event),
+            None => self.reader.read(|_| true),
         }
     }
 }
 
-/// Whether the terminal says it wraps a line at spaces, asked with `ASK_WRAP_AT_SPACES`. The
-/// terminal must be quiet, so that its answers reach claudio as written.
-fn wraps_at_spaces() -> Result<bool, String> {
-    write_out(ASK_WRAP_AT_SPACES)?;
-    let mut answers = Vec::new();
-    loop {
-        if let Some(wraps) = read_answers(&answers) {
-            return Ok(wraps);
-        }
-        let mut stdin = libc::pollfd {
-            fd: libc::STDIN_FILENO,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let timeout_ms =
-            libc::c_int::try_from(ANSWER_TIMEOUT.as_millis()).unwrap_or(libc::c_int::MAX);
-        // SAFETY: poll only reads and writes the one pollfd it is given
-        match unsafe { libc::poll(&raw mut stdin, 1, timeout_ms) } {
-            -1 => return Err(cannot_read_terminal(&io::Error::last_os_error())),
-            0 => return Ok(false),
-            _ => {}
-        }
-        let mut buffer = [0u8; 64];
-        // SAFETY: read writes at most the buffer's length into the buffer
-        let read =
-            unsafe { libc::read(libc::STDIN_FILENO, buffer.as_mut_ptr().cast(), buffer.len()) };
-        let read = match usize::try_from(read) {
-            Ok(0) => return Err(cannot_read_terminal(&io::ErrorKind::UnexpectedEof.into())),
-            Ok(read) => read,
-            Err(_) => return Err(cannot_read_terminal(&io::Error::last_os_error())),
-        };
-        answers.extend_from_slice(&buffer[..read]);
+/// The next byte the terminal sends, none once it sends nothing for `ANSWER_TIMEOUT`.
+fn read_byte() -> Result<Option<u8>, String> {
+    let mut stdin = libc::pollfd {
+        fd: libc::STDIN_FILENO,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let timeout_ms = libc::c_int::try_from(ANSWER_TIMEOUT.as_millis()).unwrap_or(libc::c_int::MAX);
+    // SAFETY: poll only reads and writes the one pollfd it is given
+    match unsafe { libc::poll(&raw mut stdin, 1, timeout_ms) } {
+        -1 => return Err(cannot_read_terminal(&io::Error::last_os_error())),
+        0 => return Ok(None),
+        _ => {}
     }
+    let mut byte = 0u8;
+    // SAFETY: read writes at most one byte into `byte`
+    match unsafe { libc::read(libc::STDIN_FILENO, (&raw mut byte).cast(), 1) } {
+        1 => Ok(Some(byte)),
+        0 => Err(cannot_read_terminal(&io::ErrorKind::UnexpectedEof.into())),
+        _ => Err(cannot_read_terminal(&io::Error::last_os_error())),
+    }
+}
+
+/// What the user typed among the terminal's answers in `bytes`, as termina reads it: termina
+/// reads an answer as an escape event, or as nothing when it does not know it, and a key as a
+/// key.
+fn typed_events(bytes: &[u8]) -> Vec<Event> {
+    let mut parser = Parser::default();
+    parser.parse(bytes, false);
+    iter::from_fn(|| parser.pop())
+        .filter(|event| !event.is_escape())
+        .collect()
 }
 
 /// What the terminal's `answers` say once they end with its device attributes, `ESC [ ? … c`:
@@ -246,6 +303,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use termina::event::{KeyCode, KeyEvent, Modifiers};
+
     use super::*;
 
     const ATTRIBUTES: &[u8] = b"\x1b[?62;22c";
@@ -258,6 +317,21 @@ mod tests {
         drop(Ignored::new(libc::SIGUSR2).expect("ignored"));
         signal_hook::low_level::raise(libc::SIGUSR2).expect("raised");
         assert!(caught.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn the_keys_typed_among_the_answers_stay_in_order_without_the_answers() {
+        let key = |code| Event::Key(KeyEvent::new(code, Modifiers::NONE));
+        let bytes = [b"a\x1b]2029;1\x1b\\b\r".as_slice(), ATTRIBUTES].concat();
+        assert_eq!(
+            typed_events(&bytes),
+            [
+                key(KeyCode::Char('a')),
+                key(KeyCode::Char('b')),
+                key(KeyCode::Enter)
+            ]
+        );
+        assert_eq!(typed_events(ATTRIBUTES), []);
     }
 
     #[test]

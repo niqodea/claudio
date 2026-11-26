@@ -662,16 +662,8 @@ pub fn name(key: &KeyEvent) -> String {
     let base = match key.code {
         KeyCode::Char(' ') => "Space".to_string(),
         KeyCode::Char(character) => character.to_string(),
-        KeyCode::Enter => "Enter".to_string(),
         KeyCode::Escape => "Esc".to_string(),
-        KeyCode::Backspace => "Backspace".to_string(),
-        KeyCode::Delete => "Del".to_string(),
-        KeyCode::Tab => "Tab".to_string(),
-        KeyCode::BackTab => "Back Tab".to_string(),
-        KeyCode::PageUp => "Page Up".to_string(),
-        KeyCode::PageDown => "Page Down".to_string(),
-        KeyCode::Function(number) => format!("F{number}"),
-        // Like Left, Home or Insert
+        // termina's name for the key, like Enter
         code => format!("{code:?}"),
     };
     if key.modifiers.contains(Modifiers::CONTROL) {

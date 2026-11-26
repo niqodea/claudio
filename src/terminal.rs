@@ -86,19 +86,18 @@ impl QuietTerminal {
                 .to_string()
                 .as_bytes(),
         )?;
-        let events = self.events();
-        let answered = (events.poll(Some(ANSWER_TIMEOUT), is_position))
+        let answered = (self.terminal.poll(is_position, Some(ANSWER_TIMEOUT)))
             .map_err(|error| cannot_read_terminal(&error))?;
         if !answered {
             return Err("the terminal did not tell where the cursor is".to_string());
         }
-        match events.read(is_position) {
-            Ok(Event::Csi(Csi::Cursor(Cursor::ActivePositionReport { line, col }))) => {
-                Ok((col.get_zero_based(), line.get_zero_based()))
-            }
-            Ok(_) => unreachable!("the filter lets only the cursor's place through"),
-            Err(error) => Err(cannot_read_terminal(&error)),
-        }
+        let read = self.terminal.read(is_position);
+        let Event::Csi(Csi::Cursor(Cursor::ActivePositionReport { line, col })) =
+            read.map_err(|error| cannot_read_terminal(&error))?
+        else {
+            unreachable!("the filter lets only the cursor's place through");
+        };
+        Ok((col.get_zero_based(), line.get_zero_based()))
     }
 }
 

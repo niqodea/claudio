@@ -30,7 +30,6 @@
 
 use std::ffi::c_int;
 use std::io;
-use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -70,10 +69,10 @@ impl Termination {
     }
 }
 
-/// Ends claudio by `signal`, with the signal's default action, once claudio let go of all it
-/// holds. The exit code, a shell's for a program that `signal` ended, is for when the default
-/// action cannot run.
-pub fn end_by(signal: c_int) -> ExitCode {
+/// Ends claudio by `signal`, with the signal's default action, once claudio restored the terminal
+/// and removed its files.
+pub fn end_by(signal: c_int) -> ! {
+    // signal-hook aborts the process if the default action does not end it
     let _ = low_level::emulate_default_handler(signal);
-    u8::try_from(128 + signal).map_or(ExitCode::FAILURE, ExitCode::from)
+    unreachable!("the default action of a termination signal ends the process")
 }

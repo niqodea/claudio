@@ -88,24 +88,22 @@ macro_rules! put {
     };
 }
 
-const SHOW_CURSOR: Csi = dec_mode(DecPrivateModeCode::ShowCursor, true);
-const HIDE_CURSOR: Csi = dec_mode(DecPrivateModeCode::ShowCursor, false);
-const ENTER_ALTERNATE_SCREEN: Csi =
-    dec_mode(DecPrivateModeCode::ClearAndEnableAlternateScreen, true);
-const LEAVE_ALTERNATE_SCREEN: Csi =
-    dec_mode(DecPrivateModeCode::ClearAndEnableAlternateScreen, false);
-const ENABLE_BRACKETED_PASTE: Csi = dec_mode(DecPrivateModeCode::BracketedPaste, true);
-const DISABLE_BRACKETED_PASTE: Csi = dec_mode(DecPrivateModeCode::BracketedPaste, false);
+const SHOW_CURSOR: Csi = set_mode(DecPrivateModeCode::ShowCursor);
+const HIDE_CURSOR: Csi = reset_mode(DecPrivateModeCode::ShowCursor);
+const ENTER_ALTERNATE_SCREEN: Csi = set_mode(DecPrivateModeCode::ClearAndEnableAlternateScreen);
+const LEAVE_ALTERNATE_SCREEN: Csi = reset_mode(DecPrivateModeCode::ClearAndEnableAlternateScreen);
+const ENABLE_BRACKETED_PASTE: Csi = set_mode(DecPrivateModeCode::BracketedPaste);
+const DISABLE_BRACKETED_PASTE: Csi = reset_mode(DecPrivateModeCode::BracketedPaste);
 const CLEAR_SCREEN: Csi = Csi::Edit(Edit::EraseInDisplay(EraseInDisplay::EraseDisplay));
 
-/// Sets the terminal's DEC private mode `code`, or resets it.
-const fn dec_mode(code: DecPrivateModeCode, is_set: bool) -> Csi {
-    let mode = DecPrivateMode::Code(code);
-    Csi::Mode(if is_set {
-        csi::Mode::SetDecPrivateMode(mode)
-    } else {
-        csi::Mode::ResetDecPrivateMode(mode)
-    })
+/// Turns on the terminal's DEC private mode `code`.
+const fn set_mode(code: DecPrivateModeCode) -> Csi {
+    Csi::Mode(csi::Mode::SetDecPrivateMode(DecPrivateMode::Code(code)))
+}
+
+/// Turns off the terminal's DEC private mode `code`.
+const fn reset_mode(code: DecPrivateModeCode) -> Csi {
+    Csi::Mode(csi::Mode::ResetDecPrivateMode(DecPrivateMode::Code(code)))
 }
 
 /// Moves the cursor to `column` and `row`, from 0.

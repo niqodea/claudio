@@ -247,12 +247,12 @@ Each request remembers the question you were on, and the review remembers what y
 A plan or a call to allow is a request of one question, whose options are named `y` and `n`, as command-line prompts answer a yes-or-no question.
 `y` and `n` only move the cursor, as numbers do, and Enter answers: allow allows it, and `refuse, and stop Claude` refuses it and stops Claude's turn, as Ctrl+C does.
 Your own answer refuses it too, but Claude reads your words and goes on from them, in the same turn.
-A plan shows in the same 8 rows as a question, as written, and a longer plan ends in `… N more lines · Ctrl+O shows it whole`.
+A plan shows in the same 8 rows as a question: the plan as written in the first 7, where a longer plan ends in `… N more lines · Ctrl+O shows it whole`, and on the last, who asked, as on a call.
 A call shows in the same 8 rows as a question: its input in the first 6, and on the last 2, what the request says about itself, always there, in grey when Claude Code says nothing.
 The input shows first the fields that matter most, each after a sign that reads as what it is, then the others, by name.
 After `?` comes why Claude Code asks, as it sends it: its words, or else the kind of check that asks, like `A rule in your settings asks before this call`, or else the path that made it ask, and `no reason given` when it sends none of them.
 After `↳` comes who asked: the subagent, by its tag and the description of the call that started it, like `#0a Review the diff`, or `main agent`.
-Only a call can come from a subagent, since Claude Code gives subagents no tool to ask questions or propose a plan.
+A plan can come from a subagent too, one that runs in plan mode, while a question cannot, since Claude Code gives subagents no tool to ask questions.
 The signs come from a shell and a diff: Bash shows `$` before its command, `#` before its description, `t` before its timeout and `&` before where it runs, like `& in background`, an Edit shows `-` and `+` before what it takes out and puts in, in red and green, `@` comes before a file or a URL, and `│` before a Write's content or a WebFetch's prompt.
 A field the call leaves out shows what that means in grey, like `t default` or `& in foreground`.
 A call of another tool, like an MCP tool's, shows each field on a row of its own, after its name, which loses its end past 10 columns, so all its values start in one column.

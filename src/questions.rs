@@ -41,8 +41,8 @@ struct Request {
     ask: Ask,
     /// The subagent that asked, as `Work::name_subagent` names it, none for Claude itself. Claude
     /// Code takes `AskUserQuestion` from every subagent, and `ExitPlanMode` from every one but a
-    /// subagent that runs in plan mode, so only a permission shows who asked. A plan from such a
-    /// subagent shows as one from Claude.
+    /// subagent that runs in plan mode, so a permission and a plan show who asked, and a
+    /// question does not.
     /// Ref: <https://code.claude.com/docs/en/sub-agents>, on the tools every subagent lacks
     agent: Option<String>,
     entries: Vec<Entry>,
@@ -179,7 +179,10 @@ impl Request {
     /// which ask whether to allow it.
     fn decision_view(&self) -> (Vec<Field>, Vec<Choice>) {
         let fields = match &self.ask.kind {
-            AskKind::Plan(plan) => vec![text_field(plan, Tone::Plain, BLOCK_ROWS)],
+            AskKind::Plan(plan) => vec![
+                text_field(plan, Tone::Plain, BLOCK_ROWS - 1),
+                agent_field(self.agent.as_deref()),
+            ],
             AskKind::Permission(permission) => {
                 let mut fields = call_fields(
                     &self.ask.tool_name,
@@ -438,17 +441,27 @@ fn call_fields(tool: &str, input: &Map<String, Value>, mcp_server: Option<&str>)
 /// since it matters less to the answer. Each is always there, as a grey note when Claude Code
 /// says nothing, so that both keep their rows on every request.
 fn about_fields(reason: Option<&str>, agent: Option<&str>) -> [Field; ABOUT_ROWS] {
-    let line = |mark: char, value: Option<&str>, missing: &str| {
-        let (value, tone) = match value {
-            Some(value) => (value, Tone::Plain),
-            None => (missing, Tone::Note),
-        };
-        field(sign(mark, false, Tone::Plain), value.to_string(), tone, 1)
-    };
     [
-        line('?', reason, "no reason given"),
-        line('↳', agent, "main agent"),
+        about_line('?', reason, "no reason given"),
+        agent_field(agent),
     ]
+}
+
+/// Who asked, after `↳`: the subagent `agent`, or `main agent` in grey for Claude itself. It
+/// takes the block's last row on a plan as on a permission, so that it sits in the same place on
+/// both, and a short screen hides it first on both.
+fn agent_field(agent: Option<&str>) -> Field {
+    about_line('↳', agent, "main agent")
+}
+
+/// A line about a request, after `mark`: `value`, or `missing` in grey when Claude Code sends
+/// none.
+fn about_line(mark: char, value: Option<&str>, missing: &str) -> Field {
+    let (value, tone) = match value {
+        Some(value) => (value, Tone::Plain),
+        None => (missing, Tone::Note),
+    };
+    field(sign(mark, false, Tone::Plain), value.to_string(), tone, 1)
 }
 
 /// Why Claude Code asks about a call: its `decision_reason`, or else a sentence for its
@@ -1133,9 +1146,10 @@ mod tests {
         let mut questions = Questions::default();
         questions.add(*plan, None, vec![1]);
         let view = questions.view();
-        assert_eq!(view.fields.len(), 1);
+        // The plan takes every row but the last, which says who asked
+        assert_eq!(view.fields.len(), 2);
         assert_eq!(view.fields[0].value, "# Plan\n\n1. Add `greet`");
-        assert_eq!(view.fields[0].rows, BLOCK_ROWS);
+        assert_eq!(view.fields[0].rows, BLOCK_ROWS - 1);
     }
 
     #[test]
@@ -1273,6 +1287,50 @@ mod tests {
         assert_eq!(
             marks,
             [sign('?', false, Tone::Plain), sign('↳', false, Tone::Plain)]
+        );
+    }
+
+    #[test]
+    fn a_plan_ends_in_who_asked_on_the_row_a_permission_gives_it() {
+        let shown = |agent: Option<&str>| {
+            let plan = json!({
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "input": {"plan": "# Plan"},
+                "tool_use_id": "a",
+            });
+            let Ok(crate::protocol::Event::Ask(plan)) = read_request("request-a".to_string(), plan)
+            else {
+                panic!("a plan");
+            };
+            let mut questions = Questions::default();
+            questions.add(*plan, agent.map(str::to_string), vec![1]);
+            questions.view().fields
+        };
+        let fields = shown(Some("#0a Review the diff"));
+        assert_eq!(
+            fields.iter().map(|field| field.rows).sum::<usize>(),
+            BLOCK_ROWS
+        );
+        let agent = fields.last().expect("who asked");
+        assert_eq!(
+            (
+                agent.mark.clone(),
+                agent.value.as_str(),
+                agent.tone,
+                agent.rows
+            ),
+            (
+                sign('↳', false, Tone::Plain),
+                "#0a Review the diff",
+                Tone::Plain,
+                1
+            )
+        );
+        let agent = shown(None).pop().expect("who asked");
+        assert_eq!(
+            (agent.value.as_str(), agent.tone),
+            ("main agent", Tone::Note)
         );
     }
 

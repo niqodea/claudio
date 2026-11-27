@@ -374,6 +374,7 @@ impl InputLine {
         if answers != self.in_view {
             self.switch_screen()?;
         }
+        self.update_suggestion();
         self.draw()?;
         loop {
             // Taking the signal lets a line opened again for the same question wait for keys
@@ -382,7 +383,7 @@ impl InputLine {
             }
             self.print_output()?;
             self.drop_lost_confirmation();
-            if self.make_label() != self.label {
+            if self.update_suggestion() || self.make_label() != self.label {
                 self.draw()?;
             }
             if !self.poll_event()? {
@@ -401,6 +402,21 @@ impl InputLine {
             }
             self.draw()?;
         }
+    }
+
+    /// Gives the box what Claude Code suggests the user sends next, which shows only while the
+    /// user writes a message, and tells whether what the box shows of it changed.
+    fn update_suggestion(&mut self) -> bool {
+        let suggestion = {
+            let shared = lock(&self.shared);
+            match &shared.phase {
+                Phase::Writing(_) => shared.suggestion.clone().unwrap_or_default(),
+                Phase::Answering(_) | Phase::Ending(_) => String::new(),
+            }
+        };
+        let shown = self.editor.suggested();
+        self.editor.suggest(&suggestion);
+        self.editor.suggested() != shown
     }
 
     /// Whether the terminal sent something within a `TICK`.
@@ -833,7 +849,8 @@ impl InputLine {
     fn show_error(&mut self, error: &str) -> Result<(), String> {
         self.show_screen(
             &|columns, _| {
-                (wrap::wrap(error, 0, None, columns.get()).rows.iter())
+                let wrapped = wrap::wrap(error, "", 0, None, columns.get());
+                (wrapped.rows.iter())
                     .map(|row| ScreenRow::cut(&row.text, columns))
                     .collect()
             },
@@ -1135,6 +1152,7 @@ impl InputLine {
         let columns = self.columns();
         let wrapped = wrap::wrap(
             &self.text(),
+            &self.editor.suggested(),
             self.editor.cursor(),
             self.editor.selection(),
             usize::from(self.layout.width),
@@ -1494,6 +1512,7 @@ fn command_rows(
     let prompt_length = COMMAND_PROMPT.chars().count();
     let wrapped = wrap::wrap(
         &format!("{COMMAND_PROMPT}{text}"),
+        "",
         prompt_length + cursor,
         None,
         columns.get(),

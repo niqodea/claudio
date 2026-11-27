@@ -56,7 +56,7 @@ use context::Context;
 use input_line::InputLine;
 use keys::{Phase, Writing};
 use limits::{Limits, Source};
-use protocol::{Event, read_events, repeats_a_message};
+use protocol::{Event, State, read_events, repeats_a_message};
 use render::Output;
 use session::{Conversation, Ending, Input};
 use terminal::QuietTerminal;
@@ -85,6 +85,10 @@ struct Shared {
     /// The clear the user asked for, which only `hold_clear`, `note_background_tasks` and the
     /// reset of the session change.
     clear: Clear,
+    /// What Claude Code predicts the user sends next, which the box shows after the message. It
+    /// predicts from the conversation as it stands, so it lasts until the conversation moves on:
+    /// a message the user sends, a turn of Claude's, or a clear.
+    suggestion: Option<String>,
 }
 
 /// Where the clear the user asked for is, from the key to the new session. claudio keeps a model
@@ -194,12 +198,21 @@ impl Shared {
             Event::Commands(commands) => self.note_commands(commands),
             Event::Reset { previous_session } => {
                 self.clear = Clear::None;
+                self.suggestion = None;
                 self.work.start_session();
                 let resume = self.resumable(Some(&previous_session));
                 self.output.show_session_end(SessionEnd::Cleared, resume);
                 self.context.reset();
             }
-            Event::State(state) => self.output.note_state(state),
+            Event::State(state) => {
+                // A turn Claude Code starts on its own, like for a background task's end, moves
+                // the conversation on too
+                if matches!(state, State::Running) {
+                    self.suggestion = None;
+                }
+                self.output.note_state(state);
+            }
+            Event::Suggestion(suggestion) => self.suggestion = Some(suggestion),
             Event::PermissionCheck {
                 tool_use_id,
                 is_checking,
@@ -335,6 +348,7 @@ fn run() -> Result<Exit, String> {
         commands: Vec::new(),
         work: Work::default(),
         clear: Clear::None,
+        suggestion: None,
     }));
     let (input_sender, inputs) = mpsc::channel();
 

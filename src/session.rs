@@ -351,7 +351,12 @@ impl<'a> Conversation<'a> {
     /// first.
     fn send_message(&mut self, text: &str) -> Result<(), String> {
         let is_working = lock(&self.session.shared).output.status() != Status::Idle;
-        lock(&self.session.shared).output.show_message(text);
+        {
+            let mut shared = lock(&self.session.shared);
+            shared.output.show_message(text);
+            // Clear the suggestion before sending, so the box, now empty, never shows the old one
+            shared.suggestion = None;
+        }
         let id = Uuid::new_v4().to_string();
         self.send(&Command::Message { id: &id, text })?;
         if is_working {

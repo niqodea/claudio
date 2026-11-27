@@ -156,6 +156,23 @@ Keys come in two kinds.
 
 **Every other key works on your text.** Enter sends it, and the rest edit it with vi keys. A dim `~` marks each row of the box past your text's end, as vim marks the rows past a buffer's end, so an empty line you typed shows apart from no line at all. The right end of the label row shows in one letter where your keys go, the box's vi mode or the command line: `N` for normal, `I` for insert, `V` for visual and `C` for the command line, and while a vi command is half typed, its keys show just left of it, in 3 columns kept for them, filled from their start as you type, like `d2  N`, and past 3 keys, as vim shows them, each new key pushes out the oldest, like `00d N` for `100d`, so nothing else on the row moves. On a screen too narrow for the whole label row, the label loses its end to `…` and the letter keeps the edge, so it never wraps onto a second row. Enter and the session keys still do their usual job then, and cancel the half-typed command. To clear the input, use vi, like `S` or `ggdG` in normal mode; `u` brings it back.
 
+In insert mode, Ctrl+B and Ctrl+F move as the Left and Right arrows, as readline's `backward-char` and `forward-char` do, which vim leaves [unused](https://vimhelp.org/index.txt.html#insert-index) there and [vim-rsi](https://github.com/tpope/vim-rsi) maps the same way.
+
+After Claude's turn, Claude Code can suggest your next message, which shows in grey after your text while your text is its start, as [zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions/blob/master/README.md) shows a shell's.
+The suggestion joins your text only where the cursor moves onto it: moves go through your text and the suggestion after it, and changes only through your text.
+So no key of its own takes it: a motion takes what it goes over, as vim's operators take a motion's text, so `l` and `w` take what they pass, and `e`, `$` and `A` also the character they land on, as zsh-autosuggestions takes it "up to the point that the cursor moves to" on `forward-word`.
+In normal mode the cursor can stand on the suggestion's next character, right past your text, as on an empty box, where it stands on the first one.
+The Right arrow takes all of it once it takes any, as zsh-autosuggestions does on `forward-char` "with the cursor at the end of the buffer", and so does Ctrl+F in insert mode, and End in insert mode, for its line.
+What a motion took is text like any other: moving back keeps it, and `u` takes it back, as any change.
+Tab takes nothing, unlike in Claude Code, since it is no motion of vi's.
+Enter on an empty box sends nothing, not the suggestion either.
+Claude Code also [stopped Enter from sending](https://github.com/anthropics/claude-code/issues/57449) a suggestion that Tab or an arrow hasn't taken.
+Typing what the suggestion says keeps the rest of it, and typing anything else hides it.
+The suggestion comes from the conversation as it stands, so a message you send, a turn of Claude's or Ctrl+L ends it.
+Claude Code often sends none: its model stays silent unless your next message is obvious, like `yes` after Claude asks whether to go on.
+It also sends none after a turn that wrote the prompt cache from scratch, like the first turn, nor in plan mode or after an API error.
+While your plan's usage is near its limit, it sends none unless `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=true` is set, and at the limit it sends none at all, as its [Agent SDK's types](https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.322/sdk.d.ts) say of `promptSuggestions`.
+
 A key that loses what no key brings back waits for a second press in a row, and the label row names the loss in orange, like `Enter again refuses 2 questions and sends on a possibly cold cache`.
 These keys are:
 
@@ -440,7 +457,7 @@ Each color means one thing, and a character on the line says it too, as [Design]
 | ----- | ----- |
 | The default color | what you and Claude write |
 | Bold | headings, strong text, code, tool names, question names and the option under the cursor |
-| Dim, or grey on the bar | what stays in the background, like a call's result, whether the call succeeded or failed |
+| Dim, or grey on the bar | what stays in the background, like a call's result, whether the call succeeded or failed, and the suggestion of your next message, which only the box shows, as [Design](#design) allows of the input line's state |
 | The bar's background | what is yours: your lines and the input box |
 | Cyan | the conversation's marks: `››`, `‹‹`, the rules of a boundary `─── cleared ───`, the cursor `❯` among options and the command line's `command:` |
 | Reversed | what's picked out: your selection, the request or question shown, and `Y` and its count while requests wait |

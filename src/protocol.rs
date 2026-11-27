@@ -107,6 +107,8 @@ pub enum Event {
     TurnEnd {
         failure: Option<String>,
     },
+    /// What Claude Code predicts the user sends next, after a turn.
+    Suggestion(String),
     /// Settings files Claude Code skipped, so none of their rules or hooks apply.
     SettingsErrors(Vec<SettingsError>),
     /// The key that pays for the session in place of the subscription, like `ANTHROPIC_API_KEY`.
@@ -508,7 +510,7 @@ impl Command<'_> {
             ),
             Command::Initialize => control_request(
                 INITIALIZE_REQUEST_ID,
-                &json!({"subtype": "initialize", "perTaskStopAffordance": true}),
+                &json!({"subtype": "initialize", "perTaskStopAffordance": true, "promptSuggestions": true}),
             ),
             Command::GetSettings => {
                 control_request(SETTINGS_REQUEST_ID, &json!({"subtype": "get_settings"}))
@@ -640,6 +642,7 @@ pub fn read_events(line: &str) -> Result<Vec<Event>, String> {
             failure: Some(subtype),
         }]),
         Message::RateLimitEvent { rate_limit_info } => Shown(vec![read_limits(rate_limit_info)]),
+        Message::PromptSuggestion { suggestion } => Shown(vec![Event::Suggestion(suggestion)]),
         Message::ConversationReset { session_id } => Shown(vec![Event::Reset {
             previous_session: session_id,
         }]),
@@ -1142,6 +1145,11 @@ enum Message {
     },
     RateLimitEvent {
         rate_limit_info: RateLimitInfo,
+    },
+    /// Sent after a turn's result, at most one per turn, as `SDKPromptSuggestionMessage` and the
+    /// `promptSuggestions` option in `sdk.d.ts` declare, once `initialize` asks for them.
+    PromptSuggestion {
+        suggestion: String,
     },
     System(System),
     /// Sent as `/clear` starts a new session, with the id of the session it cleared.
@@ -1780,6 +1788,15 @@ mod tests {
         };
         assert_eq!(usage.tokens, 22_039);
         assert_eq!(usage.cache_ttl, Some(Duration::from_hours(1)));
+    }
+
+    #[test]
+    fn a_prompt_suggestion_tells_the_suggestion() {
+        let line = json!({"type": "prompt_suggestion", "suggestion": "Run the tests next", "uuid": "u", "session_id": "s"});
+        let events = read_events(&line.to_string()).expect("a readable line");
+        assert!(
+            matches!(events.as_slice(), [Event::Suggestion(text)] if text == "Run the tests next")
+        );
     }
 
     #[test]

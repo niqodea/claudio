@@ -21,6 +21,25 @@
 //! Ref: <https://github.com/vim/vim/blob/master/src/normal.c>, on the commands that run them
 //! Ref: <https://github.com/vim/vim/blob/master/src/ops.c>, on how an operator takes a motion
 //!
+//! The suggestion is claudio's own design too: what Claude Code predicts the user sends next,
+//! which the box shows past the text, as zsh-autosuggestions shows a shell's. Four rules define how the box shows the suggestion
+//! and how keys take it:
+//! 1. The box shows the text, then the suggestion's rest, which together make the reach
+//! 2. Moves are vim's motions over the reach, and a move takes into the text the suggestion it
+//!    goes over, as an operator takes the same motion's text: up to the cursor, and through it
+//!    after an inclusive motion. So `l` and `w` take what they pass and leave the cursor on the
+//!    suggestion's next character, and `e` and `$` take the character they land on too, as
+//!    zsh-autosuggestions accepts "up to the point that the cursor moves to" on `forward-word`.
+//!    The Right arrow, and Ctrl+F in insert mode, take the whole suggestion once they take any,
+//!    as zsh-autosuggestions accepts it whole on `forward-char`
+//! 3. Changes act on the text alone, so what a move took is text like any other: moving back
+//!    keeps it, and `u` takes it back
+//! 4. The suggestion shows while the text is its start, so an edit that ends that hides it, and
+//!    the undo of the edit shows it again
+//!
+//! Ref: <https://github.com/zsh-users/zsh-autosuggestions/blob/master/README.md>, Usage, on
+//! accepting a suggestion with `forward-char` and `forward-word`
+//!
 //! Known differences from vim, all to fix:
 //! - What makes a word: vim gives CJK text and emoji classes of their own, and takes the
 //!   Latin-1 letters by its 'iskeyword', which `class` does not follow
@@ -66,6 +85,9 @@ struct Session {
 
 pub struct Editor {
     text: Vec<char>,
+    /// What Claude Code suggests the user sends next, empty when it suggests nothing. Only its
+    /// rest past the text shows, while the text is its start.
+    suggestion: Vec<char>,
     /// An index into the text, which in insert mode can be its length.
     cursor: usize,
     state: State,
@@ -131,6 +153,10 @@ enum Command {
         count: Option<usize>,
     },
     Insert(Insert),
+    /// `o`, or `O` above the cursor's line.
+    Open {
+        below: bool,
+    },
     /// Enters the mode, or leaves it for normal mode when the editor is in it.
     Visual(Mode),
     VisualOperate(Operator),
@@ -164,6 +190,9 @@ enum Target {
 enum Motion {
     Left,
     Right,
+    /// The Right arrow, and Ctrl+F in insert mode, which move as `l` does, but take the whole
+    /// suggestion once they take any of it.
+    RightArrow,
     Down,
     Up,
     /// `w`, or `W` for a WORD, which only whitespace ends.
@@ -216,8 +245,6 @@ enum Insert {
     After,
     LineStart,
     LineEnd,
-    LineBelow,
-    LineAbove,
 }
 
 /// How an operator takes the text between the cursor and where a motion goes.
@@ -256,6 +283,7 @@ impl Editor {
         Editor {
             cursor: text.len(),
             text,
+            suggestion: Vec::new(),
             state: State::Insert(Session::default()),
             keys: Vec::new(),
             column: None,
@@ -270,6 +298,26 @@ impl Editor {
 
     pub fn text(&self) -> String {
         self.text.iter().collect()
+    }
+
+    /// Sets what Claude Code suggests the user sends next, empty for nothing.
+    pub fn suggest(&mut self, suggestion: &str) {
+        self.suggestion = suggestion.chars().collect();
+    }
+
+    /// The suggestion past the text, which the box shows after it, empty while the text is not
+    /// the suggestion's start.
+    pub fn suggested(&self) -> String {
+        self.rest().iter().collect()
+    }
+
+    fn rest(&self) -> &[char] {
+        (self.suggestion.strip_prefix(self.text.as_slice())).unwrap_or_default()
+    }
+
+    /// The text, then the suggestion's rest, which moves go through.
+    fn reach(&self) -> Vec<char> {
+        [self.text.as_slice(), self.rest()].concat()
     }
 
     pub fn mode(&self) -> Mode {
@@ -395,11 +443,7 @@ impl Editor {
 
     fn execute(&mut self, command: Command) {
         match command {
-            Command::Move(motion, count) => {
-                if let Some((to, _)) = self.target(motion, count, None) {
-                    self.cursor = to;
-                }
-            }
+            Command::Move(motion, count) => self.move_by(motion, count),
             Command::Operate {
                 operator,
                 target,
@@ -416,13 +460,14 @@ impl Editor {
             }
             Command::Replace(character, count) => self.replace_characters(character, count),
             Command::ToggleCase(count) => {
-                let end = (self.cursor + count.unwrap_or(1)).min(self.line_end(self.cursor));
+                let end = (self.cursor + count.unwrap_or(1)).min(line_end(&self.text, self.cursor));
                 self.toggle_case(self.cursor, end);
                 self.cursor = end;
             }
             Command::Join(count) => self.join(count.unwrap_or(2).max(2) - 1),
             Command::Put { before, count } => self.put(before, count.unwrap_or(1)),
             Command::Insert(insert) => self.insert(insert),
+            Command::Open { below } => self.open_line(below),
             Command::Visual(mode) => {
                 // Switching between visual modes keeps the selection's anchor
                 let anchor = match self.state {
@@ -457,7 +502,7 @@ impl Editor {
             }
             Command::VisualJoin => {
                 if let Some(range) = self.visual_range() {
-                    let lines = self.line_of(range.end) - self.line_of(range.start);
+                    let lines = line_of(&self.text, range.end) - line_of(&self.text, range.start);
                     self.cursor = range.start;
                     self.state = State::Normal;
                     self.join(lines.max(1));
@@ -503,7 +548,7 @@ impl Editor {
     fn type_key(&mut self, key: Key) {
         if key == Key::Escape {
             self.end_session();
-            if self.cursor > self.line_start(self.cursor) {
+            if self.cursor > line_start(&self.text, self.cursor) {
                 self.cursor -= 1;
             }
             return;
@@ -528,7 +573,7 @@ impl Editor {
                 }
             }
             Key::Control('w') => {
-                let line_start = self.line_start(self.cursor);
+                let line_start = line_start(&self.text, self.cursor);
                 let start = if self.cursor == line_start {
                     self.cursor.saturating_sub(1)
                 } else {
@@ -539,37 +584,34 @@ impl Editor {
                 self.delete(self.stop_once(start), self.cursor);
             }
             Key::Control('u') => {
-                let start = self.stop_once(self.line_start(self.cursor));
+                let start = self.stop_once(line_start(&self.text, self.cursor));
                 self.delete(start, self.cursor);
             }
-            Key::Left => {
-                if self.cursor > self.line_start(self.cursor) {
-                    self.cursor -= 1;
-                }
+            // Ctrl+B and Ctrl+F are readline's backward-char and forward-char, which the arrows are
+            // too, and vim leaves them unused in insert mode, where vim-rsi maps them the same way
+            // Ref: <https://github.com/tpope/vim-rsi/blob/master/plugin/rsi.vim>
+            Key::Left | Key::Control('b') => self.move_by(Motion::Left, None),
+            Key::Right | Key::Control('f') => self.move_by(Motion::RightArrow, None),
+            Key::Up => self.move_by(Motion::Up, None),
+            Key::Down => self.move_by(Motion::Down, None),
+            Key::Home => self.move_by(Motion::LineStart, None),
+            // Past the line's last character, where insert mode types, unlike `$`
+            Key::End => {
+                let line_end = line_end(&self.reach(), self.cursor);
+                self.land(line_end, Kind::Exclusive);
             }
-            Key::Right => {
-                if self.cursor < self.line_end(self.cursor) {
-                    self.cursor += 1;
-                }
-            }
-            Key::Up | Key::Down => {
-                let motion = if key == Key::Up {
-                    Motion::Up
-                } else {
-                    Motion::Down
-                };
-                if let Some((to, _)) = self.target(motion, None, None) {
-                    self.cursor = to;
-                }
-            }
-            Key::Home => self.cursor = self.line_start(self.cursor),
-            Key::End => self.cursor = self.line_end(self.cursor),
             Key::Control(_) | Key::Escape => {}
         }
         // The cursor keys move the session's stop to where they leave the cursor, as in vim
         if matches!(
             key,
-            Key::Left | Key::Right | Key::Up | Key::Down | Key::Home | Key::End
+            Key::Left
+                | Key::Right
+                | Key::Control('b' | 'f')
+                | Key::Up
+                | Key::Down
+                | Key::Home
+                | Key::End
         ) && let State::Insert(session) = &mut self.state
         {
             session.stop = Some(self.cursor);
@@ -585,6 +627,33 @@ impl Editor {
             }) if self.cursor > stop => start.max(stop),
             _ => start,
         }
+    }
+
+    /// Moves the cursor as `motion` goes, `count` times, through the reach.
+    fn move_by(&mut self, motion: Motion, count: Option<usize>) {
+        self.remember(motion);
+        let reach = self.reach();
+        let Some((to, kind)) = self.target(&reach, motion, count, None) else {
+            return;
+        };
+        if motion == Motion::RightArrow && to > self.text.len() {
+            return self.land(reach.len(), Kind::Exclusive);
+        }
+        self.land(to, kind);
+    }
+
+    /// Puts the cursor at `to`, an index into the reach, and takes into the text the suggestion
+    /// that a move there goes over, as an operator takes a motion's text: up to the cursor, and
+    /// through it after an inclusive motion.
+    fn land(&mut self, to: usize, kind: Kind) {
+        let end = if kind == Kind::Inclusive { to + 1 } else { to };
+        let rest = self.rest();
+        let taken = rest[..end.saturating_sub(self.text.len()).min(rest.len())].to_vec();
+        if !taken.is_empty() {
+            self.begin_change();
+            self.text.extend(taken);
+        }
+        self.cursor = to;
     }
 
     fn insert_text(&mut self, characters: &[char]) {
@@ -661,16 +730,18 @@ impl Editor {
     }
 
     /// Keeps the cursor on a character in normal mode: on the last character of its line at
-    /// most, or at the start of an empty line. In visual mode the cursor may also stand past the
-    /// last character, which selects the line break, as in vim with the default 'selection'.
+    /// most, or at the start of an empty line, or past the text on the suggestion's next
+    /// character. In visual mode the cursor may also stand past the last character, which
+    /// selects the line break, as in vim with the default 'selection'.
     /// Ref: `adjust_cursor` and `nv_right` in vim's src/normal.c
     fn clamp(&mut self) {
         self.cursor = self.cursor.min(self.text.len());
-        if self.is_visual() {
+        let is_on_suggestion = self.cursor == self.text.len() && !self.rest().is_empty();
+        if self.is_visual() || is_on_suggestion {
             return;
         }
-        let start = self.line_start(self.cursor);
-        let end = self.line_end(self.cursor);
+        let start = line_start(&self.text, self.cursor);
+        let end = line_end(&self.text, self.cursor);
         if self.cursor >= end && end > start {
             self.cursor = end - 1;
         }
@@ -692,15 +763,15 @@ impl Editor {
                     (range.start.saturating_sub(1), range.end)
                 };
                 self.delete(start, end);
-                let start = self.line_start(start.min(self.text.len()));
-                self.cursor = self.first_non_blank(start);
+                let start = line_start(&self.text, start.min(self.text.len()));
+                self.cursor = first_non_blank(&self.text, start);
             }
             Operator::Delete => self.delete(range.start, range.end),
             Operator::Change => {
                 // Changing whole lines keeps the first one's indentation, as Vim does with
                 // autoindent
                 let start = if range.is_linewise {
-                    self.first_non_blank(range.start)
+                    first_non_blank(&self.text, range.start)
                 } else {
                     range.start
                 };
@@ -712,29 +783,31 @@ impl Editor {
         }
     }
 
-    /// The range from the cursor to where `motion` goes, as `operator` takes it.
+    /// The range from the cursor to where `motion` goes through the text, as `operator` takes
+    /// it.
     fn motion_range(
         &mut self,
         operator: Operator,
         motion: Motion,
         count: Option<usize>,
     ) -> Option<Range> {
+        self.remember(motion);
         let from = self.cursor;
-        let (to, kind) = self.target(motion, count, Some(operator))?;
+        let (to, kind) = self.target(&self.text, motion, count, Some(operator))?;
         let (start, end) = (from.min(to), from.max(to));
         let mut end = match kind {
             Kind::Linewise => return Some(self.lines_between(start, end)),
-            Kind::Inclusive => (end + 1).min(self.line_end(end)),
+            Kind::Inclusive => (end + 1).min(line_end(&self.text, end)),
             Kind::Exclusive => end,
         };
         // When an exclusive motion ends at the start of a line, the range ends at the end of the
         // line before. When the range also starts in the indentation, it takes whole lines.
         // Ref: :help exclusive-linewise, and `do_pending` in vim's src/ops.c
         if kind == Kind::Exclusive
-            && end == self.line_start(end)
-            && self.line_of(end) > self.line_of(start)
+            && end == line_start(&self.text, end)
+            && line_of(&self.text, end) > line_of(&self.text, start)
         {
-            if self.is_in_indent(start) {
+            if is_in_indent(&self.text, start) {
                 return Some(self.lines_between(start, end - 1));
             }
             end -= 1;
@@ -743,9 +816,9 @@ impl Editor {
         // and only blanks follow its end on the end's line, as vi's delete does.
         // Ref: `op_delete` in vim's src/ops.c
         if operator == Operator::Delete
-            && self.line_of(end) > self.line_of(start)
-            && self.is_in_indent(start)
-            && self.is_blank_to_line_end(end)
+            && line_of(&self.text, end) > line_of(&self.text, start)
+            && is_in_indent(&self.text, start)
+            && is_blank_to_line_end(&self.text, end)
         {
             return Some(self.lines_between(start, end));
         }
@@ -757,30 +830,17 @@ impl Editor {
         })
     }
 
-    /// Whether only blanks come from `at` to its line's end.
-    fn is_blank_to_line_end(&self, at: usize) -> bool {
-        self.text[at..self.line_end(at)]
-            .iter()
-            .all(|&character| matches!(character, ' ' | '\t'))
-    }
-
-    /// Whether only blanks come before `at` in its line, vim's `inindent(0)`.
-    fn is_in_indent(&self, at: usize) -> bool {
-        self.text[self.line_start(at)..at]
-            .iter()
-            .all(|&character| matches!(character, ' ' | '\t'))
-    }
-
     /// The lines from the cursor's on, `count` of them.
     fn lines_range(&self, count: Option<usize>) -> Range {
-        let last = (self.line_of(self.cursor) + count.unwrap_or(1) - 1).min(self.line_count() - 1);
-        self.lines_between(self.cursor, self.line_bounds(last).0)
+        let last = (line_of(&self.text, self.cursor) + count.unwrap_or(1) - 1)
+            .min(line_count(&self.text) - 1);
+        self.lines_between(self.cursor, line_bounds(&self.text, last).0)
     }
 
     fn lines_between(&self, first: usize, last: usize) -> Range {
         Range {
-            start: self.line_start(first),
-            end: self.line_end(last),
+            start: line_start(&self.text, first),
+            end: line_end(&self.text, last),
             is_linewise: true,
             origin: first,
         }
@@ -799,7 +859,7 @@ impl Editor {
             // When the anchor comes first, the operated text starts at the start of the anchor's
             // line, and else at the cursor. Ref: `do_pending` in vim's src/ops.c
             Some(Range {
-                origin: self.line_start(anchor).min(self.cursor),
+                origin: line_start(&self.text, anchor).min(self.cursor),
                 ..self.lines_between(start, end)
             })
         } else {
@@ -812,41 +872,59 @@ impl Editor {
         }
     }
 
-    /// Where `motion` takes the cursor, `count` times, with how an operator takes the text
-    /// between. None when the motion fails, like `f` to a character the line lacks: the cursor
-    /// stays and the operator is cancelled. `operator` is the pending operator, since in vim
-    /// some motions, like `w`, stop somewhere else when an operator is pending.
+    /// Notes what `motion` leaves for the motions after it, before it runs: the find that `;` and
+    /// `,` repeat, and the column that `j` and `k` keep.
+    fn remember(&mut self, motion: Motion) {
+        match motion {
+            Motion::Find(find, character) => self.last_find = Some((find, character)),
+            Motion::Down | Motion::Up => self.column = Some(self.goal_column()),
+            _ => {}
+        }
+    }
+
+    /// The column `j` and `k` go to: the one they keep, or else the cursor's.
+    fn goal_column(&self) -> usize {
+        (self.column).unwrap_or(self.cursor - line_start(&self.text, self.cursor))
+    }
+
+    /// Where `motion` takes the cursor through `text`, `count` times, with how an operator takes
+    /// the text between. None when the motion fails, like `f` to a character the line lacks:
+    /// the cursor stays and the operator is cancelled. `operator` is the pending operator, since
+    /// in vim some motions, like `w`, stop somewhere else when an operator is pending. `text` is
+    /// the editor's text, or the reach, which only adds to its end, so the cursor stands on the
+    /// same character in both.
     fn target(
-        &mut self,
+        &self,
+        text: &[char],
         motion: Motion,
         count: Option<usize>,
         operator: Option<Operator>,
     ) -> Option<(usize, Kind)> {
         let times = count.unwrap_or(1);
         let at = self.cursor;
-        let start = self.line_start(at);
-        let end = self.line_end(at);
+        let start = line_start(text, at);
+        let end = line_end(text, at);
         let to = match motion {
             Motion::Left => {
                 let to = at.saturating_sub(times).max(start);
                 return (to < at).then_some((to, Kind::Exclusive));
             }
-            Motion::Right => {
+            Motion::Right | Motion::RightArrow => {
                 let to = (at + times).min(end);
                 return (to > at).then_some((to, Kind::Exclusive));
             }
             Motion::Down | Motion::Up => {
-                let line = self.line_of(at);
+                let line = line_of(text, at);
                 let target = if motion == Motion::Down {
-                    (line + times).min(self.line_count() - 1)
+                    (line + times).min(line_count(text) - 1)
                 } else {
                     line.saturating_sub(times)
                 };
                 if target == line {
                     return None;
                 }
-                let column = *self.column.get_or_insert(at - start);
-                let (target_start, target_end) = self.line_bounds(target);
+                let column = self.goal_column();
+                let (target_start, target_end) = line_bounds(text, target);
                 let last = target_end.saturating_sub(1).max(target_start);
                 return Some(((target_start + column).min(last), Kind::Linewise));
             }
@@ -855,68 +933,72 @@ impl Editor {
                 // on the word's last character, it changes only that character. On blanks, `cw`
                 // takes the same text as `dw`.
                 // Ref: cpo-z, which vim sets by default, and cpo-w, which it does not
-                let is_on_word = (self.text.get(at))
+                let is_on_word = (text.get(at))
                     .is_some_and(|&character| !matches!(character, '\n' | ' ' | '\t'));
                 let (walk, kind) = if operator == Some(Operator::Change) && is_on_word {
-                    let walk = walk_to_word_end(&self.text, at, times, is_big, true);
+                    let walk = walk_to_word_end(text, at, times, is_big, true);
                     (walk, Kind::Inclusive)
                 } else {
-                    let walk =
-                        walk_to_word_start(&self.text, at, times, is_big, operator.is_some());
+                    let walk = walk_to_word_start(text, at, times, is_big, operator.is_some());
                     (walk, Kind::Exclusive)
                 };
-                return Some(self.forward_word_target(walk, kind));
+                return Some(self.forward_word_target(text, walk, kind));
             }
             Motion::WordEnd(is_big) => {
-                let walk = walk_to_word_end(&self.text, at, times, is_big, false);
-                return Some(self.forward_word_target(walk, Kind::Inclusive));
+                let walk = walk_to_word_end(text, at, times, is_big, false);
+                return Some(self.forward_word_target(text, walk, Kind::Inclusive));
             }
             Motion::WordBack(is_big) => {
-                let walk = walk_back_to_word_start(&self.text, at, times, is_big);
+                let walk = walk_back_to_word_start(text, at, times, is_big);
                 return backward_word_target(walk, Kind::Exclusive, operator);
             }
             Motion::WordEndBack(is_big) => {
-                let walk = walk_back_to_word_end(&self.text, at, times, is_big);
+                let walk = walk_back_to_word_end(text, at, times, is_big);
                 return backward_word_target(walk, Kind::Inclusive, operator);
             }
             Motion::LineStart => return Some((start, Kind::Exclusive)),
-            Motion::FirstNonBlank => return Some((self.first_non_blank(start), Kind::Exclusive)),
+            Motion::FirstNonBlank => return Some((first_non_blank(text, start), Kind::Exclusive)),
             Motion::LineEnd => {
-                let line = (self.line_of(at) + times - 1).min(self.line_count() - 1);
-                let (line_start, line_end) = self.line_bounds(line);
-                return Some((line_end.saturating_sub(1).max(line_start), Kind::Inclusive));
+                let line = (line_of(text, at) + times - 1).min(line_count(text) - 1);
+                let (line_start, line_end) = line_bounds(text, line);
+                // Never back, from a cursor on the suggestion past the text's last character
+                let last = line_end.saturating_sub(1).max(line_start).max(at);
+                return Some((last, Kind::Inclusive));
             }
             Motion::FirstLine | Motion::LastLine => {
-                let last = self.line_count() - 1;
+                let last = line_count(text) - 1;
                 let line = match (motion, count) {
                     (_, Some(number)) => (number - 1).min(last),
                     (Motion::FirstLine, None) => 0,
                     (_, None) => last,
                 };
-                let line_start = self.line_bounds(line).0;
-                return Some((self.first_non_blank(line_start), Kind::Linewise));
+                let line_start = line_bounds(text, line).0;
+                return Some((first_non_blank(text, line_start), Kind::Linewise));
             }
-            Motion::Find(find, character) => {
-                self.last_find = Some((find, character));
-                self.find(find, character, times)?
-            }
+            Motion::Find(find, character) => self.find(text, find, character, times)?,
             Motion::RepeatFind(is_reversed) => {
                 let (find, character) = self.last_find?;
                 let find = if is_reversed { reverse(find) } else { find };
-                self.find(find, character, times)?
+                self.find(text, find, character, times)?
             }
         };
         Some(to)
     }
 
-    /// The `times`-th `character` from the cursor on its line, as `find` goes.
-    fn find(&self, find: Find, character: char, times: usize) -> Option<(usize, Kind)> {
+    /// The `times`-th `character` from the cursor on its line in `text`, as `find` goes.
+    fn find(
+        &self,
+        text: &[char],
+        find: Find,
+        character: char,
+        times: usize,
+    ) -> Option<(usize, Kind)> {
         let at = self.cursor;
-        let (start, end) = (self.line_start(at), self.line_end(at));
+        let (start, end) = (line_start(text, at), line_end(text, at));
         match find {
             Find::Forward | Find::ForwardBefore => {
                 let found = (at + 1..end)
-                    .filter(|&index| self.text[index] == character)
+                    .filter(|&index| text[index] == character)
                     .nth(times - 1)?;
                 let to = if find == Find::Forward {
                     found
@@ -928,7 +1010,7 @@ impl Editor {
             Find::Backward | Find::BackwardAfter => {
                 let found = (start..at)
                     .rev()
-                    .filter(|&index| self.text[index] == character)
+                    .filter(|&index| text[index] == character)
                     .nth(times - 1)?;
                 let to = if find == Find::Backward {
                     found
@@ -954,7 +1036,7 @@ impl Editor {
                         end += 1;
                     }
                     if end == close + 1 {
-                        while start > self.line_start(open) && blank(start - 1) {
+                        while start > line_start(&self.text, open) && blank(start - 1) {
                             start -= 1;
                         }
                     }
@@ -984,7 +1066,7 @@ impl Editor {
     /// or else before it.
     fn word_object(&self, is_big: bool, is_around: bool) -> Option<(usize, usize)> {
         let at = self.cursor;
-        let (line_start, line_end) = (self.line_start(at), self.line_end(at));
+        let (line_start, line_end) = (line_start(&self.text, at), line_end(&self.text, at));
         if at >= line_end {
             return None;
         }
@@ -1025,7 +1107,7 @@ impl Editor {
     /// The quotes on the cursor's line around it, or else the first pair after it.
     fn quotes(&self, quote: char) -> Option<(usize, usize)> {
         let at = self.cursor;
-        let positions: Vec<usize> = (self.line_start(at)..self.line_end(at))
+        let positions: Vec<usize> = (line_start(&self.text, at)..line_end(&self.text, at))
             .filter(|&index| self.text[index] == quote)
             .collect();
         positions
@@ -1073,7 +1155,7 @@ impl Editor {
         let times = count.unwrap_or(1);
         let end = self.cursor + times;
         // Short of characters on its line, r replaces none
-        if end > self.line_end(self.cursor) {
+        if end > line_end(&self.text, self.cursor) {
             return;
         }
         self.begin_change();
@@ -1103,7 +1185,7 @@ impl Editor {
     /// two, where the line below has text.
     fn join(&mut self, joins: usize) {
         for _ in 0..joins {
-            let line_end = self.line_end(self.cursor);
+            let line_end = line_end(&self.text, self.cursor);
             if line_end >= self.text.len() {
                 return;
             }
@@ -1113,7 +1195,7 @@ impl Editor {
                 next += 1;
             }
             let is_next_empty = next >= self.text.len() || self.text[next] == '\n';
-            let is_left_empty = line_end == self.line_start(line_end);
+            let is_left_empty = line_end == line_start(&self.text, line_end);
             let separator: &[char] = if is_next_empty || is_left_empty {
                 &[]
             } else {
@@ -1137,21 +1219,24 @@ impl Editor {
                 block.push('\n');
             }
             let at = if before {
-                self.line_start(self.cursor)
+                line_start(&self.text, self.cursor)
             } else {
                 // The block goes after the line's break, which the text's last line lacks
                 block.pop();
                 block.insert(0, '\n');
-                self.line_end(self.cursor)
+                line_end(&self.text, self.cursor)
             };
             self.text.splice(at..at, block);
             let first_line = if before { at } else { at + 1 };
-            self.cursor = self.first_non_blank(first_line);
+            self.cursor = first_non_blank(&self.text, first_line);
         } else {
-            let at = if before || self.line_start(self.cursor) == self.line_end(self.cursor) {
+            let at = if before
+                || line_start(&self.text, self.cursor) == line_end(&self.text, self.cursor)
+            {
                 self.cursor
             } else {
-                self.cursor + 1
+                // After a cursor on the suggestion, at the text's end
+                (self.cursor + 1).min(self.text.len())
             };
             let block: Vec<char> = text.repeat(times);
             let length = block.len();
@@ -1179,90 +1264,115 @@ impl Editor {
         self.cursor = (range.start + register.text.len()).saturating_sub(1);
     }
 
+    /// Enters insert mode where the cursor lands as `insert` says, through the reach, as for an
+    /// exclusive move: `a` takes the character under the cursor when it is the suggestion's, and
+    /// `A` all of the line.
     fn insert(&mut self, insert: Insert) {
         self.begin_change();
-        let (start, end) = (self.line_start(self.cursor), self.line_end(self.cursor));
-        self.cursor = match insert {
-            Insert::Before => self.cursor,
-            Insert::After => (self.cursor + 1).min(end),
-            Insert::LineStart => self.first_non_blank(start),
+        let at = self.cursor;
+        let reach = self.reach();
+        let (start, end) = (line_start(&reach, at), line_end(&reach, at));
+        let to = match insert {
+            Insert::Before => at,
+            Insert::After => (at + 1).min(end),
+            Insert::LineStart => first_non_blank(&reach, start),
             Insert::LineEnd => end,
-            Insert::LineBelow => {
-                self.text.insert(end, '\n');
-                end + 1
-            }
-            Insert::LineAbove => {
-                self.text.insert(start, '\n');
-                start
-            }
         };
+        self.land(to, Kind::Exclusive);
         self.begin_session();
     }
 
-    /// Where `w` or `e` takes the cursor from `walk`, with how an operator takes the text
-    /// between. They never fail: when the text ends first, the cursor stays where the walk
-    /// stopped, and an operator takes the text up to there.
+    /// Enters insert mode on a new line below the cursor's line, or above it. The new line is a
+    /// change, so it goes through the text alone.
+    fn open_line(&mut self, below: bool) {
+        self.begin_change();
+        let at = if below {
+            line_end(&self.text, self.cursor)
+        } else {
+            line_start(&self.text, self.cursor)
+        };
+        self.text.insert(at, '\n');
+        self.cursor = if below { at + 1 } else { at };
+        self.begin_session();
+    }
+
+    /// Where `w` or `e` takes the cursor from `walk` through `text`, with how an operator takes
+    /// the text between. They never fail: when the text ends first, the cursor stays where the
+    /// walk stopped, and an operator takes the text up to there.
     /// Ref: `nv_wordcmd` and `adjust_cursor` in vim's src/normal.c
-    fn forward_word_target(&self, walk: Walk, kind: Kind) -> (usize, Kind) {
+    fn forward_word_target(&self, text: &[char], walk: Walk, kind: Kind) -> (usize, Kind) {
         // When the walk stops past the last character of a line, the cursor moves back onto
         // that character, and an operator includes it. In visual mode the cursor stays past the
         // character, which selects the line break.
         let to = walk.to;
-        let is_past_line = to > self.line_start(to) && to == self.line_end(to);
+        let is_past_line = to > line_start(text, to) && to == line_end(text, to);
         if to > self.cursor && is_past_line && !self.is_visual() {
             return (to - 1, Kind::Inclusive);
         }
         (to, kind)
     }
+}
 
-    fn line_start(&self, at: usize) -> usize {
-        self.text[..at.min(self.text.len())]
-            .iter()
-            .rposition(|&character| character == '\n')
-            .map_or(0, |line_break| line_break + 1)
-    }
+fn line_start(text: &[char], at: usize) -> usize {
+    text[..at.min(text.len())]
+        .iter()
+        .rposition(|&character| character == '\n')
+        .map_or(0, |line_break| line_break + 1)
+}
 
-    /// The index of the line break that ends the line `at` is on, or the text's length.
-    fn line_end(&self, at: usize) -> usize {
-        let at = at.min(self.text.len());
-        self.text[at..]
-            .iter()
-            .position(|&character| character == '\n')
-            .map_or(self.text.len(), |offset| at + offset)
-    }
+/// The index of the line break that ends the line `at` is on, or the text's length.
+fn line_end(text: &[char], at: usize) -> usize {
+    let at = at.min(text.len());
+    text[at..]
+        .iter()
+        .position(|&character| character == '\n')
+        .map_or(text.len(), |offset| at + offset)
+}
 
-    fn line_of(&self, at: usize) -> usize {
-        self.text[..at.min(self.text.len())]
-            .iter()
-            .filter(|&&character| character == '\n')
-            .count()
-    }
+fn line_of(text: &[char], at: usize) -> usize {
+    text[..at.min(text.len())]
+        .iter()
+        .filter(|&&character| character == '\n')
+        .count()
+}
 
-    fn line_count(&self) -> usize {
-        self.line_of(self.text.len()) + 1
-    }
+fn line_count(text: &[char]) -> usize {
+    line_of(text, text.len()) + 1
+}
 
-    /// The start and the end of the line with `number`, counted from 0.
-    fn line_bounds(&self, number: usize) -> (usize, usize) {
-        let start = if number == 0 {
-            0
-        } else {
-            self.text
-                .iter()
-                .enumerate()
-                .filter(|&(_, &character)| character == '\n')
-                .nth(number - 1)
-                .map_or(self.text.len(), |(index, _)| index + 1)
-        };
-        (start, self.line_end(start))
-    }
+/// The start and the end of the line with `number`, counted from 0.
+fn line_bounds(text: &[char], number: usize) -> (usize, usize) {
+    let start = if number == 0 {
+        0
+    } else {
+        text.iter()
+            .enumerate()
+            .filter(|&(_, &character)| character == '\n')
+            .nth(number - 1)
+            .map_or(text.len(), |(index, _)| index + 1)
+    };
+    (start, line_end(text, start))
+}
 
-    fn first_non_blank(&self, line_start: usize) -> usize {
-        let end = self.line_end(line_start);
-        (line_start..end)
-            .find(|&index| !matches!(self.text[index], ' ' | '\t'))
-            .unwrap_or(end)
-    }
+fn first_non_blank(text: &[char], line_start: usize) -> usize {
+    let end = line_end(text, line_start);
+    (line_start..end)
+        .find(|&index| !matches!(text[index], ' ' | '\t'))
+        .unwrap_or(end)
+}
+
+/// Whether only blanks come from `at` to its line's end.
+fn is_blank_to_line_end(text: &[char], at: usize) -> bool {
+    text[at..line_end(text, at)]
+        .iter()
+        .all(|&character| matches!(character, ' ' | '\t'))
+}
+
+/// Whether only blanks come before `at` in its line, vim's `inindent(0)`.
+fn is_in_indent(text: &[char], at: usize) -> bool {
+    text[line_start(text, at)..at]
+        .iter()
+        .all(|&character| matches!(character, ' ' | '\t'))
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1561,7 +1671,8 @@ fn is_change(command: Command) -> bool {
         | Command::ToggleCase(_)
         | Command::Join(_)
         | Command::Put { .. }
-        | Command::Insert(_) => true,
+        | Command::Insert(_)
+        | Command::Open { .. } => true,
         _ => false,
     }
 }
@@ -1628,8 +1739,8 @@ fn parse(keys: &[Key], is_visual: bool) -> Parse {
         (Key::Char('a'), []) => Command::Insert(Insert::After),
         (Key::Char('I'), []) => Command::Insert(Insert::LineStart),
         (Key::Char('A'), []) => Command::Insert(Insert::LineEnd),
-        (Key::Char('o'), []) => Command::Insert(Insert::LineBelow),
-        (Key::Char('O'), []) => Command::Insert(Insert::LineAbove),
+        (Key::Char('o'), []) => Command::Open { below: true },
+        (Key::Char('O'), []) => Command::Open { below: false },
         (Key::Char('v'), []) => Command::Visual(Mode::Visual),
         (Key::Char('V'), []) => Command::Visual(Mode::VisualLine),
         (Key::Escape, []) => Command::Cancel,
@@ -1704,7 +1815,8 @@ fn parse_motion(keys: &[Key]) -> Result<Motion, Parse> {
     Ok(match keys {
         [] | [Key::Char('g' | 'f' | 't' | 'F' | 'T')] => return Err(Parse::Incomplete),
         [Key::Char('h') | Key::Left | Key::Backspace] => Motion::Left,
-        [Key::Char('l' | ' ') | Key::Right] => Motion::Right,
+        [Key::Char('l' | ' ')] => Motion::Right,
+        [Key::Right] => Motion::RightArrow,
         [Key::Char('j') | Key::Down] => Motion::Down,
         [Key::Char('k') | Key::Up] => Motion::Up,
         [Key::Char('w')] => Motion::WordStart(false),
@@ -1780,8 +1892,8 @@ fn split_count(keys: &[Key]) -> (Option<usize>, &[Key]) {
 mod tests {
     use super::*;
 
-    /// The keys in `keys`, where `<Esc>`, `<BS>` and `<C-x>` name the keys without a
-    /// character of their own.
+    /// The keys in `keys`, where `<Esc>`, `<BS>`, `<Right>`, `<End>` and `<C-x>` name the keys
+    /// without a character of their own.
     pub(super) fn events(keys: &str) -> Vec<KeyEvent> {
         let mut events = Vec::new();
         let mut rest = keys;
@@ -1794,6 +1906,8 @@ mod tests {
                 let event = match name {
                     "Esc" => Some(KeyEvent::new(KeyCode::Escape, Modifiers::NONE)),
                     "BS" => Some(KeyEvent::new(KeyCode::Backspace, Modifiers::NONE)),
+                    "Right" => Some(KeyEvent::new(KeyCode::Right, Modifiers::NONE)),
+                    "End" => Some(KeyEvent::new(KeyCode::End, Modifiers::NONE)),
                     _ => name.strip_prefix("C-").and_then(|key| {
                         let key = key.chars().next()?;
                         Some(KeyEvent::new(KeyCode::Char(key), Modifiers::CONTROL))
@@ -2015,6 +2129,136 @@ mod tests {
         assert_eq!(shown(&after("one\ntwo\nthree", "Vjd")), "|three");
         assert_eq!(shown(&after("foo bar", "viwc!<Esc>")), "|! bar");
         assert_eq!(shown(&after("abc", "vl~")), "|ABc");
+    }
+
+    const SUGGESTION: &str = "Fix the bug";
+
+    /// An editor on `text`, in normal mode at its first character, with [`SUGGESTION`], after
+    /// `keys`.
+    fn suggesting(text: &str, keys: &str) -> Editor {
+        let mut editor = Editor::new(text);
+        editor.suggest(SUGGESTION);
+        editor.state = State::Normal;
+        editor.cursor = 0;
+        for event in events(keys) {
+            editor.press(&event);
+        }
+        editor
+    }
+
+    #[test]
+    fn a_move_takes_the_suggestion_as_an_operator_would_take_the_motion() {
+        let cases = [
+            ("ll", "Fi|x"),
+            ("lll", "Fix|"),
+            ("llll", "Fix |"),
+            ("llw", "Fix |"),
+            ("lle", "Fix th|e"),
+            ("ll2e", "Fix the bu|g"),
+            ("$", "Fix the bu|g"),
+            ("llf ", "Fix| "),
+            ("llt ", "Fi|x"),
+        ];
+        for (keys, expected) in cases {
+            assert_eq!(shown(&suggesting("Fix", keys)), expected, "{keys}");
+        }
+    }
+
+    #[test]
+    fn on_an_empty_text_the_cursor_stands_on_the_suggestions_first_character() {
+        let cases = [
+            ("", "|"),
+            ("l", "F|"),
+            ("ll", "Fi|"),
+            ("li", "F|"),
+            ("i", "|"),
+            ("a", "F|"),
+            ("w", "Fix |"),
+            ("e", "Fi|x"),
+            ("$", "Fix the bu|g"),
+            ("A", "Fix the bug|"),
+        ];
+        for (keys, expected) in cases {
+            assert_eq!(shown(&suggesting("", keys)), expected, "{keys}");
+        }
+    }
+
+    #[test]
+    fn insert_mode_takes_only_the_suggestion_before_the_cursor() {
+        assert_eq!(shown(&suggesting("Fix", "lla")), "Fix|");
+        assert_eq!(shown(&suggesting("Fix", "A")), "Fix the bug|");
+        assert_eq!(shown(&suggesting("Fix", "lla<End>")), "Fix the bug|");
+    }
+
+    #[test]
+    fn the_right_arrow_and_ctrl_f_take_the_whole_suggestion_once_they_take_any() {
+        assert_eq!(shown(&suggesting("Fix", "lla<Right>")), "Fix the bug|");
+        assert_eq!(shown(&suggesting("Fix", "lla<C-f>")), "Fix the bug|");
+        assert_eq!(shown(&suggesting("", "i<Right>")), "Fix the bug|");
+        assert_eq!(shown(&suggesting("Fix", "lll<Right>")), "Fix the bu|g");
+        assert_eq!(shown(&suggesting("Fix", "<Right>")), "F|ix");
+        assert_eq!(shown(&suggesting("Fix", "i<C-f>")), "F|ix");
+    }
+
+    #[test]
+    fn ctrl_b_moves_as_the_left_arrow_in_insert_mode() {
+        assert_eq!(shown(&after("abc", "A<C-b><C-b>")), "a|bc");
+        assert_eq!(shown(&after("abc", "A<C-b>x")), "abx|c");
+    }
+
+    #[test]
+    fn visual_mode_takes_what_it_moves_over_then_changes_only_the_text() {
+        let editor = suggesting("Fix", "llvll");
+        assert_eq!(shown(&editor), "Fix |");
+        assert_eq!(editor.selection(), Some((2, 4)));
+        let editor = suggesting("Fix", "llvlld");
+        assert_eq!(
+            (shown(&editor), editor.suggested()),
+            ("Fi|".into(), "x the bug".into())
+        );
+    }
+
+    #[test]
+    fn dot_repeats_an_insert_that_took_the_suggestion() {
+        assert_eq!(
+            shown(&suggesting("Fix", "lla<Right><Esc>u.")),
+            "Fix the bu|g"
+        );
+    }
+
+    #[test]
+    fn a_change_never_reaches_the_suggestion() {
+        let cases = [
+            ("dw", "|", "Fix the bug"),
+            ("D", "|", "Fix the bug"),
+            ("llx", "Fi|", "x the bug"),
+            ("lld$", "Fi|", "x the bug"),
+            ("lllD", "Fix|", " the bug"),
+            ("lllx", "Fix|", " the bug"),
+            ("p", "|Fix", " the bug"),
+            ("yiwlllp", "FixFi|x", ""),
+        ];
+        for (keys, expected, rest) in cases {
+            let editor = suggesting("Fix", keys);
+            assert_eq!(shown(&editor), expected, "{keys}");
+            assert_eq!(editor.suggested(), rest, "{keys}");
+        }
+    }
+
+    #[test]
+    fn the_suggestion_shows_while_the_text_is_its_start() {
+        assert_eq!(suggesting("Fix", "lla t").suggested(), "he bug");
+        assert_eq!(suggesting("Fix", "lla!").suggested(), "");
+        assert_eq!(suggesting("Fix", "lla!<Esc>u").suggested(), " the bug");
+        assert_eq!(suggesting("Fix", "$u").text(), "Fix");
+    }
+
+    #[test]
+    fn without_a_suggestion_the_right_arrow_and_end_move_as_before() {
+        assert_eq!(shown(&after("abc", "<Right>")), "a|bc");
+        assert_eq!(shown(&after("abc", "$<Right>")), "ab|c");
+        assert_eq!(shown(&after("abc", "a<Right><Right><Right>")), "abc|");
+        assert_eq!(shown(&after("ab\ncd", "a<End>")), "ab|\ncd");
     }
 
     #[test]
@@ -2276,8 +2520,8 @@ mod tests {
             };
             editor.press(&event);
         }
-        let line = editor.line_of(editor.cursor) + 1;
-        let column = editor.cursor - editor.line_start(editor.cursor) + 1;
+        let line = line_of(&editor.text, editor.cursor) + 1;
+        let column = editor.cursor - line_start(&editor.text, editor.cursor) + 1;
         let register = match (editor.register.is_linewise, editor.register.text.is_empty()) {
             (true, _) => "V",
             (false, false) => "v",

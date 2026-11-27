@@ -21,6 +21,8 @@
 //! `FAKE_GATE` names a pipe, the second part waits until someone writes to it, so a test can
 //! act while the line is unfinished.
 //! The message `Write tables` gets a table that fits as a grid, then one too wide for it.
+//! The message `Suggest` gets the text `ok`, and after the turn's result, the suggestion
+//! `Run the tests next`.
 //! The message `Write prose and code` gets a heading, a paragraph, a list item and a quote, each
 //! long enough to wrap, then a code block with a long command, to see which lines wrap at spaces.
 //! The plan's usage limits show only with `CLAUDE_CONFIG_DIR` set, since the fake keeps its copy
@@ -44,6 +46,8 @@ const BLOCKS: [&str; 2] = [
 const LONG_LINE_MESSAGE: &str = "Write a long line";
 
 const TABLES_MESSAGE: &str = "Write tables";
+
+const SUGGEST_MESSAGE: &str = "Suggest";
 const TABLES: &str = "A narrow table:\n\n\
     | Fruit | Color |\n|---|---|\n| Apple | red |\n| Banana | yellow |\n\n\
     A wide one:\n\n\
@@ -207,6 +211,7 @@ impl Fake {
             contract::REPLY_OK_MESSAGE => return self.send_turn(&[text_line("ok")]),
             LONG_LINE_MESSAGE => return self.send_long_line(),
             TABLES_MESSAGE => return self.send_turn(&[text_line(TABLES)]),
+            SUGGEST_MESSAGE => return self.send_suggested_turn(),
             PROSE_AND_CODE_MESSAGE => return self.send_turn(&[text_line(PROSE_AND_CODE)]),
             contract::MOVED_CALL_MESSAGE => {
                 return self.wait_for_interrupt(&contract::moved_call());
@@ -273,6 +278,18 @@ impl Fake {
             send(line);
         }
         self.end_turn();
+    }
+
+    /// Sends the turn of `SUGGEST_MESSAGE`, then the suggestion, which follows the turn's result.
+    fn send_suggested_turn(&self) {
+        self.send_turn(&[text_line("ok")]);
+        let suggestion = json!({
+            "type": "prompt_suggestion",
+            "suggestion": "Run the tests next",
+            "uuid": "00000000-0000-4000-8000-000000000000",
+            "session_id": self.session_id(),
+        });
+        send(&suggestion.to_string());
     }
 
     /// Sends the long line's start, waits for `FAKE_GATE`, and sends its end, as a turn.

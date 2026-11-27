@@ -158,20 +158,9 @@ Keys come in two kinds.
 
 In insert mode, Ctrl+B and Ctrl+F move as the Left and Right arrows, as readline's `backward-char` and `forward-char` do, which vim leaves [unused](https://vimhelp.org/index.txt.html#insert-index) there and [vim-rsi](https://github.com/tpope/vim-rsi) maps the same way.
 
-After Claude's turn, Claude Code can suggest your next message, which shows in grey after your text while your text is its start, as [zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions/blob/master/README.md) shows a shell's.
-The suggestion joins your text only where the cursor moves onto it: moves go through your text and the suggestion after it, and changes only through your text.
-So no key of its own takes it: a motion takes what it goes over, as vim's operators take a motion's text, so `l` and `w` take what they pass, and `e`, `$` and `A` also the character they land on, as zsh-autosuggestions takes it "up to the point that the cursor moves to" on `forward-word`.
-In normal mode the cursor can stand on the suggestion's next character, right past your text, as on an empty box, where it stands on the first one.
-The Right arrow takes all of it once it takes any, as zsh-autosuggestions does on `forward-char` "with the cursor at the end of the buffer", and so does Ctrl+F in insert mode, and End in insert mode, for its line.
-What a motion took is text like any other: moving back keeps it, and `u` takes it back, as any change.
-Tab takes nothing, unlike in Claude Code, since it is no motion of vi's.
-Enter on an empty box sends nothing, not the suggestion either.
-Claude Code also [stopped Enter from sending](https://github.com/anthropics/claude-code/issues/57449) a suggestion that Tab or an arrow hasn't taken.
-Typing what the suggestion says keeps the rest of it, and typing anything else hides it.
-The suggestion comes from the conversation as it stands, so a message you send, a turn of Claude's or Ctrl+L ends it.
-Claude Code often sends none: its model stays silent unless your next message is obvious, like `yes` after Claude asks whether to go on.
-It also sends none after a turn that wrote the prompt cache from scratch, like the first turn, nor in plan mode or after an API error.
-While your plan's usage is near its limit, it sends none unless `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=true` is set, and at the limit it sends none at all, as its [Agent SDK's types](https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.3.322/sdk.d.ts) say of `promptSuggestions`.
+When Claude Code suggests your next message, the suggestion shows in grey after your text while your text is its start, as [zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions/blob/master/README.md) shows a shell's.
+The Right arrow (also Ctrl+F in insert mode) takes the whole suggestion, as in Claude Code.
+In normal mode, moving the cursor into the suggestion adds the part it moves over to your text, so `w` takes a word and `fx` takes up to and including the next `x`, while edits change only your text.
 
 A key that loses what no key brings back waits for a second press in a row, and the label row names the loss in orange, like `Enter again refuses 2 questions and sends on a possibly cold cache`.
 These keys are:

@@ -5,7 +5,6 @@ mod common;
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use common::{Tmux, quote};
 
@@ -14,24 +13,30 @@ fn kill_ends_claudio_by_its_signal_once_it_removed_its_file() {
     for (name, number) in [("INT", libc::SIGINT), ("TERM", libc::SIGTERM)] {
         let session = Session::start();
         let pid = session.tmux.run(&["display-message", "-p", "#{pane_pid}"]);
-        let killed = Command::new("kill")
-            .args([&format!("-{name}"), pid.trim()])
-            .status()
-            .expect("kill runs");
-        assert!(killed.success());
-        session.tmux.wait_until("claudio ends", || {
-            session
-                .tmux
-                .run(&["display-message", "-p", "#{pane_dead}"])
-                .trim()
-                == "1"
-        });
-        let signal = session
-            .tmux
-            .run(&["display-message", "-p", "#{pane_dead_signal}"]);
-        assert_eq!(signal.trim(), number.to_string(), "SIG{name}");
+        let pid: libc::pid_t = pid.trim().parse().expect("tmux tells a process id");
+        // SAFETY: kill only sends a signal, to claudio, which runs until the signal ends it
+        assert_eq!(unsafe { libc::kill(pid, number) }, 0, "SIG{name} is sent");
+        let ended_by = end_signal(&session.tmux, "main");
+        assert_eq!(ended_by, shell_end_signal(&session.tmux, name), "SIG{name}");
         assert_eq!(session.files(), Vec::<String>::new(), "SIG{name}");
     }
+}
+
+/// The signal that ended the program of the window `window`, once it ended, as tmux tells it.
+fn end_signal(tmux: &Tmux, window: &str) -> String {
+    let field = |name| tmux.run(&["display-message", "-p", "-t", window, name]);
+    tmux.wait_until("the program ends", || field("#{pane_dead}").trim() == "1");
+    field("#{pane_dead_signal}").trim().to_string()
+}
+
+/// How tmux tells the end of a shell that the signal `name`, like `INT`, killed, which claudio's
+/// end compares with: tmux tells a signal by its name on a system that lists the names, like
+/// `int` on macOS, and by its number elsewhere, like `2` on Linux.
+/// Ref: <https://github.com/tmux/tmux/blob/3.5a/tmux.c#L285>, `sig2name`
+fn shell_end_signal(tmux: &Tmux, name: &str) -> String {
+    let kill = format!("kill -{name} $$");
+    tmux.run(&["new-window", "-d", "-n", "shell", "sh", "-c", &kill]);
+    end_signal(tmux, "shell")
 }
 
 #[test]
@@ -70,8 +75,10 @@ impl Session {
             tmux: Tmux::start(80, 24, &program),
             dir,
         };
-        // The pane stays once claudio ends, so tmux can tell how it ended
-        session.tmux.run(&["set-option", "remain-on-exit", "on"]);
+        // A pane stays once its program ends, so tmux can tell how it ended
+        session
+            .tmux
+            .run(&["set-option", "-g", "remain-on-exit", "on"]);
         (session.tmux).wait_until("claudio creates its file", || !session.files().is_empty());
         session
     }

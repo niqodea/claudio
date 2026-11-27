@@ -5,7 +5,7 @@ set -eu
 root="$(dirname "$(realpath "$0")")"
 
 cargo fmt --manifest-path "$root/Cargo.toml" --check
-cargo clippy --quiet --manifest-path "$root/Cargo.toml" --all-targets -- --deny warnings
+cargo clippy --quiet --manifest-path "$root/Cargo.toml" --all-targets --all-features -- --deny warnings
 # A link to a check that is gone breaks the doc
 RUSTDOCFLAGS='--deny warnings' cargo doc --quiet --no-deps --document-private-items --manifest-path "$root/Cargo.toml"
 # What relies on undocumented behaviour of Claude Code says so only with a link to its check, which the doc checks

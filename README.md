@@ -95,6 +95,21 @@ What claudio skips, it relies on in no way, so it needs neither.
 The flag stays as a last net, since Claude Code sends kinds its types never declare, like `session_title_changed`, and catches what neither the types nor the checks foresaw.
 A message that lacks what claudio reads, or holds a value its type has no room for, gets a line in red.
 
+## Tests
+
+The tests come in kinds by what they need to run, as [Software Engineering at Google](https://abseil.io/resources/swe-book/html/ch11.html#test_size) sorts tests by the resources they use, so that most need nothing and give the same result everywhere:
+
+| Kind | Where | Needs | Runs with |
+| --- | --- | --- | --- |
+| unit | `#[test]` in `src` | nothing | `cargo test` |
+| integration | `tests/fake_claude.rs` | the fake Claude Code, which Cargo builds | `cargo test` |
+| in a terminal | the other files of `tests` | tmux 3.8 or later | `cargo test --features tmux` |
+| against Vim | the comparison of the vi keys in `src/vi.rs` | Vim | `cargo test --features vim` |
+| contract | `src/contract.rs` | the Claude Code that claudio runs | `claudio check-claude-code` |
+
+The unit and integration tests are Rust's own two kinds, [test organization](https://doc.rust-lang.org/book/ch11-03-test-organization.html) in its book.
+A test that runs a program from outside the repository requires a Cargo feature named after the program, a test file through its [`required-features`](https://doc.rust-lang.org/cargo/reference/cargo-targets.html#the-required-features-field) and a single test by being ignored without it, so `cargo test` needs nothing installed, and `cargo test --all-features` runs all but the contract checks, which [What claudio relies on](#what-claudio-relies-on) tells.
+
 ## Config
 
 claudio reads `claudio/config.toml` in `$XDG_CONFIG_HOME`, or in `~/.config` when that is unset, once as it starts.

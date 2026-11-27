@@ -1,4 +1,7 @@
-//! A tmux server for a test to run claudio in, which the test drives and reads.
+//! A tmux server for a test to run claudio in, which the test drives and reads. It exists only
+//! with the `tmux` feature, so a test file that uses it fails to build until `Cargo.toml` gives
+//! it `required-features = ["tmux"]`, as the README's Tests section asks.
+#![cfg(feature = "tmux")]
 
 use std::path::Path;
 use std::process::Command;

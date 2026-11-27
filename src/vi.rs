@@ -2287,7 +2287,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "runs Vim, which `cargo test -- --ignored` takes from PATH"]
+    #[cfg_attr(
+        not(feature = "vim"),
+        ignore = "runs Vim, which the vim feature turns on"
+    )]
     fn the_editor_does_what_vim_does() {
         let mismatches: Vec<String> = VIM_CASES
             .iter()

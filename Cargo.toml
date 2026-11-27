@@ -33,5 +33,23 @@ toml = { version = "1.2.1", default-features = false, features = ["std", "parse"
 unicode-width = "0.2"
 uuid = { version = "1", features = ["v4"] }
 
+# The tests that run a program from outside the repository, one feature for each program, as the
+# README's Tests section tells
+[features]
+tmux = []
+vim = []
+
+[[test]]
+name = "resize"
+required-features = ["tmux"]
+
+[[test]]
+name = "termination"
+required-features = ["tmux"]
+
+[[test]]
+name = "typeahead"
+required-features = ["tmux"]
+
 [lints.clippy]
 pedantic = "warn"

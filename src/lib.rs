@@ -82,9 +82,24 @@ struct Shared {
     commands: Vec<String>,
     /// The calls, tasks and subagents of the session, which `output` draws.
     work: Work,
-    /// Whether a clear waits for the tasks that run in the background to end, which only
-    /// `hold_clear` and `note_background_tasks` change.
-    is_clear_waiting: bool,
+    /// The clear the user asked for, which only `hold_clear`, `note_background_tasks` and the
+    /// reset of the session change.
+    clear: Clear,
+}
+
+/// Where the clear the user asked for is, from the key to the new session. claudio keeps a model
+/// of its own rather than Claude Code's, whose `/clear` runs only once the turn ends, while a
+/// message sent meanwhile can join that turn, so the clear pends until Claude Code reports the
+/// new session, and the user's text and Claude's questions wait for it.
+/// Ref: <https://learn.microsoft.com/en-us/azure/architecture/patterns/anti-corruption-layer>, on
+/// translating a subsystem's semantics into one's own at a single layer
+#[derive(Clone, Copy, PartialEq)]
+enum Clear {
+    None,
+    /// Held while tasks run in the background, for `hold_clear`'s reason.
+    Held,
+    /// Sent to Claude Code, which has not reported the new session yet.
+    Sent,
 }
 
 impl Shared {
@@ -101,26 +116,32 @@ impl Shared {
     }
 
     /// Holds a clear while tasks run in the background, so their ends, and Claude's turns on
-    /// them, stay in the session that started them, and gives whether the clear goes now, with
-    /// none running. The tasks are noted under the same lock, so the end of the last one releases
-    /// the clear, as `note_background_tasks` tells.
+    /// them, stay in the session that started them, rather than coming in the new one, and
+    /// gives whether the clear goes now, with none running. The tasks are noted under the same
+    /// lock, so the end of the last one releases the clear, as `note_background_tasks` tells.
     ///
+    /// Undocumented: [`crate::contract::a_clear_leaves_a_background_task_running`]
     /// Undocumented: [`crate::contract::a_clear_follows_the_turn_on_the_last_tasks_end`]
     fn hold_clear(&mut self) -> bool {
-        if self.work.is_quiet() {
-            return true;
-        }
-        self.is_clear_waiting = true;
-        false
+        let goes = self.work.is_quiet();
+        self.clear = if goes { Clear::Sent } else { Clear::Held };
+        goes
     }
 
     /// Notes the tasks that run in the background, and gives whether the clear held for them
     /// goes now, with none left.
     fn note_background_tasks(&mut self, tasks: Vec<protocol::Task>) -> bool {
         self.work.note_listed(tasks);
-        let releases = self.is_clear_waiting && self.work.is_quiet();
-        self.is_clear_waiting &= !releases;
+        let releases = self.clear == Clear::Held && self.work.is_quiet();
+        if releases {
+            self.clear = Clear::Sent;
+        }
         releases
+    }
+
+    /// Whether a clear the user asked for has not reached the new session yet.
+    fn is_clear_pending(&self) -> bool {
+        self.clear != Clear::None
     }
 
     /// `id`, the session's, unless the session is new and had no call, so it holds nothing to
@@ -172,6 +193,7 @@ impl Shared {
             Event::Version(version) => self.note_version(version),
             Event::Commands(commands) => self.note_commands(commands),
             Event::Reset { previous_session } => {
+                self.clear = Clear::None;
                 self.work.start_session();
                 let resume = self.resumable(Some(&previous_session));
                 self.output.show_session_end(SessionEnd::Cleared, resume);
@@ -312,7 +334,7 @@ fn run() -> Result<Exit, String> {
         claude_code_version: None,
         commands: Vec::new(),
         work: Work::default(),
-        is_clear_waiting: false,
+        clear: Clear::None,
     }));
     let (input_sender, inputs) = mpsc::channel();
 

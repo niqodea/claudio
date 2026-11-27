@@ -12,7 +12,9 @@
 //! questions, a plan, and calls to allow of Bash, Edit, Write, `WebFetch` and an MCP tool. A turn
 //! that asks ends once all its requests are answered. The messages of the checks of a slow
 //! permission check, of a narration and of tasks get those checks' lines, and an interrupt, send
-//! now's too, gets the rest of a call that waits for one.
+//! now's too, gets the rest of a call that waits for one. The held command of the checks runs
+//! until its release file appears, and the fake exits only after it ends, as Claude Code waits
+//! for its background tasks once its input closes.
 //! `/clear` starts a new session, and `/compact` and `/cost` answer as Claude Code does.
 //! `FAKE_DELAY` is how many seconds each answer waits before it starts, none when unset.
 //! The message `Write a long line` gets a line of 200 words, streamed in two parts: when
@@ -27,8 +29,8 @@
 use std::env;
 use std::fs;
 use std::io::{self, BufRead};
-use std::path::PathBuf;
-use std::thread;
+use std::path::{Path, PathBuf};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use claudio::contract;
@@ -70,12 +72,16 @@ fn main() {
         on_background: Vec::new(),
         on_stop: Vec::new(),
         asks_waiting: 0,
+        held: None,
     };
     for line in io::stdin().lock().lines().map_while(Result::ok) {
         let Ok(message) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
         fake.answer(&message);
+    }
+    if let Some(held) = fake.held {
+        held.join().expect("the held command's thread ends");
     }
 }
 
@@ -94,6 +100,8 @@ struct Fake {
     on_stop: Vec<String>,
     /// How many requests of the turn that asks wait for their answers.
     asks_waiting: usize,
+    /// The thread that sends the held command's end once its release file appears.
+    held: Option<JoinHandle<()>>,
 }
 
 impl Fake {
@@ -195,6 +203,7 @@ impl Fake {
                 self.on_stop = lines[5..7].to_vec();
                 return self.send_turn(&lines[..4]);
             }
+            contract::HELD_TASK_MESSAGE => return self.send_held_task(),
             contract::REPLY_OK_MESSAGE => return self.send_turn(&[text_line("ok")]),
             LONG_LINE_MESSAGE => return self.send_long_line(),
             TABLES_MESSAGE => return self.send_turn(&[text_line(TABLES)]),
@@ -287,13 +296,23 @@ impl Fake {
     fn send_task(&self, lines: &[String], turn_lines: usize) {
         let (turn, end) = lines.split_at(turn_lines);
         self.send_turn(turn);
-        if end.is_empty() {
-            return;
+        if !end.is_empty() {
+            send_task_end(end, self.sends_states);
         }
-        for line in end {
-            send(line);
-        }
-        self.send_turn(&[text_line("ok")]);
+    }
+
+    /// Sends the held command's lines up to the call's result, as a turn, and its end once its
+    /// release file appears in the directory the fake runs in, with Claude's turn on it.
+    fn send_held_task(&mut self) {
+        let (turn, end) = contract::held_task();
+        self.send_turn(&turn);
+        let sends_states = self.sends_states;
+        self.held = Some(thread::spawn(move || {
+            while !Path::new(contract::RELEASE_FILE).exists() {
+                thread::sleep(Duration::from_millis(50));
+            }
+            send_task_end(&end, sends_states);
+        }));
     }
 
     /// Sends the call that starts `lines`, and keeps the rest for the interrupt that ends it.
@@ -314,8 +333,7 @@ impl Fake {
     }
 
     fn end_turn(&self) {
-        send(&json!({"type": "result", "subtype": "success"}).to_string());
-        self.state("idle");
+        end_turn(self.sends_states);
     }
 
     fn session_id(&self) -> String {
@@ -331,6 +349,24 @@ impl Fake {
 
 fn send(line: &str) {
     println!("{line}");
+}
+
+/// Sends `end`, the lines of a background task's end, then Claude's turn on it, as
+/// [`contract::clear_after_task`] tells.
+fn send_task_end(end: &[String], sends_states: bool) {
+    for line in end {
+        send(line);
+    }
+    send(&text_line("ok"));
+    end_turn(sends_states);
+}
+
+/// Ends the turn, and with `sends_states`, tells the session idle.
+fn end_turn(sends_states: bool) {
+    send(&json!({"type": "result", "subtype": "success"}).to_string());
+    if sends_states {
+        send(&contract::session_state("idle"));
+    }
 }
 
 /// A part of Claude's reply as it streams, in the block `index`.

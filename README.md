@@ -146,7 +146,7 @@ These keys are:
 
 - Ctrl+D
 - Ctrl+L, once the session had a call, which also refuses the questions that wait, or else stops Claude's turn
-- Ctrl+C on questions, and while the session ends, where it stops Claude's background tasks too
+- Ctrl+C on questions
 - Ctrl+K, while tasks run in the background
 - Enter on a message or a command while questions wait, which refuses them, or when the cache may be cold, where the call writes the whole context to the cache again, at a price above that of new input: once its time to live passed, and while its age is unknown, as in a resumed session, or before Claude Code tells at startup whether the session is new
 - a key that answers a question and leaves out your own text
@@ -157,17 +157,20 @@ Any other key, or a paste, cancels the wait, however long it lasted, and a loss 
 `B` on the label row counts the tasks Claude runs in the background, like a shell, up to 9 and then `+`.
 `A` after it counts the subagents that run, in the foreground or in the background, the same way.
 Ctrl+C stops Claude's turn and leaves what runs in the background running, and Ctrl+K stops it all: the turn and every task in the background, while the session goes on.
-Ctrl+D waits for them to end, and names them on the label row meanwhile, and Ctrl+C there stops them.
+Ctrl+D waits for them to end, and its first press says so, like `Ctrl+D again ends the session after Claude's turn`.
+Meanwhile the session takes no text, so the input box and the mode's letter go, and the label row says what the end waits for in place of what Claude does, as a clear that waits does, like `end waits for Claude's turn · Ctrl+C stops`, in orange while background tasks run, which may never end.
 
 Ctrl+L starts a new session, as Claude Code's `/clear` does, and keeps your text in the box, ready to be the new session's first message.
 That is why claudio clears rather than leaving it to a restart: you often decide on a fresh context with the message already written, and Ctrl+L sends it there without retyping it.
-While tasks run in the background, it waits for them to end before it clears, so their ends, and what Claude does with them, stay in the session that started them, and the label row says so in place of what Claude does, as `clear waits for background tasks · Ctrl+K stops`.
-Meanwhile Enter and Ctrl+L wait too, and Ctrl+K stops the tasks, after which the clear goes through.
+While tasks run in the background, it waits for them to end before it clears, so their ends, and what Claude does with them, stay in the session that started them, and the label row says so in place of what Claude does, as `clear waits for background tasks · Ctrl+C stops`, in orange, as for the end.
+Until the new session starts, Enter and Ctrl+L wait too, since a message sent before can still reach the old one, and claudio refuses the questions Claude asks there, whose turn would hold the clear.
 A boundary, `─── cleared ─── · resume with claudio --resume <id>`, ends the old session and starts the new one, and its command resumes the old one, when the old one holds anything to resume.
 When claudio ends, the session closes the same way, with `─── ended ───`.
 Closing the terminal, or `kill`, ends claudio at once, without that boundary.
 Claude Code then finishes its turn and its background tasks on its own, out of view.
 Text you send that starts with `/` reaches Claude as written, so a `/clear` you type is a message like any other.
+
+Ctrl+C stops what the label row says the session waits on, and Ctrl+K stops everything; where the two are the same, as while a clear or the end waits, both act, and Ctrl+C does so on its first press, as [clig.dev](https://clig.dev/#signals-and-control-characters) asks of a program that waits for its clean-up.
 
 ## Commands
 
@@ -328,7 +331,7 @@ Every line claudio writes in its own words follows these rules: in the conversat
 - Put first what the user scans for: the subject of the line, then what it did, like `Claude Code 1.2.4 runs, but 1.2.3 is the one checked to work`, as [Chrome DevTools' guide](https://chromium.googlesource.com/devtools/devtools-frontend/+/main/docs/styleguide/ux/writing.md) asks.
 - Name only what the user knows: Claude, Claude Code, the session, the context, a call, a key, and none of claudio's workings, like a kind of message, unless the user can act on it, as [clig.dev](https://clig.dev/#output) asks. claudio never names itself in a session, since it is what the user looks through, but does in a command the user can run, like `claudio --resume <id>`, where its name is part of the command.
 - Use one word for one thing, everywhere, the word this README uses: Claude's questions are refused, never denied, as [NN/g](https://www.nngroup.com/articles/consistency-and-standards/) asks.
-- Show what a key does where the user looks, while the key matters, so they recognize it rather than recall it, and leave it out otherwise: `Ctrl+K stops` while a clear waits. [NN/g](https://www.nngroup.com/articles/recognition-and-recall/) asks for recognition over recall, and [for shortcuts](https://www.nngroup.com/articles/ui-accelerators/) "readily available, yet easy to ignore".
+- Show what a key does where the user looks, while the key matters, so they recognize it rather than recall it, and leave it out otherwise: `Ctrl+C stops` while a clear waits. [NN/g](https://www.nngroup.com/articles/recognition-and-recall/) asks for recognition over recall, and [for shortcuts](https://www.nngroup.com/articles/ui-accelerators/) "readily available, yet easy to ignore".
 - Name a key with a capital, and a shortcut with + and no spaces, like Enter, Esc, Space and Ctrl+O, as [Microsoft's style guide](https://learn.microsoft.com/style-guide/a-z-word-list-term-collections/term-collections/keys-keyboard-shortcuts) does, then say what it does from a verb, in 2 to 4 words, like `Enter again sends`, as [NN/g](https://www.nngroup.com/articles/ui-copy/) keeps a command's label.
 - Give a command to run after its verb, like `resume with claudio --resume <id>`, so it ends the line, where it is copied whole. [clig.dev](https://clig.dev/#output) asks to suggest the commands to run next, and the order is claudio's own.
 - Keep a line to one idea, in the active voice, with plain words and no filler, like please or sorry, as [Chrome DevTools' guide](https://chromium.googlesource.com/devtools/devtools-frontend/+/main/docs/styleguide/ux/writing.md) asks.

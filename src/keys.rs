@@ -37,7 +37,7 @@ pub struct Answering {
     pub view: Box<View>,
 }
 
-/// Has nothing more to say, while Claude finishes its work, which only Ctrl+C stops.
+/// Has nothing more to say, while Claude finishes its work, which Ctrl+C and Ctrl+K stop.
 #[derive(Clone)]
 pub struct Ending;
 
@@ -266,8 +266,15 @@ pub struct Stakes<'a> {
     pub is_working: bool,
     /// The ids of the tasks that run in the background.
     pub background: &'a [String],
-    /// Whether a clear waits for the tasks in the background to end.
-    pub is_clear_waiting: bool,
+    /// Whether a clear the user asked for has not reached the new session yet.
+    pub is_clear_pending: bool,
+}
+
+impl Stakes<'_> {
+    /// What a clear or the end waits for.
+    fn wait(self) -> Wait {
+        Wait::of(self.is_working, !self.background.is_empty())
+    }
 }
 
 /// What a key does to the session, decided once, from the state the key is judged against. It
@@ -304,13 +311,19 @@ pub enum OnMessage {
         stop: Option<TurnStop>,
         tasks: Vec<String>,
     },
+    /// Forces the pending clear: stops the turn that runs, if any, as `stop` says, and the
+    /// tasks in the background that the clear waits for, by their ids, after which it clears.
+    ForceClear {
+        stop: Option<TurnStop>,
+        tasks: Vec<String>,
+    },
     /// Clears the context, which holds something, after stopping the turn that runs, if any.
     /// Whether it waits for the tasks in the background is decided as it goes, rather than with
     /// the key, under the lock that notes the tasks, so the end of the last one never slips past
     /// it.
     Clear(Option<TurnStop>),
-    /// Ends the session's input.
-    End,
+    /// Ends the session's input, after which the session waits for what `Wait` names.
+    End(Wait),
 }
 
 /// What a key does while the user answers the question the question view shows.
@@ -325,15 +338,70 @@ pub enum OnQuestion {
     },
     /// Refuses the request the question view shows, which `refusal` names, like `the call`.
     Refuse { refusal: String },
-    /// Ends the session's input.
-    End,
+    /// Ends the session's input, after which the session waits for what `Wait` names.
+    End(Wait),
 }
 
-/// What a key does once the user has nothing more to say, while Claude finishes its work.
+/// What a clear or the end waits for before it goes through, which the label row names. The
+/// tasks in the background come first, since a task may never end, like a server, while a turn
+/// does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Wait {
+    Nothing,
+    Turn,
+    BackgroundTasks,
+}
+
+impl Wait {
+    /// The wait while Claude `is_working` on a turn and while tasks run in the background, as
+    /// `has_background_tasks` says.
+    pub fn of(is_working: bool, has_background_tasks: bool) -> Self {
+        if has_background_tasks {
+            Wait::BackgroundTasks
+        } else if is_working {
+            Wait::Turn
+        } else {
+            Wait::Nothing
+        }
+    }
+
+    /// Whether the wait may never end without the user's key, as for a task like a server,
+    /// while Claude's turn ends by itself.
+    pub fn may_never_end(self) -> bool {
+        self == Wait::BackgroundTasks
+    }
+
+    /// What the session waits for, like `Claude's turn`, none for `Nothing`.
+    pub fn work(self) -> Option<&'static str> {
+        match self {
+            Wait::Nothing => None,
+            Wait::Turn => Some("Claude's turn"),
+            Wait::BackgroundTasks => Some("background tasks"),
+        }
+    }
+
+    /// The loss of the end, which names the wait, so the user knows that the session goes on
+    /// after the second press.
+    fn loss(self) -> String {
+        match self.work() {
+            Some(work) => format!("ends the session after {work}"),
+            None => "ends the session".to_string(),
+        }
+    }
+}
+
+/// What a key does once the user has nothing more to say, while Claude finishes its work. Each
+/// stops Claude's turn and its background tasks, after which Claude Code exits.
 #[derive(Clone, Debug, PartialEq)]
 pub enum OnEnding {
-    /// Stops Claude's turn and its background tasks, after which Claude Code exits.
-    StopClaudeCode,
+    /// Ctrl+C, which stops what the end waits for, as the label row names it.
+    Stop,
+    /// Ctrl+K, which stops everything, `tasks` background tasks among it, and names them as it
+    /// does while the session goes on, with the turn that runs, if any, as `stop` says.
+    Kill {
+        stop: Option<TurnStop>,
+        tasks: usize,
+    },
 }
 
 /// What a message or a command sends, never empty, and what the state made it lose.
@@ -365,23 +433,10 @@ impl Effect for OnMessage {
             OnMessage::Stop(TurnStop::Refuse(count)) => {
                 Some(format!("refuses {}", questions(*count)))
             }
-            OnMessage::Stop(TurnStop::Interrupt) => None,
-            // A task that ends in the background leaves its work undone, which no message brings
-            // back the way it brings back a turn
-            OnMessage::Kill { stop, tasks } => {
-                let stop = match stop {
-                    Some(TurnStop::Refuse(count)) => {
-                        format!("refuses {} and stops ", questions(*count))
-                    }
-                    Some(TurnStop::Interrupt) => "stops claude and ".to_string(),
-                    None => "stops ".to_string(),
-                };
-                let tasks = match tasks.len() {
-                    1 => "1 background task".to_string(),
-                    count => format!("{count} background tasks"),
-                };
-                Some(format!("{stop}{tasks}"))
-            }
+            // A forced clear's label row names what it stops before the press, and a pending
+            // clear leaves no question waiting
+            OnMessage::Stop(TurnStop::Interrupt) | OnMessage::ForceClear { .. } => None,
+            OnMessage::Kill { stop, tasks } => Some(kill_loss(*stop, tasks.len())),
             // The session goes on in a new one, but the clear loses the cache, and what the turn
             // that runs would have done
             OnMessage::Clear(stop) => {
@@ -392,7 +447,7 @@ impl Effect for OnMessage {
                 };
                 Some(format!("{stop}clears the context"))
             }
-            OnMessage::End => Some("ends the session".to_string()),
+            OnMessage::End(wait) => Some(wait.loss()),
         }
     }
 }
@@ -408,7 +463,7 @@ impl Effect for OnQuestion {
                 .or_else(|| leaves_out_own.then(|| "leaves out your own answer".to_string())),
             // The question view refuses the request it shows, with each of its questions
             OnQuestion::Refuse { refusal } => Some(format!("refuses {refusal}")),
-            OnQuestion::End => Some("ends the session".to_string()),
+            OnQuestion::End(wait) => Some(wait.loss()),
         }
     }
 }
@@ -416,10 +471,27 @@ impl Effect for OnQuestion {
 impl Effect for OnEnding {
     fn loss(&self) -> Option<String> {
         match self {
-            // Claude Code stops its background tasks too, and exits
-            OnEnding::StopClaudeCode => Some("stops claude".to_string()),
+            // The label row names what the press stops
+            OnEnding::Stop => None,
+            OnEnding::Kill { stop, tasks } => Some(kill_loss(*stop, *tasks)),
         }
     }
+}
+
+/// The loss of stopping `tasks` background tasks, after the turn that runs, if any, as `stop`
+/// says, like `stops claude and 2 background tasks`. A task that ends in the background leaves
+/// its work undone, which no message brings back the way it brings back a turn.
+fn kill_loss(stop: Option<TurnStop>, tasks: usize) -> String {
+    let stop = match stop {
+        Some(TurnStop::Refuse(count)) => format!("refuses {} and stops ", questions(count)),
+        Some(TurnStop::Interrupt) => "stops claude and ".to_string(),
+        None => "stops ".to_string(),
+    };
+    let tasks = match tasks {
+        1 => "1 background task".to_string(),
+        count => format!("{count} background tasks"),
+    };
+    format!("{stop}{tasks}")
 }
 
 impl Sending {
@@ -459,12 +531,18 @@ impl Reading for Writing {
         };
         // The box keeps its text for the session the clear starts, as a clear always does
         let sending =
-            (!stakes.text.trim().is_empty() && !stakes.is_clear_waiting).then(|| Sending {
+            (!stakes.text.trim().is_empty() && !stakes.is_clear_pending).then(|| Sending {
                 text: stakes.text.to_string(),
                 refused: self.waiting,
                 is_cold: stakes.held == Held::Cold,
             });
         match action {
+            Action::Session(SessionKey::Stop) if stakes.is_clear_pending => {
+                Some(OnMessage::ForceClear {
+                    stop: turn_stop,
+                    tasks: stakes.background.to_vec(),
+                })
+            }
             Action::Session(SessionKey::Stop) => turn_stop.map(OnMessage::Stop),
             Action::Session(SessionKey::Kill) if stakes.background.is_empty() => {
                 turn_stop.map(OnMessage::Stop)
@@ -473,11 +551,11 @@ impl Reading for Writing {
                 stop: turn_stop,
                 tasks: stakes.background.to_vec(),
             }),
-            Action::Session(SessionKey::End) => Some(OnMessage::End),
+            Action::Session(SessionKey::End) => Some(OnMessage::End(stakes.wait())),
             // A context that holds nothing yet has nothing to clear, and one that a clear waits for
             // clears then
             Action::Session(SessionKey::Clear) => (stakes.held != Held::Nothing
-                && !stakes.is_clear_waiting)
+                && !stakes.is_clear_pending)
                 .then_some(OnMessage::Clear(turn_stop)),
             Action::Send => sending.map(OnMessage::Send),
             Action::Run => sending.map(OnMessage::Run),
@@ -506,12 +584,12 @@ impl Reading for Answering {
 
     /// The answer comes from the pick instead, as `OnQuestion::Submit`, since Enter and the keys
     /// that edit and move act through it.
-    fn effect(&self, action: Action, _: Stakes) -> Option<OnQuestion> {
+    fn effect(&self, action: Action, stakes: Stakes) -> Option<OnQuestion> {
         match action {
             Action::Session(SessionKey::Stop) => Some(OnQuestion::Refuse {
                 refusal: self.view.refusal.clone(),
             }),
-            Action::Session(SessionKey::End) => Some(OnQuestion::End),
+            Action::Session(SessionKey::End) => Some(OnQuestion::End(stakes.wait())),
             // The question view shows one request, which Ctrl+C refuses, and the message's line
             // shows the rest of what runs, which Ctrl+K stops there
             Action::Session(
@@ -543,9 +621,16 @@ impl Reading for Ending {
 
     /// Only Ctrl+C and Ctrl+K act, both stopping everything, since stopping the turn alone would
     /// leave Claude Code waiting on its background tasks still.
-    fn effect(&self, action: Action, _: Stakes) -> Option<OnEnding> {
+    fn effect(&self, action: Action, stakes: Stakes) -> Option<OnEnding> {
         match action {
-            Action::Session(SessionKey::Stop | SessionKey::Kill) => Some(OnEnding::StopClaudeCode),
+            Action::Session(SessionKey::Stop) => Some(OnEnding::Stop),
+            Action::Session(SessionKey::Kill) if stakes.background.is_empty() => {
+                Some(OnEnding::Stop)
+            }
+            Action::Session(SessionKey::Kill) => Some(OnEnding::Kill {
+                stop: stakes.is_working.then_some(TurnStop::Interrupt),
+                tasks: stakes.background.len(),
+            }),
             Action::Session(
                 SessionKey::End
                 | SessionKey::Clear
@@ -887,7 +972,7 @@ mod tests {
         held: Held::Warm,
         is_working: false,
         background: &[],
-        is_clear_waiting: false,
+        is_clear_pending: false,
     };
 
     const COLD: Stakes = Stakes {
@@ -904,25 +989,54 @@ mod tests {
     #[test]
     fn ctrl_c_and_ctrl_d_name_what_they_end_and_a_stopped_turn_takes_one_press() {
         let end = Action::Session(SessionKey::End);
+        let working = Stakes {
+            is_working: true,
+            ..WARM
+        };
+        let tasks = ["a".to_string()];
+        let background = Stakes {
+            background: &tasks,
+            ..WARM
+        };
+        let both = Stakes {
+            is_working: true,
+            ..background
+        };
         assert_losses(
             end,
             vec![
                 (writing(0), WARM, Some("ends the session")),
                 (answering(), WARM, Some("ends the session")),
+                (
+                    writing(0),
+                    working,
+                    Some("ends the session after Claude's turn"),
+                ),
+                (
+                    answering(),
+                    working,
+                    Some("ends the session after Claude's turn"),
+                ),
+                (
+                    writing(0),
+                    background,
+                    Some("ends the session after background tasks"),
+                ),
+                (
+                    writing(0),
+                    both,
+                    Some("ends the session after background tasks"),
+                ),
             ],
         );
         let stop = Action::Session(SessionKey::Stop);
-        let working = Stakes {
-            is_working: true,
-            ..WARM
-        };
         assert_losses(
             stop,
             vec![
                 (writing(1), WARM, Some("refuses the question")),
                 (writing(3), WARM, Some("refuses 3 questions")),
                 (answering(), WARM, Some("refuses 2 questions")),
-                (Phase::Ending(Ending), WARM, Some("stops claude")),
+                (Phase::Ending(Ending), WARM, None),
                 (writing(0), working, None),
             ],
         );
@@ -1034,9 +1148,9 @@ mod tests {
     }
 
     #[test]
-    fn a_clear_that_waits_keeps_the_text_and_takes_no_other_clear() {
-        let waiting = Stakes {
-            is_clear_waiting: true,
+    fn a_pending_clear_keeps_the_text_takes_no_other_clear_and_ctrl_c_forces_it() {
+        let pending = Stakes {
+            is_clear_pending: true,
             ..WARM
         };
         for action in [
@@ -1044,17 +1158,46 @@ mod tests {
             Action::Run,
             Action::Session(SessionKey::Clear),
         ] {
-            assert_eq!(Writing { waiting: 0 }.effect(action, waiting), None);
+            assert_eq!(Writing { waiting: 0 }.effect(action, pending), None);
         }
         let tasks = ["a".to_string()];
         let background = Stakes {
             background: &tasks,
-            ..waiting
+            ..pending
         };
-        assert!(matches!(
-            Writing { waiting: 0 }.effect(Action::Session(SessionKey::Kill), background),
-            Some(OnMessage::Kill { .. })
-        ));
+        let force = Writing { waiting: 0 }.effect(Action::Session(SessionKey::Stop), background);
+        assert_eq!(
+            force,
+            Some(OnMessage::ForceClear {
+                stop: None,
+                tasks: tasks.to_vec(),
+            })
+        );
+        assert_eq!(force.and_then(|effect| effect.loss()), None);
+        let kill = Writing { waiting: 0 }.effect(Action::Session(SessionKey::Kill), background);
+        assert_eq!(
+            kill.and_then(|effect| effect.loss()).as_deref(),
+            Some("stops 1 background task")
+        );
+    }
+
+    #[test]
+    fn the_ending_stops_with_ctrl_c_at_once_and_with_ctrl_k_as_it_does_elsewhere() {
+        let tasks = ["a".to_string()];
+        let working = Stakes {
+            is_working: true,
+            background: &tasks,
+            ..WARM
+        };
+        let ending = |key, stakes| Ending.effect(Action::Session(key), stakes);
+        assert_eq!(ending(SessionKey::Stop, working), Some(OnEnding::Stop));
+        assert_eq!(ending(SessionKey::Kill, WARM), Some(OnEnding::Stop));
+        assert_eq!(
+            ending(SessionKey::Kill, working)
+                .and_then(|effect| effect.loss())
+                .as_deref(),
+            Some("stops claude and 1 background task")
+        );
     }
 
     #[test]

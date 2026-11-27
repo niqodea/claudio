@@ -98,7 +98,7 @@ impl Setup {
 }
 
 /// The checks, by setup.
-pub const CHECKS: [Check; 21] = [
+pub const CHECKS: [Check; 22] = [
     Check {
         name: "a slow permission check is told",
         setup: Setup::Hermetic(a_slow_permission_check_is_told),
@@ -134,6 +134,10 @@ pub const CHECKS: [Check; 21] = [
     Check {
         name: "a clear follows the turn on the last task's end",
         setup: Setup::Hermetic(a_clear_follows_the_turn_on_the_last_tasks_end),
+    },
+    Check {
+        name: "a clear leaves a background task running",
+        setup: Setup::Hermetic(a_clear_leaves_a_background_task_running),
     },
     Check {
         name: "a stop of a task that ended succeeds",
@@ -964,6 +968,42 @@ pub fn clear_after_task() -> Vec<String> {
         .collect()
 }
 
+/// Seen with Claude Code: a `/clear` leaves a command that runs in the background running, and
+/// the command's end comes in the session the clear started, where Claude answers it in a turn.
+///
+/// The check runs Claude Code against [`crate::fake_api`], with [`HELD_COMMAND`], so the clear
+/// comes while the command runs on every run.
+pub(crate) fn a_clear_leaves_a_background_task_running(fake: &Hermetic) -> Result<(), String> {
+    let lines = fake.run(|run| {
+        run.send_message(HELD_TASK_MESSAGE)?;
+        let mut lines = run.read_until(is_turn_end)?;
+        run.send(&protocol::Command::Run { command: "clear" })?;
+        lines.extend(run.read_until(is_turn_end)?);
+        run.release()?;
+        lines.extend(run.read_until(is_no_background_task)?);
+        Ok(lines)
+    })?;
+    compare(
+        &["reset", "task ended", "turn end"],
+        &lines,
+        &cleared_background_task(),
+    )
+}
+
+/// What Claude Code writes for [`HELD_TASK_MESSAGE`], then a `/clear` while the command runs,
+/// then the command's end and Claude's turn on it, in the new session.
+#[must_use]
+pub fn cleared_background_task() -> Vec<String> {
+    let turn_end = json!({"type": "result", "subtype": "success"}).to_string();
+    let (turn, end) = held_task();
+    (turn.into_iter())
+        .chain([turn_end.clone()])
+        .chain(clear("first", "second"))
+        .chain(end)
+        .chain([turn_end])
+        .collect()
+}
+
 /// Seen with Claude Code: `stop_task` succeeds for a task that ended already, as for one
 /// that runs, so a stop sent as the task ends never fails.
 pub(crate) fn a_stop_of_a_task_that_ended_succeeds(fake: &Hermetic) -> Result<(), String> {
@@ -1006,6 +1046,10 @@ fn is_tool_use(line: &Value) -> bool {
     line["type"] == "assistant" && line["message"]["content"][0]["type"] == "tool_use"
 }
 
+fn is_turn_end(line: &Value) -> bool {
+    line["type"] == "result"
+}
+
 fn is_tool_result(line: &Value) -> bool {
     line["type"] == "user" && line["message"]["content"][0]["type"] == "tool_result"
 }
@@ -1024,6 +1068,13 @@ pub const LONG_BACKGROUND_TASK_MESSAGE: &str = "Run sleep 30 in the background w
 pub const MOVED_CALL_MESSAGE: &str = "Run sleep 4 with Bash";
 pub const STOPPED_CALL_MESSAGE: &str = "Run sleep 5 with Bash";
 pub const REPLY_OK_MESSAGE: &str = "Reply ok";
+
+/// A command that runs until the check creates [`RELEASE_FILE`] in the directory Claude Code runs
+/// in, so the check, rather than a sleep, decides when the command ends.
+pub const HELD_COMMAND: &str = "until [ -e released ]; do sleep 0.1; done";
+pub const RELEASE_FILE: &str = "released";
+pub const HELD_TASK_MESSAGE: &str =
+    "Run until [ -e released ]; do sleep 0.1; done in the background with Bash";
 
 /// The message that has Claude stop the task `task_id` with `TaskStop`.
 #[must_use]
@@ -1111,6 +1162,21 @@ pub fn background_task(status: &str) -> Vec<String> {
         "failed" => ("sleep 1; exit 3", "failed with exit code 3"),
         _ => panic!("a background task ends as completed or failed, not as {status}"),
     };
+    task_lines(command, status, summary)
+}
+
+/// What Claude Code writes for [`HELD_TASK_MESSAGE`]: the lines up to the call's result, and the
+/// lines of the command's end, without the turns' other lines.
+#[must_use]
+pub fn held_task() -> (Vec<String>, Vec<String>) {
+    let mut turn = task_lines(HELD_COMMAND, "completed", "completed (exit code 0)");
+    let end = turn.split_off(4);
+    (turn, end)
+}
+
+/// What Claude Code writes for a command that Claude runs in the background and that ends with
+/// `status`, which `summary` words: the lines up to the call's result, then those of its end.
+fn task_lines(command: &str, status: &str, summary: &str) -> Vec<String> {
     let description = format!("Run {command}");
     let call = "toolu_background";
     let lines = [
@@ -1608,7 +1674,7 @@ struct Run {
     lines: Receiver<Value>,
     /// How long a read or a wait waits for Claude Code.
     timeout: Duration,
-    _directory: TempDir,
+    directory: TempDir,
 }
 
 impl Run {
@@ -1655,7 +1721,7 @@ impl Run {
             input,
             lines,
             timeout,
-            _directory: directory,
+            directory,
         })
     }
 
@@ -1676,6 +1742,12 @@ impl Run {
 
     fn close_input(&mut self) {
         self.input = None;
+    }
+
+    /// Ends [`HELD_COMMAND`].
+    fn release(&self) -> Result<(), String> {
+        std::fs::write(self.directory.path().join(RELEASE_FILE), "")
+            .map_err(|error| format!("cannot release the held command: {error}"))
     }
 
     /// Sends a `/clear`, and returns what Claude Code writes until it exits, its input closed.
@@ -1760,5 +1832,19 @@ impl Drop for Run {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_held_task_message_runs_the_held_command_until_its_release() {
+        assert_eq!(
+            HELD_TASK_MESSAGE,
+            format!("Run {HELD_COMMAND} in the background with Bash")
+        );
+        assert!(HELD_COMMAND.contains(&format!("-e {RELEASE_FILE} ")));
     }
 }

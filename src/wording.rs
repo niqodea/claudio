@@ -240,7 +240,7 @@ pub fn answer_label(question: &str) -> Line {
     ])
 }
 
-/// What a key does, which the user can learn from where they look, like `Ctrl+K stops`.
+/// What a key does, which the user can learn from where they look, like `Ctrl+C stops`.
 pub struct Hint<'a> {
     /// The key's name, with a capital and + between the keys of a shortcut, like `Ctrl+O`.
     key: &'a str,
@@ -352,13 +352,13 @@ mod tests {
 
     #[test]
     fn a_hint_follows_its_text_as_a_part() {
-        let stop = Hint::new("Ctrl+K", "stops");
+        let stop = Hint::new("Ctrl+C", "stops");
         let edit = Hint::new("Enter", "edits");
         assert_eq!(
             with_hint("clear waits", &stop),
-            "clear waits · Ctrl+K stops"
+            "clear waits · Ctrl+C stops"
         );
-        assert_eq!(hints(&[stop, edit]), "Ctrl+K stops · Enter edits");
+        assert_eq!(hints(&[stop, edit]), "Ctrl+C stops · Enter edits");
     }
 
     #[test]

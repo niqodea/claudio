@@ -36,7 +36,7 @@ use crate::context::COLD_COLOR;
 use crate::cut::{self, ScreenRow, Whole, cut, cut_before_hidden, cut_path};
 use crate::keys::{
     self, Action, Answering, BLOCK_ROWS, Confirmed, Effect, Ending, Field, Gate, Mark, OnEnding,
-    OnMessage, OnQuestion, PREVIEWED_QUESTION_ROWS, Phase, Reading, SessionKey, Tone, View,
+    OnMessage, OnQuestion, PREVIEWED_QUESTION_ROWS, Phase, Reading, SessionKey, Tone, View, Wait,
     Writing,
 };
 use crate::label::{KeyState, MainLabel, Progress, QuestionLabel};
@@ -618,7 +618,7 @@ impl InputLine {
             held: shared.context.held(Instant::now()),
             is_working: shared.output.status() != Status::Idle,
             background,
-            is_clear_waiting: shared.is_clear_waiting,
+            is_clear_pending: shared.is_clear_pending(),
         }
     }
 
@@ -1019,20 +1019,26 @@ impl InputLine {
             }
         }
         let columns = self.columns();
-        let label_row = (layout.label_rows > 0).then(|| self.label_row());
+        // Once the session ends, it takes no text, so the box goes, and the cursor and the mode's
+        // letter with it
+        let takes_text = lock(&self.shared).phase.takes_text();
+        let label_row = (layout.label_rows > 0).then(|| self.label_row(takes_text));
         let label_height = usize::from(label_row.is_some());
+        let input_rows = if takes_text { layout.input_rows } else { 0 };
         // The command line takes the box's last rows, as many as it fills, and the message keeps
         // the rows above it
-        let command = (self.command_line.as_ref()).map(|line| {
-            command_rows(
-                &line.text(),
-                line.cursor(),
-                columns,
-                usize::from(layout.input_rows),
-            )
-        });
+        let command = (self.command_line.as_ref())
+            .filter(|_| takes_text)
+            .map(|line| {
+                command_rows(
+                    &line.text(),
+                    line.cursor(),
+                    columns,
+                    usize::from(input_rows),
+                )
+            });
         let command_height = command.as_ref().map_or(0, |(rows, ..)| rows.len());
-        let message_rows = layout.input_rows - u16::try_from(command_height).unwrap_or(0);
+        let message_rows = input_rows - u16::try_from(command_height).unwrap_or(0);
         let (mut box_rows, cursor_row_in_box, cursor_column_in_box) = if message_rows > 0 {
             self.box_rows(message_rows)
         } else {
@@ -1053,8 +1059,15 @@ impl InputLine {
             Vec::new()
         };
         let to_u16 = |index: usize| u16::try_from(index).unwrap_or(u16::MAX);
-        let cursor_line = open_rows.len() + label_height + cursor_row_in_box;
-        let cursor_column = cursor_column_in_box;
+        // The next frame climbs from the cursor's row, so with no box the hidden cursor stays on
+        // the last live row
+        let (cursor_line, cursor_column) = if takes_text {
+            let line = open_rows.len() + label_height + cursor_row_in_box;
+            (line, cursor_column_in_box)
+        } else {
+            let live_rows = open_rows.len() + label_height + box_rows.len();
+            (live_rows.saturating_sub(1), 0)
+        };
         let lines: Vec<ScreenRow> = (open_rows.into_iter())
             .chain(label_row)
             .chain(box_rows)
@@ -1075,7 +1088,9 @@ impl InputLine {
             lines_above_cursor: to_u16(cursor_line),
             width: layout.width,
         };
-        put!(out, cursor_style(self.cursor_shape()), SHOW_CURSOR);
+        if takes_text {
+            put!(out, cursor_style(self.cursor_shape()), SHOW_CURSOR);
+        }
         out.extend(END_FRAME.as_bytes());
         write_out(&out)
     }
@@ -1157,10 +1172,11 @@ impl InputLine {
 
     /// The label row: the label, and at its end where the keys go, on the bar, in one row, laid
     /// out by `MainLabel`, so a half-typed command moves nothing.
-    fn label_row(&self) -> ScreenRow {
+    fn label_row(&self, takes_text: bool) -> ScreenRow {
         let columns = self.columns();
+        let key_state = takes_text.then(|| self.key_state());
         MainLabel::new(columns)
-            .row(&self.label, &self.key_state())
+            .row(&self.label, key_state.as_ref())
             .on(YOURS)
     }
 
@@ -1304,69 +1320,17 @@ impl InputLine {
         }
     }
 
-    /// The label row: for a message, `››` with the budgets, then the activity, each a group set
-    /// apart by `│`, since items close together read as one. Within a group, what needs the user
-    /// goes first, and among the budgets the narrowest, since attention leans left. What holds
-    /// for the whole session is on the left, and what holds for the moment, like where the keys
-    /// go, at the right end. Each indicator keeps a fixed width, one character for a count, and
-    /// text of varying width goes last, so a change moves nothing the eye learned to find.
-    /// The budgets are the context's level, marked and red
-    /// on a cold cache, and the levels of the plan's usage limits. The activity is the questions
-    /// that wait, in the color of a warning since only the user moves them on, the tasks that run
-    /// in the background, the subagents that run, and then what the session waits on, the user
-    /// or Claude, `idle` too, so the user always sees whether it is their turn. For an answer,
-    /// the question; at the end, the work Claude still does.
-    /// Ref: <https://www.nngroup.com/articles/gestalt-proximity/>
-    /// Ref: <https://www.nngroup.com/articles/visibility-system-status/>
-    /// Ref: <https://www.nngroup.com/articles/horizontal-attention-leans-left/>
-    /// Ref: <https://code.visualstudio.com/api/ux-guidelines/status-bar>, which puts what holds
-    /// for the workspace on the left and what holds for the moment on the right
-    /// Ref: <https://web.dev/articles/cls>, which counts a layout shift only when "existing
-    /// elements change their start position"
+    /// The label row: for a message and at the end, `››` with the budgets, then the activity,
+    /// as `main_label` lays them out, and for an answer, the question.
     fn make_label(&self) -> Line {
         let shared = lock(&self.shared);
         match &shared.phase {
             Phase::Writing(Writing { waiting }) => {
-                let (now, wall_now) = (Instant::now(), SystemTime::now());
-                let level = shared.context.level();
-                let is_cold = shared.context.is_cold(now);
-                // On a cold cache, the space in front of T becomes *, which shows the cold cache
-                // without color and keeps the label's width
-                let (cold_mark, level_color) = if is_cold {
-                    ("*", COLD_COLOR)
-                } else {
-                    (" ", SUBDUED_ON_BAR)
-                };
-                let budgets = Line::from([
-                    Span::new(format!("{cold_mark}T{}", show_level(level)), level_color),
-                    " ".into(),
-                    limit_indicator('S', shared.limits.session(wall_now).map(limit_level)),
-                    " ".into(),
-                    limit_indicator('W', shared.limits.week(wall_now).map(limit_level)),
-                ]);
-                // A subagent counts in A alone, as it runs in the background or not
-                let commands = (shared.work.listed().iter())
-                    .filter(|task| task.kind() == Kind::Command)
-                    .count();
-                let activity = Line::from([
-                    waiting_indicator(*waiting),
-                    " ".into(),
-                    background_indicator(commands),
-                    " ".into(),
-                    agents_indicator(shared.work.running_subagents(None)),
-                ]);
-                let waits_on = waits_on(
-                    self.gate.label(),
-                    shared.is_clear_waiting,
-                    self.asking.clone(),
-                    describe_work(&shared.output, &shared.work),
-                );
-                Line::from(marks())
-                    .with_line(budgets)
-                    .with(Span::new(GROUP, SUBDUED_ON_BAR))
-                    .with_line(activity)
-                    .with(Span::new(GROUP, SUBDUED_ON_BAR))
-                    .with(waits_on.span())
+                let held = shared.is_clear_pending().then(|| Held {
+                    action: HeldAction::Clear,
+                    wait: wait(&shared),
+                });
+                self.main_label(&shared, *waiting, held)
             }
             Phase::Answering(Answering { view }) => {
                 let hint = self.answering_hint(view);
@@ -1379,28 +1343,74 @@ impl InputLine {
                 .with_line(hint)
             }
             Phase::Ending(Ending) => {
-                let output = &shared.output;
-                let tasks = shared.work.listed();
-                let descriptions: Vec<&str> =
-                    tasks.iter().map(|task| task.description.as_str()).collect();
-                let background = (!descriptions.is_empty())
-                    .then(|| format!("background: {}", descriptions.join(", ")));
-                let parts: Vec<String> = ["ending".to_string()]
-                    .into_iter()
-                    .chain(describe_work(output, &shared.work))
-                    .chain(background)
-                    .collect();
-                let mut label = Line::from([
-                    marks(),
-                    Span::new(format!(" {}", parts.join(GROUP)), SUBDUED_ON_BAR),
-                ]);
-                if let Some(confirmation) = self.confirmation() {
-                    label.push(Span::new(GROUP, SUBDUED_ON_BAR));
-                    label.push(confirmation);
-                }
-                label
+                let held = Held {
+                    action: HeldAction::End,
+                    wait: wait(&shared),
+                };
+                self.main_label(&shared, 0, Some(held))
             }
         }
+    }
+
+    /// The main screen's label row: the budgets, then the activity, each a group set apart by
+    /// `│`, since items close together read as one. Within a group, what needs the user goes
+    /// first, and among the budgets the narrowest, since attention leans left. What holds for the
+    /// whole session is on the left, and what holds for the moment, like where the keys go, at
+    /// the right end. Each indicator keeps a fixed width, one character for a count, and text of
+    /// varying width goes last, so a change moves nothing the eye learned to find. The budgets
+    /// are the context's level, marked and red on a cold cache, and the levels of the plan's
+    /// usage limits. The activity is the `waiting` questions, in the color of a warning since
+    /// only the user moves them on, the tasks that run in the background, the subagents that
+    /// run, and then what the session waits on: the user's `held` action, the user, or Claude,
+    /// `idle` too, so the user always sees whether it is their turn.
+    /// Ref: <https://www.nngroup.com/articles/gestalt-proximity/>
+    /// Ref: <https://www.nngroup.com/articles/visibility-system-status/>
+    /// Ref: <https://www.nngroup.com/articles/horizontal-attention-leans-left/>
+    /// Ref: <https://code.visualstudio.com/api/ux-guidelines/status-bar>, which puts what holds
+    /// for the workspace on the left and what holds for the moment on the right
+    /// Ref: <https://web.dev/articles/cls>, which counts a layout shift only when "existing
+    /// elements change their start position"
+    fn main_label(&self, shared: &Shared, waiting: usize, held: Option<Held>) -> Line {
+        let (now, wall_now) = (Instant::now(), SystemTime::now());
+        let level = shared.context.level();
+        let is_cold = shared.context.is_cold(now);
+        // On a cold cache, the space in front of T becomes *, which shows the cold cache
+        // without color and keeps the label's width
+        let (cold_mark, level_color) = if is_cold {
+            ("*", COLD_COLOR)
+        } else {
+            (" ", SUBDUED_ON_BAR)
+        };
+        let budgets = Line::from([
+            Span::new(format!("{cold_mark}T{}", show_level(level)), level_color),
+            " ".into(),
+            limit_indicator('S', shared.limits.session(wall_now).map(limit_level)),
+            " ".into(),
+            limit_indicator('W', shared.limits.week(wall_now).map(limit_level)),
+        ]);
+        // A subagent counts in A alone, as it runs in the background or not
+        let commands = (shared.work.listed().iter())
+            .filter(|task| task.kind() == Kind::Command)
+            .count();
+        let activity = Line::from([
+            waiting_indicator(waiting),
+            " ".into(),
+            background_indicator(commands),
+            " ".into(),
+            agents_indicator(shared.work.running_subagents(None)),
+        ]);
+        let waits_on = waits_on(
+            self.gate.label(),
+            held,
+            self.asking.clone(),
+            describe_work(&shared.output, &shared.work),
+        );
+        Line::from(marks())
+            .with_line(budgets)
+            .with(Span::new(GROUP, SUBDUED_ON_BAR))
+            .with_line(activity)
+            .with(Span::new(GROUP, SUBDUED_ON_BAR))
+            .with(waits_on.span())
     }
 }
 
@@ -1713,11 +1723,12 @@ fn agents_indicator(agents: usize) -> Span {
 #[derive(Debug, PartialEq)]
 enum WaitsOn {
     /// The user to finish an action of theirs: a key that waits for its second press, or a
-    /// clear that waits for the tasks in the background.
+    /// `Held` action whose wait may never end without the user's key.
     YourAction(String),
     /// The user to answer the oldest request of Claude's that waits.
     YourAnswer(String),
-    /// Claude, which works, or waits for the user's next message as `idle`.
+    /// Claude, which works, or waits for the user's next message as `idle`, or a `Held` action
+    /// whose wait ends by itself.
     Claude(String),
 }
 
@@ -1732,22 +1743,55 @@ impl WaitsOn {
     }
 }
 
+/// An action of the user's, a clear or the end, that waits for Claude's work, `wait`, before it
+/// goes through.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Held {
+    action: HeldAction,
+    wait: Wait,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum HeldAction {
+    Clear,
+    End,
+}
+
+impl Held {
+    /// What the action waits for and the key that forces it, like `clear waits for background
+    /// tasks · Ctrl+C stops`. B and A count the tasks, so the text holds no count and keeps its
+    /// width.
+    fn text(self) -> String {
+        let action = match self.action {
+            HeldAction::Clear => "clear",
+            HeldAction::End => "end",
+        };
+        let work = self.wait.work().unwrap_or("Claude Code");
+        with_hint(
+            &format!("{action} waits for {work}"),
+            &Hint::new("Ctrl+C", "stops"),
+        )
+    }
+}
+
 /// What the session waits on: the first of `WaitsOn`'s variants that holds, in their order. A
-/// key that waits for its second press, `second_press`, comes before a clear that waits, since
-/// the key is the user's latest. `asking` is the oldest request that waits, and `work` what
-/// Claude does, none while it is idle.
+/// key that waits for its second press, `second_press`, comes before a `held` action, since the
+/// key is the user's latest. `asking` is the oldest request that waits, and `work` what Claude
+/// does, none while it is idle.
 fn waits_on(
     second_press: Option<String>,
-    is_clear_waiting: bool,
+    held: Option<Held>,
     asking: Option<String>,
     work: Option<String>,
 ) -> WaitsOn {
     if let Some(second_press) = second_press {
         WaitsOn::YourAction(second_press)
-    } else if is_clear_waiting {
-        // B and A count the tasks, so the text holds no count and keeps its width
-        let stop = Hint::new("Ctrl+K", "stops");
-        WaitsOn::YourAction(with_hint("clear waits for background tasks", &stop))
+    } else if let Some(held) = held {
+        if held.wait.may_never_end() {
+            WaitsOn::YourAction(held.text())
+        } else {
+            WaitsOn::Claude(held.text())
+        }
     } else if let Some(asking) = asking {
         WaitsOn::YourAnswer(asking)
     } else {
@@ -2138,6 +2182,14 @@ fn escape() -> KeyEvent {
     KeyEvent::new(KeyCode::Escape, Modifiers::NONE)
 }
 
+/// What a clear or the end waits for, as Claude works and tasks run.
+fn wait(shared: &Shared) -> Wait {
+    Wait::of(
+        shared.output.status() != Status::Idle,
+        !shared.work.listed().is_empty(),
+    )
+}
+
 /// What Claude does, none while it waits for the user, which names a call by `work`.
 fn describe_work(output: &Output, work: &Work) -> Option<String> {
     match output.status() {
@@ -2163,26 +2215,62 @@ mod tests {
         let press = || Some("Ctrl+L again clears the context".to_string());
         let asking = || Some("asking to run Bash".to_string());
         let work = || Some("running Bash #03".to_string());
+        let clear = || Some(held(HeldAction::Clear, Wait::BackgroundTasks));
         assert_eq!(
-            waits_on(press(), true, asking(), work()),
+            waits_on(press(), clear(), asking(), work()),
             WaitsOn::YourAction("Ctrl+L again clears the context".to_string())
         );
         assert_eq!(
-            waits_on(None, true, asking(), work()),
-            WaitsOn::YourAction("clear waits for background tasks · Ctrl+K stops".to_string())
+            waits_on(None, clear(), asking(), work()),
+            WaitsOn::YourAction("clear waits for background tasks · Ctrl+C stops".to_string())
         );
         assert_eq!(
-            waits_on(None, false, asking(), work()),
+            waits_on(None, None, asking(), work()),
             WaitsOn::YourAnswer("asking to run Bash".to_string())
         );
         assert_eq!(
-            waits_on(None, false, None, work()),
+            waits_on(None, None, None, work()),
             WaitsOn::Claude("running Bash #03".to_string())
         );
         assert_eq!(
-            waits_on(None, false, None, None),
+            waits_on(None, None, None, None),
             WaitsOn::Claude("idle".to_string())
         );
+    }
+
+    #[test]
+    fn a_held_action_names_its_wait_and_waits_on_the_user_only_for_background_tasks() {
+        let waits = |action, wait| waits_on(None, Some(held(action, wait)), None, None);
+        assert_eq!(
+            waits(HeldAction::End, Wait::BackgroundTasks),
+            WaitsOn::YourAction("end waits for background tasks · Ctrl+C stops".to_string())
+        );
+        assert_eq!(
+            waits(HeldAction::End, Wait::Turn),
+            WaitsOn::Claude("end waits for Claude's turn · Ctrl+C stops".to_string())
+        );
+        assert_eq!(
+            waits(HeldAction::Clear, Wait::Turn),
+            WaitsOn::Claude("clear waits for Claude's turn · Ctrl+C stops".to_string())
+        );
+        assert_eq!(
+            waits(HeldAction::End, Wait::Nothing),
+            WaitsOn::Claude("end waits for Claude Code · Ctrl+C stops".to_string())
+        );
+        let second_press = Some("Ctrl+K again stops 1 background task".to_string());
+        assert_eq!(
+            waits_on(
+                second_press,
+                Some(held(HeldAction::End, Wait::BackgroundTasks)),
+                None,
+                None
+            ),
+            WaitsOn::YourAction("Ctrl+K again stops 1 background task".to_string())
+        );
+    }
+
+    fn held(action: HeldAction, wait: Wait) -> Held {
+        Held { action, wait }
     }
 
     #[test]

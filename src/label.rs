@@ -55,7 +55,8 @@ impl KeyState {
 }
 
 /// The main screen's label row: the label, then where the keys go, at the row's end, which the
-/// row keeps while the label has a column.
+/// row keeps while the label has a column, empty while no keys go anywhere, as once the session
+/// ends.
 pub struct MainLabel {
     columns: NonZeroUsize,
     label: usize,
@@ -78,11 +79,13 @@ impl MainLabel {
         }
     }
 
-    pub fn row(&self, label: &Line, key_state: &KeyState) -> ScreenRow {
+    pub fn row(&self, label: &Line, key_state: Option<&KeyState>) -> ScreenRow {
         let mut row = fill(label, self.label);
         if self.has_key_state {
             row.push(" ");
-            row.append(key_state.fill());
+            row.append(
+                key_state.map_or_else(|| fill(&Line::default(), KEY_STATE_COLUMNS), KeyState::fill),
+            );
         }
         ScreenRow::cut(&row, self.columns)
     }
@@ -269,10 +272,17 @@ mod tests {
     #[test]
     fn a_half_typed_command_moves_nothing_on_the_main_label_row() {
         let layout = MainLabel::new(columns(30));
-        let idle = plain(&layout.row(&Line::from("›› idle"), &key_state("", 'N')));
-        let typing = plain(&layout.row(&Line::from("›› idle"), &key_state("d2", 'N')));
+        let idle = plain(&layout.row(&Line::from("›› idle"), Some(&key_state("", 'N'))));
+        let typing = plain(&layout.row(&Line::from("›› idle"), Some(&key_state("d2", 'N'))));
         assert_eq!(idle, "›› idle                      N");
         assert_eq!(typing, "›› idle                  d2  N");
+    }
+
+    #[test]
+    fn the_main_label_row_keeps_the_columns_of_no_key_state_empty() {
+        let layout = MainLabel::new(columns(30));
+        let row = layout.row(&Line::from("›› ending and more text than fits"), None);
+        assert_eq!(plain(&row), "›› ending and more text…      ");
     }
 
     #[test]
@@ -368,8 +378,10 @@ mod tests {
         for count in 1..80 {
             let question = QuestionLabel::new(columns(count), 20)
                 .row(&Line::from("›› Code style │ hint"), &full);
-            let main = MainLabel::new(columns(count))
-                .row(&Line::from("›› T1 S1 W2 │ idle"), &key_state("d", 'N'));
+            let main = MainLabel::new(columns(count)).row(
+                &Line::from("›› T1 S1 W2 │ idle"),
+                Some(&key_state("d", 'N')),
+            );
             assert_eq!(question.line().width(), count, "{}", plain(&question));
             assert_eq!(main.line().width(), count, "{}", plain(&main));
         }

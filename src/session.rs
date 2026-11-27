@@ -100,8 +100,15 @@ impl<'a> Conversation<'a> {
                     let shared = &mut *guard;
                     let agent = (ask.subagent.as_ref()).map(|id| shared.work.name_subagent(id));
                     let full_view_lines = shared.output.show_ask(&shared.work, &ask);
+                    let is_clear_pending = shared.is_clear_pending();
                     drop(guard);
-                    questions.add(*ask, agent, full_view_lines);
+                    // The question belongs to the session the clear ends, and its turn would hold
+                    // the clear, which Claude Code runs only once the turn ends
+                    if is_clear_pending {
+                        self.reply(&ask, Answer::Deny)?;
+                    } else {
+                        questions.add(*ask, agent, full_view_lines);
+                    }
                     continue;
                 }
                 Some(Input::Unsupported {
@@ -176,7 +183,9 @@ impl<'a> Conversation<'a> {
                 self.run_command(&sending.text)?;
             }
             OnMessage::Stop(stop) => self.stop_turn(*stop, questions)?,
-            OnMessage::Kill { stop, tasks } => {
+            // Stopping is all a forced clear needs: a held clear goes once its tasks end, and a
+            // sent one once the turn ends
+            OnMessage::Kill { stop, tasks } | OnMessage::ForceClear { stop, tasks } => {
                 if let Some(stop) = stop {
                     self.stop_turn(*stop, questions)?;
                 }
@@ -195,7 +204,7 @@ impl<'a> Conversation<'a> {
                 }
                 self.clear()?;
             }
-            OnMessage::End => return Ok(None),
+            OnMessage::End(_) => return Ok(None),
         }
         Ok(Some((text, false)))
     }
@@ -287,7 +296,7 @@ impl<'a> Conversation<'a> {
                 self.reply(&ask, Answer::Deny)?;
                 questions.open()
             }
-            OnQuestion::End => return Ok(None),
+            OnQuestion::End(_) => return Ok(None),
         }))
     }
 
@@ -430,7 +439,7 @@ impl Ending<'_> {
             }
             match self.session.input.read_ending()? {
                 Outcome::Act(_, confirmed) => match confirmed.effect() {
-                    OnEnding::StopClaudeCode => self.interrupt()?,
+                    OnEnding::Stop | OnEnding::Kill { .. } => self.interrupt()?,
                 },
                 // Claude Code fails what it asks once its input closed, and the ending takes no
                 // other key
